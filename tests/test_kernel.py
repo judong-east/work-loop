@@ -129,6 +129,66 @@ class WorkloopKernelTest(unittest.TestCase):
         self.assertEqual(decision.next_state, TaskStatus.READY_FOR_PLAN)
 
 
+class ContextFileTest(unittest.TestCase):
+    def _create(self, tmp: str, context_files: list[Path]):
+        kernel = WorkloopKernel(Path(tmp))
+        return kernel.create_task(
+            title="文件上下文",
+            goal="验证文件注入",
+            raw_input="目标：验证文件注入。验收标准：通过测试。",
+            context_files=context_files,
+        )
+
+    def _first_context(self, tmp: str, task) -> dict:
+        import json
+
+        path = Path(tmp) / "tasks" / task.task_id / task.context_refs[0]
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_single_file_becomes_section_with_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp) / "需求.md"
+            doc.write_text("# 需求\n识别重复订单。\n", encoding="utf-8")
+            task = self._create(tmp, [doc])
+
+            self.assertEqual(task.status, TaskStatus.READY_FOR_PLAN)
+            context = self._first_context(tmp, task)
+            file_sections = [s for s in context["sections"] if s["name"].startswith("file:")]
+            self.assertEqual(len(file_sections), 1)
+            self.assertIn("识别重复订单", file_sections[0]["content"])
+            self.assertTrue(file_sections[0]["source_refs"][0]["uri"].startswith("file://"))
+
+    def test_directory_is_collected_with_pruning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "proj"
+            (src / "app").mkdir(parents=True)
+            (src / "__pycache__").mkdir()
+            (src / "app" / "main.py").write_text("print('主入口')\n", encoding="utf-8")
+            (src / "__pycache__" / "x.pyc").write_text("cache", encoding="utf-8")
+            task = self._create(tmp, [src])
+
+            context = self._first_context(tmp, task)
+            names = [s["name"] for s in context["sections"]]
+            self.assertIn("file:app/main.py", names)
+            self.assertNotIn("file:__pycache__/x.pyc", names)
+
+    def test_missing_path_is_reported_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = self._create(tmp, [Path(tmp) / "不存在.md"])
+            context = self._first_context(tmp, task)
+            self.assertTrue(any("不存在" in item for item in context["missing_context"]))
+
+    def test_long_file_is_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp) / "大文件.txt"
+            doc.write_text("字" * 30000, encoding="utf-8")
+            task = self._create(tmp, [doc])
+            context = self._first_context(tmp, task)
+            section = [s for s in context["sections"] if s["name"].startswith("file:")][0]
+            self.assertIn("已截断", section["content"])
+            self.assertLess(len(section["content"]), 21000)
+
+
 if __name__ == "__main__":
     unittest.main()
 

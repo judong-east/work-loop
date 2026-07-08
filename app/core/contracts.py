@@ -208,6 +208,29 @@ def evaluation_result_from_dict(data: dict[str, Any]) -> EvaluationResult:
 
 
 @dataclass
+class FileChange:
+    path: str  # 相对 workspace 的正斜杠路径
+    content: str = ""  # action=delete 时忽略
+    action: str = "write"  # write | delete
+
+
+@dataclass
+class CodeReviewIssue:
+    file: str
+    message: str
+    line: int = 0
+    severity: Severity = Severity.WARNING
+    suggestion: str = ""
+
+
+@dataclass
+class CodeReviewResult:
+    verdict: str  # pass | revise | block
+    issues: list[CodeReviewIssue] = field(default_factory=list)
+    summary: str = ""
+
+
+@dataclass
 class ModelProfile:
     name: str
     provider: str
