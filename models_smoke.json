@@ -1,0 +1,13 @@
+{
+  "profiles": [
+    {"name": "plan-fake",   "provider": "fake", "model": "fake-plan"},
+    {"name": "exec-fake",   "provider": "fake", "model": "fake-exec"},
+    {"name": "review-fake", "provider": "fake", "model": "fake-review"}
+  ],
+  "roles": {
+    "planner": "plan-fake",
+    "executor": "exec-fake",
+    "reviewer": "review-fake",
+    "default": "exec-fake"
+  }
+}
