@@ -38,6 +38,10 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.profiles["plan-a"].model, "model-a")
             self.assertEqual(config.roles["default"], "exec-b")
 
+    def test_missing_config_file_has_friendly_error(self) -> None:
+        with self.assertRaisesRegex(FileNotFoundError, "模型配置文件"):
+            load_routing_config(Path("no-such-models.json"))
+
     def test_missing_default_role_raises(self) -> None:
         data = json.loads(json.dumps(VALID))
         del data["roles"]["default"]
@@ -108,40 +112,80 @@ CLI_PROFILE = ModelProfile(
 
 
 class CliBackendTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from app.models.backends.cli_backend import clear_task_cancel
+        clear_task_cancel("T")
+
+    def fake_process(self, returncode: int = 0, stdout: str = "答案", stderr: str = ""):
+        process = mock.Mock()
+        process.returncode = returncode
+        process.poll.return_value = returncode
+        process.communicate.return_value = (stdout, stderr)
+        return process
+
     def test_command_rendering_and_success(self) -> None:
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="答案", stderr="")
-        with mock.patch("app.models.backends.cli_backend.subprocess.run", return_value=completed) as run:
+        process = self.fake_process(stdout="答案")
+        with mock.patch("app.models.backends.cli_backend.subprocess.Popen", return_value=process) as popen:
             response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="你好"))
-        run.assert_called_once()
-        args, kwargs = run.call_args
+        popen.assert_called_once()
+        args, kwargs = popen.call_args
         self.assertEqual(args[0], ["some-cli", "-p", "你好", "--model", "model-x"])
         self.assertFalse(kwargs.get("shell", False))
-        self.assertEqual(kwargs["timeout"], 7)
+        process.communicate.assert_called_once_with(timeout=7)
         self.assertTrue(response.succeeded)
         self.assertEqual(response.text, "答案")
 
+    def test_windows_cmd_shim_is_resolved_via_which(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "node_modules" / "pkg" / "tool.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("", encoding="utf-8")
+            cmd = root / "some-cli.cmd"
+            cmd.write_text('@ECHO OFF\n"%dp0%\\node_modules\\pkg\\tool.exe" %*\n', encoding="utf-8")
+            process = self.fake_process(stdout="答案")
+            with mock.patch("app.models.backends.cli_backend.shutil.which", return_value=str(cmd)) as which, mock.patch(
+                "app.models.backends.cli_backend.subprocess.Popen", return_value=process
+            ) as popen:
+                response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="p"))
+        which.assert_called_once_with("some-cli")
+        self.assertEqual(Path(popen.call_args[0][0][0]), exe)
+        self.assertTrue(response.succeeded)
+
     def test_nonzero_exit_is_failure(self) -> None:
-        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="炸了")
-        with mock.patch("app.models.backends.cli_backend.subprocess.run", return_value=completed):
+        process = self.fake_process(returncode=1, stdout="", stderr="炸了")
+        with mock.patch("app.models.backends.cli_backend.subprocess.Popen", return_value=process):
             response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="p"))
         self.assertFalse(response.succeeded)
         self.assertIn("炸了", response.error)
 
     def test_timeout_is_failure(self) -> None:
-        with mock.patch(
-            "app.models.backends.cli_backend.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="x", timeout=7),
-        ):
+        process = self.fake_process()
+        process.communicate.side_effect = [subprocess.TimeoutExpired(cmd="x", timeout=7), ("", "")]
+        with mock.patch("app.models.backends.cli_backend.subprocess.Popen", return_value=process):
             response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="p"))
         self.assertFalse(response.succeeded)
         self.assertIn("超时", response.error)
+        process.kill.assert_called_once()
 
     def test_empty_output_is_failure(self) -> None:
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="  \n", stderr="")
-        with mock.patch("app.models.backends.cli_backend.subprocess.run", return_value=completed):
+        process = self.fake_process(stdout="  \n")
+        with mock.patch("app.models.backends.cli_backend.subprocess.Popen", return_value=process):
             response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="p"))
         self.assertFalse(response.succeeded)
         self.assertIn("空输出", response.error)
+
+    def test_cancel_task_processes_marks_invocation_interrupted(self) -> None:
+        from app.models.backends.cli_backend import cancel_task_processes, clear_task_cancel
+
+        clear_task_cancel("T")
+        cancel_task_processes("T")
+        with mock.patch("app.models.backends.cli_backend.subprocess.Popen") as popen:
+            response = CliBackend().invoke(CLI_PROFILE, ModelRequest(task_id="T", role="planner", prompt="p"))
+        popen.assert_not_called()
+        self.assertFalse(response.succeeded)
+        self.assertIn("中断", response.error)
+        clear_task_cancel("T")
 
 
 def routing_with_models(executor_model: str, reviewer_model: str) -> ModelRoutingConfig:

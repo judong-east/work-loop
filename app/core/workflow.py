@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from app.callbacks.event_bus import EventBus
@@ -20,18 +21,21 @@ from app.core.contracts import (
     TaskState,
     TaskStatus,
     context_pack_from_dict,
+    to_plain,
     utc_now,
 )
 from app.decision.decision_engine import DecisionEngine
-from app.evaluation.evaluators import ContextEvaluator
+from app.evaluation.evaluators import ContextEvaluator, DeliveryGateEvaluator
+from app.memory.experience_store import ExperienceStore
 from app.models.backends.base import ModelBackend
 from app.models.router import ModelRouter
 from app.policy.policy_checker import PolicyChecker
 from app.tools.workspace import CHANGE_ACTIONS, Workspace
 
 REVIEW_VERDICTS = {"pass", "revise", "block"}
+MAX_INJECTED_EXPERIENCES = 10
 
-PLANNER_PROMPT = "你是计划制定者。\n任务：{title}\n目标：{goal}\n上下文：\n{context}\n请输出实现该目标的分步计划。"
+PLANNER_PROMPT = "你是计划制定者。\n任务：{title}\n目标：{goal}\n{experience}上下文：\n{context}\n请输出实现该目标的分步计划。"
 EXECUTOR_PROMPT = (
     "你是执行者。\n目标：{goal}\n计划：\n{plan}\n当前工作区文件：\n{files}\n{review_feedback}"
     "请产出达成目标所需的文件变更。只输出 JSON："
@@ -141,6 +145,7 @@ class WorkloopKernel:
         self.policy_checker = PolicyChecker()
         self.decision_engine = DecisionEngine()
         self.events = EventBus(self.store)
+        self.experience = ExperienceStore(root / "memory")
 
     def create_task(
         self,
@@ -194,6 +199,7 @@ class WorkloopKernel:
         self.store.write_json(task_dir / answer_ref, answer_pack)
         task.context_refs.append(answer_ref)
         self.events.publish(task, "clarification.answered", {"answer_prefix": answer[:200]})
+        self._suggest_experience(task, f"人工澄清（任务：{task.title}）：{answer}", kind="clarification")
 
         # 门禁用合并视图重评：段落取全部历史上下文；缺失/冲突只看新答复的分析，
         # 人工答复是权威输入，旧告警视为已被回应。
@@ -263,11 +269,14 @@ class WorkloopKernel:
 
         router = ModelRouter(routing)
         context_text = self._load_context_text(task_dir)
-        counter = [0]
+        counter = [self._last_model_call_index(task_dir)]
 
         plan = self._invoke_role(
             task, router, backends, "planner", self._next_index(counter),
-            PLANNER_PROMPT.format(title=task.title, goal=task.goal, context=context_text),
+            PLANNER_PROMPT.format(
+                title=task.title, goal=task.goal, context=context_text,
+                experience=self._experience_text(),
+            ),
         )
         if not plan.succeeded:
             return self._fail(task, "planner", plan)
@@ -337,6 +346,7 @@ class WorkloopKernel:
                 task.transition(TaskStatus.DONE)
                 self.events.publish(task, "review.passed", {"round": round_index, "issues": issue_payload})
                 return self._finish(task)
+            self._capture_review_experience(task, review)
             if review.verdict == "block":
                 task.transition(TaskStatus.CLARIFICATION_REQUIRED)
                 self.events.publish(task, "review.rejected", {"round": round_index, "verdict": "block", "issues": issue_payload})
@@ -365,6 +375,23 @@ class WorkloopKernel:
             return []
         boundary = policy or default_policy_boundary()
         task_dir = self.store.task_dir(task_id)
+
+        # 交付门禁：验证记录（独立审核 pass）与交付说明齐备才允许写回真实目录。
+        # 正常流程 done 必经审核通过，这里防御的是工件缺失/状态被手工改动的情况。
+        review_data = self._load_review_data(task, task_dir)
+        gate = DeliveryGateEvaluator().evaluate(
+            test_passed=review_data.get("verdict") == "pass",
+            has_delivery_note=bool(review_data.get("summary") or task.artifacts.get("plan")),
+        )
+        gate_ref = "evaluations/delivery_gate.json"
+        self.store.write_json(task_dir / gate_ref, gate)
+        if gate_ref not in task.evaluations:
+            task.evaluations.append(gate_ref)
+        self.store.save_task(task)
+        if gate.blocking:
+            issues = [issue.message for issue in gate.issues]
+            self.store.append_audit(task_id, "delivery.blocked", {"dest": str(dest), "issues": issues})
+            raise ValueError("交付门禁未通过：" + "；".join(issues))
 
         target = Workspace(Path(dest))
         check = target.validate(changes, boundary, self.policy_checker)
@@ -419,6 +446,41 @@ class WorkloopKernel:
             sections.extend(pack.sections)
         return sections
 
+    def _load_review_data(self, task: TaskState, task_dir: Path) -> dict:
+        review_ref = task.artifacts.get("code_review", "")
+        if not review_ref or not (task_dir / review_ref).exists():
+            return {}
+        try:
+            data = json.loads((task_dir / review_ref).read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _experience_text(self) -> str:
+        records = self.experience.approved()
+        if not records:
+            return ""
+        recent = sorted(records, key=lambda record: record.updated_at, reverse=True)[:MAX_INJECTED_EXPERIENCES]
+        lines = [f"- {record.text}" for record in recent]
+        return "历史任务沉淀的经验（人工批准，规划时参考）：\n" + "\n".join(lines) + "\n"
+
+    def _suggest_experience(self, task: TaskState, text: str, kind: str) -> None:
+        record = self.experience.suggest(text, kind=kind, source_task=task.task_id)
+        if record is not None:
+            self.events.publish(
+                task, "experience.suggested",
+                {"experience_id": record.experience_id, "kind": record.kind, "text_prefix": record.text[:120]},
+            )
+
+    def _capture_review_experience(self, task: TaskState, review: CodeReviewResult) -> None:
+        # 保守捕获：只把 blocker 级审核问题沉淀为候选经验，避免噪声淹没评审队列
+        for issue in review.issues:
+            if issue.severity is not Severity.BLOCKER:
+                continue
+            location = f"{issue.file}：" if issue.file else ""
+            suffix = f"（建议：{issue.suggestion}）" if issue.suggestion else ""
+            self._suggest_experience(task, f"审核经验：{location}{issue.message}{suffix}", kind="review_pattern")
+
     def _load_workspace_base(self, task_dir: Path) -> dict[str, str]:
         base_path = task_dir / "artifacts" / "workspace_base.json"
         if not base_path.exists():
@@ -439,6 +501,17 @@ class WorkloopKernel:
             for section in data.get("sections", []):
                 parts.append(f"[{section.get('name', '')}] {section.get('content', '')}")
         return "\n".join(parts) if parts else "（无上下文）"
+
+    def _last_model_call_index(self, task_dir: Path) -> int:
+        calls_dir = task_dir / "artifacts" / "model_calls"
+        if not calls_dir.is_dir():
+            return 0
+        indexes = []
+        for path in calls_dir.iterdir():
+            match = re.match(r"^(\d+)-", path.name)
+            if match:
+                indexes.append(int(match.group(1)))
+        return max(indexes, default=0)
 
     def _next_index(self, counter: list[int]) -> int:
         counter[0] += 1
@@ -477,6 +550,26 @@ class WorkloopKernel:
         prompt: str,
     ) -> ModelResponse:
         profile, fallback = router.resolve(role)
+        call_dir = self.store.task_dir(task.task_id) / "artifacts" / "model_calls" / f"{call_index}-{role}"
+        started_at = utc_now()
+        call_meta = {
+            "call_index": call_index,
+            "role": role,
+            "status": "running",
+            "profile": profile.name,
+            "profile_name": profile.name,
+            "provider": profile.provider,
+            "model": profile.model,
+            "command": list(profile.command),
+            "fallback": fallback,
+            "started_at": started_at,
+            "finished_at": "",
+            "duration_seconds": None,
+            "succeeded": None,
+            "error": "",
+        }
+        self.store.write_text(call_dir / "prompt.txt", prompt)
+        self.store.write_json(call_dir / "meta.json", call_meta)
         self.store.append_audit(
             task.task_id, "model.routed",
             {"role": role, "profile": profile.name, "model": profile.model, "fallback": fallback},
@@ -489,12 +582,29 @@ class WorkloopKernel:
                 error=f"没有可用的 {profile.provider} 后端。",
             )
         else:
-            response = backend.invoke(profile, ModelRequest(task_id=task.task_id, role=role, prompt=prompt))
+            try:
+                response = backend.invoke(profile, ModelRequest(task_id=task.task_id, role=role, prompt=prompt))
+            except Exception as error:  # noqa: BLE001 - 记录为模型失败，避免运行状态悬挂
+                response = ModelResponse(
+                    text="", profile_name=profile.name, model=profile.model,
+                    duration_seconds=0.0, succeeded=False,
+                    error=f"模型后端异常：{error}",
+                )
 
-        call_dir = self.store.task_dir(task.task_id) / "artifacts" / "model_calls" / f"{call_index}-{role}"
-        self.store.write_text(call_dir / "prompt.txt", prompt)
         self.store.write_text(call_dir / "response.txt", response.text if response.succeeded else response.error)
-        self.store.write_json(call_dir / "meta.json", response)
+        final_meta = dict(call_meta)
+        final_meta.update(to_plain(response))
+        final_meta.update(
+            {
+                "status": "succeeded" if response.succeeded else "failed",
+                "profile": profile.name,
+                "provider": profile.provider,
+                "fallback": fallback,
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        )
+        self.store.write_json(call_dir / "meta.json", final_meta)
 
         event_type = "model.invoked" if response.succeeded else "model.failed"
         self.events.publish(

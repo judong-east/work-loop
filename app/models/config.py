@@ -7,7 +7,13 @@ from app.core.contracts import ModelProfile, ModelRoutingConfig
 
 
 def load_routing_config(path: Path) -> ModelRoutingConfig:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    config_path = Path(path)
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"模型配置文件 {config_path} 不存在。离线试跑可用 models_smoke.json，"
+            "真实模型请参照 README 创建 models.json。"
+        )
+    data = json.loads(config_path.read_text(encoding="utf-8"))
 
     profiles: dict[str, ModelProfile] = {}
     for item in data.get("profiles", []):

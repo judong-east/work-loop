@@ -38,6 +38,28 @@ def review_json(verdict: str, issues: list[dict] | None = None) -> str:
     return json.dumps({"verdict": verdict, "summary": "结论", "issues": issues or []}, ensure_ascii=False)
 
 
+class InspectingFakeBackend(FakeBackend):
+    def __init__(self, task_dir: Path, responses: dict[str, str | list[str]] | None = None):
+        super().__init__(responses=responses)
+        self.task_dir = task_dir
+        self.seen_statuses: list[tuple[str, str]] = []
+
+    def invoke(self, profile: ModelProfile, request):
+        calls_dir = self.task_dir / "artifacts" / "model_calls"
+        role_dirs = sorted(
+            calls_dir.glob(f"*-{request.role}"),
+            key=lambda path: int(path.name.split("-", 1)[0]),
+        )
+        meta = json.loads((role_dirs[-1] / "meta.json").read_text(encoding="utf-8"))
+        self.seen_statuses.append((request.role, meta["status"]))
+        return super().invoke(profile, request)
+
+
+class RaisingBackend(FakeBackend):
+    def invoke(self, profile: ModelProfile, request):
+        raise RuntimeError("boom")
+
+
 class TaskLoadTest(unittest.TestCase):
     def test_task_state_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,6 +113,23 @@ class RunModelLoopTest(unittest.TestCase):
             self.assertEqual(result.artifacts["plan"], "artifacts/plan.md")
             self.assertEqual(result.artifacts["diff"], "artifacts/rounds/1/changes.diff")
             self.assertEqual(result.artifacts["code_review"], "artifacts/rounds/1/review.json")
+
+    def test_model_call_meta_is_running_before_backend_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = WorkloopKernel(Path(tmp))
+            task = make_ready_task(kernel)
+            task_dir = Path(tmp) / "tasks" / task.task_id
+            backend = InspectingFakeBackend(task_dir, responses={"executor": changes_json()})
+            result = kernel.run_model_loop(task.task_id, make_routing(), {"fake": backend})
+
+            self.assertEqual(result.status, TaskStatus.DONE)
+            self.assertEqual(
+                backend.seen_statuses,
+                [("planner", "running"), ("executor", "running"), ("reviewer", "running")],
+            )
+            meta = json.loads((task_dir / "artifacts" / "model_calls" / "2-executor" / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "succeeded")
+            self.assertEqual(meta["role"], "executor")
 
     def test_revise_then_pass_iterates_twice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +209,33 @@ class RunModelLoopFailureTest(unittest.TestCase):
             meta = json.loads((call_dir / "meta.json").read_text(encoding="utf-8"))
             self.assertFalse(meta["succeeded"])
 
+    def test_retry_after_failure_keeps_previous_model_call_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = WorkloopKernel(Path(tmp))
+            task = make_ready_task(kernel)
+            first = kernel.run_model_loop(task.task_id, make_routing(), {"fake": RaisingBackend()})
+            self.assertEqual(first.status, TaskStatus.FAILED)
+
+            failed_task = kernel.store.load_task(task.task_id)
+            failed_task.transition(TaskStatus.READY_FOR_PLAN)
+            kernel.store.save_task(failed_task)
+
+            second = kernel.run_model_loop(
+                task.task_id,
+                make_routing(),
+                {"fake": FakeBackend(responses={"executor": changes_json()})},
+            )
+            self.assertEqual(second.status, TaskStatus.DONE)
+
+            calls_dir = Path(tmp) / "tasks" / task.task_id / "artifacts" / "model_calls"
+            self.assertTrue((calls_dir / "1-planner" / "meta.json").exists())
+            self.assertTrue((calls_dir / "2-planner" / "meta.json").exists())
+            self.assertTrue((calls_dir / "3-executor" / "meta.json").exists())
+            self.assertTrue((calls_dir / "4-reviewer" / "meta.json").exists())
+            first_meta = json.loads((calls_dir / "1-planner" / "meta.json").read_text(encoding="utf-8"))
+            second_meta = json.loads((calls_dir / "2-planner" / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(first_meta["status"], "failed")
+            self.assertEqual(second_meta["status"], "succeeded")
     def test_executor_unparseable_output_requires_clarification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             kernel = WorkloopKernel(Path(tmp))
@@ -227,6 +293,19 @@ class RunModelLoopFailureTest(unittest.TestCase):
             task = make_ready_task(kernel)
             result = kernel.run_model_loop(task.task_id, make_routing(), {})  # 无任何后端
             self.assertEqual(result.status, TaskStatus.FAILED)
+
+    def test_backend_exception_marks_call_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = WorkloopKernel(Path(tmp))
+            task = make_ready_task(kernel)
+            result = kernel.run_model_loop(task.task_id, make_routing(), {"fake": RaisingBackend()})
+            self.assertEqual(result.status, TaskStatus.FAILED)
+            meta = json.loads(
+                (Path(tmp) / "tasks" / task.task_id / "artifacts" / "model_calls" / "1-planner" / "meta.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(meta["status"], "failed")
+            self.assertIn("boom", meta["error"])
 
 
 class SeededWorkspaceTest(unittest.TestCase):

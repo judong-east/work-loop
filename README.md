@@ -118,6 +118,51 @@ Notes:
   `deny_paths` against the destination, and asks for interactive confirmation —
   this is the human gate for the restricted `write_file` semantics. Consider
   delivering to a clean directory first to inspect the result.
+- Before writing anything, `deliver` also runs a delivery gate
+  (`DeliveryGateEvaluator`): the recorded review verdict must be `pass` and a
+  delivery note (plan / review summary) must exist. The gate result is persisted
+  to `evaluations/delivery_gate.json`. This defends against missing or tampered
+  artifacts even when `state.json` says `done`.
+
+## Experience Memory (review-first, cross-task)
+
+The kernel keeps a persistent experience store in `memory/experience.jsonl`
+(append-only JSONL; records fold by id, latest wins — history is never rewritten).
+
+- Capture: blocker-severity review issues and human clarification answers are
+  automatically suggested as `pending` experiences (deduplicated against all
+  history, including rejected ones).
+- Review-first: nothing is injected silently. Only experiences you approve are
+  injected — bounded to the 10 most recent — into the planner prompt of later
+  tasks. Human-authored entries are approved directly.
+
+```powershell
+python -m app.cli memory                                  # 列出 待评审/已批准/已驳回
+python -m app.cli memory --approve EXP-xxx                # 批准
+python -m app.cli memory --reject EXP-xxx                 # 驳回
+python -m app.cli memory --add "所有 API 返回必须带 request_id"   # 手工录入（直接生效）
+```
+
+## Web Console
+
+```powershell
+python -m app.cli serve          # http://127.0.0.1:8765 （Ctrl+C 停止）
+python -m app.cli serve --port 9000
+```
+
+The console is a zero-dependency local page (stdlib `http.server` + vanilla JS,
+binds `127.0.0.1` only). It covers the whole workflow visually:
+
+- create tasks (title/goal/requirement + context file paths)
+- a pipeline stepper per task (requirement gate -> plan -> execute -> review -> deliver)
+- start `run-loop` with one click (models config + optional seed directory);
+  the loop runs in a background thread and the page polls progress per round
+- inspect plan, per-round diffs (colored), structured review issues, delivery record
+- answer pending questions (`resume`) in a text box
+- deliver with an explicit red confirm button — the web equivalent of the
+  CLI's interactive `input()` gate for restricted `write_file`
+- an Experience Memory tab to review pending experiences (approve/reject),
+  add manual ones, and see what will be injected into future planning
 
 ## Reliability Rules
 
@@ -127,4 +172,6 @@ Notes:
 - Every decision records action, reason, confidence, and next state.
 - Boundary policy can block execution before any agent or tool acts.
 - Events and audit logs are persisted for replay and debugging.
+- Captured experience stays pending until a human approves it; only approved
+  experience is ever injected into later tasks.
 

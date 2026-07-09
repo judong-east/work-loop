@@ -262,6 +262,29 @@ class ModelRoutingConfig:
     roles: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class ExperienceRecord:
+    text: str
+    kind: str = "manual"  # review_pattern | clarification | manual
+    status: str = "pending"  # pending | approved | rejected
+    source_task: str = ""
+    experience_id: str = field(default_factory=lambda: new_id("EXP"))
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+def experience_record_from_dict(data: dict[str, Any]) -> ExperienceRecord:
+    return ExperienceRecord(
+        text=data["text"],
+        kind=data.get("kind", "manual"),
+        status=data.get("status", "pending"),
+        source_task=data.get("source_task", ""),
+        experience_id=data.get("experience_id", new_id("EXP")),
+        created_at=data.get("created_at", utc_now()),
+        updated_at=data.get("updated_at", utc_now()),
+    )
+
+
 def task_state_from_dict(data: dict[str, Any]) -> TaskState:
     return TaskState(
         title=data["title"],

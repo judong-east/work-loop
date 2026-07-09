@@ -44,6 +44,16 @@ def build_parser() -> argparse.ArgumentParser:
     deliver.add_argument("--yes", action="store_true", help="Skip the interactive confirmation")
     deliver.add_argument("--root", default=".", help="Project root that contains the tasks directory")
 
+    serve = sub.add_parser("serve", help="Start the local web console (binds 127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--root", default=".", help="Project root that contains the tasks directory")
+
+    memory = sub.add_parser("memory", help="List or review the cross-task experience memory")
+    memory.add_argument("--approve", default=None, metavar="EXP_ID", help="Approve a pending experience")
+    memory.add_argument("--reject", default=None, metavar="EXP_ID", help="Reject a pending experience")
+    memory.add_argument("--add", default=None, metavar="TEXT", help="Add a human-authored experience (approved directly)")
+    memory.add_argument("--root", default=".", help="Project root that contains the memory directory")
+
     return parser
 
 
@@ -117,6 +127,44 @@ def main() -> None:
             print(f"deliver 失败：{error}", file=sys.stderr)
             sys.exit(2)
         print(f"已交付 {len(applied)} 项变更到 {args.dest}")
+    elif args.command == "serve":
+        # 局部导入避免 cli <-> web 循环依赖（web.server 复用本模块的 build_backends）
+        from app.web.server import make_server
+
+        server = make_server(root, args.port)
+        print(f"Workloop 控制台已启动：http://127.0.0.1:{server.server_address[1]}（Ctrl+C 停止）")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("已停止。")
+    elif args.command == "memory":
+        store = kernel.experience
+        try:
+            if args.approve:
+                record = store.approve(args.approve)
+                print(f"已批准 {record.experience_id}：{record.text}")
+            elif args.reject:
+                record = store.reject(args.reject)
+                print(f"已驳回 {record.experience_id}")
+            elif args.add:
+                record = store.add_manual(args.add)
+                print(f"已录入 {record.experience_id}（人工经验，直接批准）")
+            else:
+                records = store.list_all()
+                if not records:
+                    print("经验库为空。")
+                for status in ("pending", "approved", "rejected"):
+                    group = [r for r in records if r.status == status]
+                    if not group:
+                        continue
+                    label = {"pending": "待评审", "approved": "已批准", "rejected": "已驳回"}[status]
+                    print(f"{label}（{len(group)}）：")
+                    for record in sorted(group, key=lambda r: r.updated_at, reverse=True):
+                        source = f" ← {record.source_task}" if record.source_task else ""
+                        print(f"- [{record.experience_id}] ({record.kind}) {record.text}{source}")
+        except (ValueError, FileNotFoundError) as error:
+            print(f"memory 失败：{error}", file=sys.stderr)
+            sys.exit(2)
 
 
 if __name__ == "__main__":
