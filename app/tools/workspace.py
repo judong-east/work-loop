@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 from pathlib import Path
 
 from app.core.contracts import FileChange, PolicyBoundary, PolicyCheck
@@ -8,6 +9,18 @@ from app.policy.policy_checker import PolicyChecker
 from app.tools.files import iter_text_files
 
 CHANGE_ACTIONS = {"write", "delete"}
+
+
+class WorkspaceSnapshot(dict[str, str]):
+    def __init__(
+        self,
+        files: dict[str, str],
+        raw_text: dict[str, str],
+        digests: dict[str, str],
+    ):
+        super().__init__(files)
+        self.raw_text = raw_text
+        self.digests = digests
 
 
 def _is_escaping(path: str) -> bool:
@@ -72,28 +85,57 @@ class Workspace:
         for path in sorted(set(base) | set(current)):
             if path not in current:
                 changes.append(FileChange(path=path, action="delete"))
-            elif base.get(path) != current[path]:
+            elif self._changed(base, current, path):
                 changes.append(FileChange(path=path, content=current[path]))
         return changes
 
     def snapshot(self) -> dict[str, str]:
         files: dict[str, str] = {}
+        raw_text: dict[str, str] = {}
+        digests: dict[str, str] = {}
         for path in sorted(self.root.rglob("*")):
+            relative = path.relative_to(self.root).as_posix()
+            if path.is_symlink():
+                try:
+                    target = path.readlink().as_posix()
+                except OSError as error:
+                    target = f"unreadable:{type(error).__name__}"
+                identity = f"（符号链接，目标：{target}）"
+                files[relative] = identity
+                raw_text[relative] = identity
+                digests[relative] = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                continue
             if not path.is_file():
                 continue
-            relative = path.relative_to(self.root).as_posix()
             try:
-                files[relative] = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                files[relative] = "（非文本文件，内容未纳入快照）"
-        return files
+                data = path.read_bytes()
+                decoded = data.decode("utf-8")
+                files[relative] = decoded.replace("\r\n", "\n").replace("\r", "\n")
+                raw_text[relative] = decoded
+                digests[relative] = hashlib.sha256(data).hexdigest()
+            except UnicodeDecodeError:
+                digest = hashlib.sha256(data).hexdigest()
+                identity = f"（非文本文件，sha256:{digest}）"
+                files[relative] = identity
+                raw_text[relative] = identity
+                digests[relative] = digest
+            except OSError as error:
+                identity = f"（文件不可读：{type(error).__name__}）"
+                files[relative] = identity
+                raw_text[relative] = identity
+                digests[relative] = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return WorkspaceSnapshot(files, raw_text, digests)
 
     def diff(self, before: dict[str, str], after: dict[str, str]) -> str:
         chunks: list[str] = []
         for path in sorted(set(before) | set(after)):
-            old, new = before.get(path, ""), after.get(path, "")
-            if old == new:
+            if not self._changed(before, after, path):
                 continue
+            if isinstance(before, WorkspaceSnapshot) and isinstance(after, WorkspaceSnapshot):
+                old = before.raw_text.get(path, "")
+                new = after.raw_text.get(path, "")
+            else:
+                old, new = before.get(path, ""), after.get(path, "")
             lines = difflib.unified_diff(
                 old.splitlines(keepends=True),
                 new.splitlines(keepends=True),
@@ -102,3 +144,10 @@ class Workspace:
             )
             chunks.append("".join(lines))
         return "\n".join(chunks)
+
+    def _changed(self, before: dict[str, str], after: dict[str, str], path: str) -> bool:
+        if path not in before or path not in after:
+            return path in before or path in after
+        if isinstance(before, WorkspaceSnapshot) and isinstance(after, WorkspaceSnapshot):
+            return before.digests.get(path) != after.digests.get(path)
+        return before.get(path) != after.get(path)

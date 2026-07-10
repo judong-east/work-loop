@@ -12,7 +12,7 @@ from tests.git_support import create_repository, run_git
 
 
 class PassingValidator:
-    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan) -> ValidationResult:
+    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
         return ValidationResult(passed=True)
 
 

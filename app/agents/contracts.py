@@ -40,6 +40,7 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL: {AgentTaskStatus.EXECUTING},
     AgentTaskStatus.EXECUTING: {
         AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.BLOCKED,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.VALIDATING: {
@@ -64,6 +65,14 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
 class AgentAccess(str, Enum):
     READ_ONLY = "read_only"
     WORKSPACE_WRITE = "workspace_write"
+
+
+@dataclass
+class AgentPolicy:
+    allowed_commands: list[list[str]] = field(default_factory=list)
+    protected_paths: list[str] = field(default_factory=list)
+    timeout_seconds: int = 300
+    network_allowed: bool = False
 
 
 class ReviewVerdict(str, Enum):
@@ -119,6 +128,8 @@ class ExecutionPlan:
             raise ValueError("steps 不能为空。")
         if not plan.acceptance_criteria:
             raise ValueError("acceptance_criteria 不能为空。")
+        if not plan.required_tests:
+            raise ValueError("required_tests 至少包含一项项目策略允许的确定性验证。")
         if len(set(plan.acceptance_criteria)) != len(plan.acceptance_criteria):
             raise ValueError("acceptance_criteria 不能包含重复项。")
         return plan
@@ -286,6 +297,7 @@ class AgentRequest:
     instructions: str
     workspace: Path
     access: AgentAccess
+    policy: AgentPolicy = field(default_factory=AgentPolicy)
     session_id: str = ""
 
 

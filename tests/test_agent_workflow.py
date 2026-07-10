@@ -33,7 +33,7 @@ def execution_plan() -> dict:
 
 
 class PassingValidator:
-    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan) -> ValidationResult:
+    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
         return ValidationResult(
             passed=True,
             checks=[{"command": "fake-check", "exit_code": 0, "stdout": "ok", "stderr": ""}],
@@ -41,7 +41,7 @@ class PassingValidator:
 
 
 class RaisingValidator:
-    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan) -> ValidationResult:
+    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
         raise RuntimeError("validator boom")
 
 

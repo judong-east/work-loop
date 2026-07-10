@@ -33,10 +33,10 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 从注册项目创建 Git worktree。
 
-- [ ] 项目策略声明验证命令、受保护路径、超时和网络规则。
-- [ ] 执行前后 diff 经过统一策略检查。
-- [ ] 验证保存命令、退出码、输出、错误和耗时。
-- [ ] 必需验证失败时审核不能 `pass`。
+- [x] 项目策略声明验证命令、受保护路径、超时和网络规则。
+- [x] 执行前后 diff 经过统一策略检查。
+- [x] 验证保存命令、退出码、输出、错误和耗时。
+- [x] 必需验证失败时审核不能 `pass`。
 
 ## 使用 Codex CLI 执行和返修
 

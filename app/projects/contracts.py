@@ -17,6 +17,31 @@ class Project:
     schema_version: int = 1
 
 
+@dataclass(frozen=True)
+class ValidationCommand:
+    name: str
+    argv: list[str]
+
+
+@dataclass(frozen=True)
+class ProjectPolicy:
+    validation_commands: list[ValidationCommand]
+    protected_paths: list[str]
+    timeout_seconds: int
+    network: str = "deny"
+    redact_patterns: list[str] = field(default_factory=list)
+    schema_version: int = 1
+
+    def required_commands(self, names: list[str]) -> list[ValidationCommand]:
+        by_name = {command.name: command for command in self.validation_commands}
+        missing = [name for name in names if name not in by_name]
+        if missing:
+            raise ValueError(
+                f"验证命令未获项目策略允许：{', '.join(missing)}"
+            )
+        return [by_name[name] for name in names]
+
+
 def project_from_dict(data: dict[str, Any]) -> Project:
     return Project(
         name=str(data["name"]),

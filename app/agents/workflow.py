@@ -6,6 +6,7 @@ from typing import Protocol
 
 from app.agents.contracts import (
     AgentAccess,
+    AgentPolicy,
     AgentRequest,
     AgentResult,
     AgentTask,
@@ -18,15 +19,24 @@ from app.agents.contracts import (
 )
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
-from app.core.contracts import to_plain, utc_now
-from app.projects.contracts import Project
+from app.core.contracts import PolicyBoundary, PolicyCheck, to_plain, utc_now
+from app.policy.policy_checker import PolicyChecker
+from app.projects.contracts import Project, ProjectPolicy
 from app.projects.git_worktree import GitWorktreeService, PreparedWorktree
+from app.projects.policy import ProjectPolicyLoader
 from app.projects.registry import ProjectRegistry
 from app.tools.workspace import Workspace
+from app.validation.runner import DeterministicValidator
 
 
 class TaskValidator(Protocol):
-    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan) -> ValidationResult: ...
+    def validate(
+        self,
+        task_id: str,
+        workspace: Path,
+        plan: ExecutionPlan,
+        policy: ProjectPolicy,
+    ) -> ValidationResult: ...
 
 
 class AgentWorkflow:
@@ -36,7 +46,7 @@ class AgentWorkflow:
         self,
         root: Path,
         runtime: AgentRuntime,
-        validator: TaskValidator,
+        validator: TaskValidator | None = None,
         max_iterations: int = 3,
         git_worktrees: GitWorktreeService | None = None,
     ):
@@ -46,8 +56,10 @@ class AgentWorkflow:
         self.store = AgentTaskStore(self.root / "tasks")
         self.projects = ProjectRegistry(self.root / "projects")
         self.git_worktrees = git_worktrees or GitWorktreeService()
+        self.policy_loader = ProjectPolicyLoader()
+        self.policy_checker = PolicyChecker()
         self.runtime = runtime
-        self.validator = validator
+        self.validator = validator or DeterministicValidator()
         self.max_iterations = max_iterations
 
     def register_project(
@@ -66,6 +78,7 @@ class AgentWorkflow:
             pass
         else:
             raise ValueError("Workloop 数据根必须位于目标 Git 仓库之外。")
+        self.policy_loader.load(repo_root, config_path)
         return self.projects.add(
             Project(
                 name=name.strip(),
@@ -145,6 +158,7 @@ class AgentWorkflow:
     def analyze(self, task_id: str) -> AgentTask:
         task = self.store.load(task_id)
         self._require_status(task, AgentTaskStatus.DRAFT)
+        policy = self._load_project_policy(task)
         task.transition(AgentTaskStatus.ANALYZING)
         self.store.save(task)
 
@@ -156,6 +170,7 @@ class AgentWorkflow:
                 instructions=self._planner_instructions(task),
                 workspace=self.workspace_path(task.task_id),
                 access=AgentAccess.READ_ONLY,
+                policy=self._agent_policy(policy, []),
                 session_id=task.sessions.get("planner", ""),
             ),
         )
@@ -181,6 +196,11 @@ class AgentWorkflow:
         plan = self._load_plan(task)
         if plan.open_questions:
             raise ValueError("计划仍有未决问题，不能批准。")
+        project = self.projects.get(task.project_id)
+        self.git_worktrees.ensure_prepared(project, self._prepared_from_task(task, project))
+        policy = self.policy_loader.load(self.workspace_path(task.task_id), project.config_path)
+        policy.required_commands(plan.required_tests)
+        effective_agent_policy = self._agent_policy(policy, plan.required_tests)
 
         task.approved_plan_version = task.plan_version
         workspace_path = self.workspace_path(task.task_id)
@@ -189,6 +209,9 @@ class AgentWorkflow:
         base_ref = "artifacts/workspace-base.json"
         self.store.write_json(self.store.task_dir(task.task_id) / base_ref, base)
         task.artifacts["workspace_base"] = base_ref
+        policy_ref = "artifacts/project-policy.json"
+        self.store.write_json(self.store.task_dir(task.task_id) / policy_ref, policy)
+        task.artifacts["project_policy"] = policy_ref
         self.store.save(task)
         review_feedback: ReviewResult | None = None
 
@@ -196,6 +219,11 @@ class AgentWorkflow:
             task.iteration = round_index
             task.transition(AgentTaskStatus.EXECUTING)
             self.store.save(task)
+            round_dir = self.store.task_dir(task.task_id) / "artifacts" / "rounds" / str(task.iteration)
+            before_check = self._check_workspace_policy(workspace, base, policy)
+            self.store.write_json(round_dir / "policy-before.json", before_check)
+            if not before_check.passed:
+                return self._block_policy(task, before_check)
             execution = self._invoke_agent(
                 task,
                 AgentRequest(
@@ -204,6 +232,7 @@ class AgentWorkflow:
                     instructions=self._executor_instructions(plan, review_feedback),
                     workspace=workspace_path,
                     access=AgentAccess.WORKSPACE_WRITE,
+                    policy=effective_agent_policy,
                     session_id=task.sessions.get("executor", ""),
                 ),
             )
@@ -213,7 +242,6 @@ class AgentWorkflow:
                 execution_result = ExecutionResult.from_dict(execution.output)
             except ValueError as error:
                 return self._fail(task, AgentResult(succeeded=False, error=f"执行结果无效：{error}"))
-            round_dir = self.store.task_dir(task.task_id) / "artifacts" / "rounds" / str(task.iteration)
             self.store.write_json(round_dir / "execution.json", execution_result)
             current = workspace.snapshot()
             diff = workspace.diff(base, current)
@@ -221,14 +249,25 @@ class AgentWorkflow:
 
             task.transition(AgentTaskStatus.VALIDATING)
             self.store.save(task)
+            after_check = self._check_workspace_policy(workspace, base, policy)
+            self.store.write_json(round_dir / "policy-after.json", after_check)
+            if not after_check.passed:
+                return self._block_policy(task, after_check)
             try:
-                validation = self.validator.validate(task.task_id, workspace_path, plan)
+                validation = self.validator.validate(task.task_id, workspace_path, plan, policy)
             except Exception as error:  # noqa: BLE001 - validator failures must leave a reloadable task
                 return self._fail(
                     task,
                     AgentResult(succeeded=False, error=f"验证器异常：{error}"),
                 )
             self.store.write_json(round_dir / "validation.json", validation)
+            validation_check = self._check_workspace_policy(workspace, base, policy)
+            self.store.write_json(round_dir / "policy-validation.json", validation_check)
+            current = workspace.snapshot()
+            diff = workspace.diff(base, current)
+            self.store.write_text(round_dir / "changes.diff", diff)
+            if not validation_check.passed:
+                return self._block_policy(task, validation_check)
             if not validation.passed:
                 task.error = validation.error or "必需验证未通过。"
                 task.transition(AgentTaskStatus.BLOCKED)
@@ -245,6 +284,7 @@ class AgentWorkflow:
                     instructions=self._reviewer_instructions(task, plan, diff, validation),
                     workspace=workspace_path,
                     access=AgentAccess.READ_ONLY,
+                    policy=effective_agent_policy,
                     session_id=task.sessions.get("reviewer", ""),
                 ),
             )
@@ -286,6 +326,34 @@ class AgentWorkflow:
         if task.status is not expected:
             raise ValueError(f"任务 {task.task_id} 状态为 {task.status.value}，要求 {expected.value}。")
 
+    def _load_project_policy(self, task: AgentTask) -> ProjectPolicy:
+        project = self.projects.get(task.project_id)
+        return self.policy_loader.load(self.workspace_path(task.task_id), project.config_path)
+
+    def _agent_policy(self, policy: ProjectPolicy, command_names: list[str]) -> AgentPolicy:
+        commands = policy.required_commands(command_names)
+        return AgentPolicy(
+            allowed_commands=[list(command.argv) for command in commands],
+            protected_paths=list(policy.protected_paths),
+            timeout_seconds=policy.timeout_seconds,
+            network_allowed=False,
+        )
+
+    def _check_workspace_policy(
+        self,
+        workspace: Workspace,
+        base: dict[str, str],
+        policy: ProjectPolicy,
+    ) -> PolicyCheck:
+        boundary = PolicyBoundary(deny_paths=list(policy.protected_paths))
+        return workspace.validate(workspace.changes_since(base), boundary, self.policy_checker)
+
+    def _block_policy(self, task: AgentTask, check: PolicyCheck) -> AgentTask:
+        task.error = "；".join(check.issues) or "工作区变更被项目策略阻止。"
+        task.transition(AgentTaskStatus.BLOCKED)
+        self.store.save(task)
+        return task
+
     def _prepared_from_task(self, task: AgentTask, project: Project) -> PreparedWorktree:
         expected_workspace = self.store.workspace_location(task.task_id).resolve()
         actual_workspace = Path(task.workspace).resolve()
@@ -312,6 +380,7 @@ class AgentWorkflow:
             "role": request.role,
             "status": "running",
             "access": request.access.value,
+            "policy": to_plain(request.policy),
             "session_id": request.session_id,
             "instructions": request.instructions,
             "started_at": started_at,
@@ -373,9 +442,7 @@ class AgentWorkflow:
             "plan": to_plain(plan),
             "diff": diff,
             "validation": {
-                "passed": validation.passed,
-                "checks": validation.checks,
-                "error": validation.error,
+                **to_plain(validation),
             },
         }
         return "独立审核当前只读工作区，并输出结构化 ReviewResult。\n" + json.dumps(payload, ensure_ascii=False)

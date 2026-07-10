@@ -12,7 +12,7 @@ from app.core.contracts import new_id
 @dataclass
 class FakeAgentStep:
     output: dict[str, Any] = field(default_factory=dict)
-    writes: dict[str, str | None] = field(default_factory=dict)
+    writes: dict[str, str | bytes | None] = field(default_factory=dict)
     succeeded: bool = True
     error: str = ""
     session_id: str = ""
@@ -48,7 +48,7 @@ class ScriptedFakeRuntime(AgentRuntime):
             error=step.error,
         )
 
-    def _apply_writes(self, workspace: Path, writes: dict[str, str | None]) -> None:
+    def _apply_writes(self, workspace: Path, writes: dict[str, str | bytes | None]) -> None:
         root = workspace.resolve()
         for relative, content in writes.items():
             target = (root / relative).resolve()
@@ -61,4 +61,7 @@ class ScriptedFakeRuntime(AgentRuntime):
                     target.unlink()
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            if isinstance(content, bytes):
+                target.write_bytes(content)
+            else:
+                target.write_text(content, encoding="utf-8")
