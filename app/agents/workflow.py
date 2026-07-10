@@ -19,6 +19,9 @@ from app.agents.contracts import (
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
 from app.core.contracts import to_plain, utc_now
+from app.projects.contracts import Project
+from app.projects.git_worktree import GitWorktreeService, PreparedWorktree
+from app.projects.registry import ProjectRegistry
 from app.tools.workspace import Workspace
 
 
@@ -35,27 +38,109 @@ class AgentWorkflow:
         runtime: AgentRuntime,
         validator: TaskValidator,
         max_iterations: int = 3,
+        git_worktrees: GitWorktreeService | None = None,
     ):
         if max_iterations <= 0:
             raise ValueError("max_iterations 必须大于 0。")
         self.root = Path(root)
         self.store = AgentTaskStore(self.root / "tasks")
+        self.projects = ProjectRegistry(self.root / "projects")
+        self.git_worktrees = git_worktrees or GitWorktreeService()
         self.runtime = runtime
         self.validator = validator
         self.max_iterations = max_iterations
 
-    def create_task(self, title: str, requirement: str) -> AgentTask:
+    def register_project(
+        self,
+        name: str,
+        repository: Path,
+        default_branch: str = "",
+        config_path: str = ".workloop/project.toml",
+    ) -> Project:
+        if not name.strip():
+            raise ValueError("项目名称不能为空。")
+        repo_root, branch = self.git_worktrees.inspect(repository, default_branch)
+        try:
+            self.root.resolve().relative_to(repo_root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("Workloop 数据根必须位于目标 Git 仓库之外。")
+        return self.projects.add(
+            Project(
+                name=name.strip(),
+                repository=str(repo_root),
+                default_branch=branch,
+                config_path=config_path,
+            )
+        )
+
+    def create_task(self, title: str, requirement: str, project_id: str) -> AgentTask:
         if not title.strip() or not requirement.strip():
             raise ValueError("任务标题和需求不能为空。")
-        task = AgentTask(title=title.strip(), requirement=requirement.strip())
+        if not project_id.strip():
+            raise ValueError("project_id 不能为空；新任务必须属于已注册 Git 项目。")
+        task = AgentTask(
+            title=title.strip(),
+            requirement=requirement.strip(),
+            project_id=project_id,
+        )
+        project = self.projects.get(project_id)
+        prepared = self.git_worktrees.plan(
+            project,
+            task.task_id,
+            self.store.workspace_location(task.task_id),
+        )
+        task.base_commit = prepared.base_commit
+        task.target_branch = prepared.target_branch
+        task.task_branch = prepared.task_branch
+        task.workspace = str(prepared.path)
+        task.transition(AgentTaskStatus.PREPARING_WORKSPACE, reason="workspace_planned")
+        self.store.save(task)
+        self.git_worktrees.ensure_prepared(project, prepared)
+        task.transition(AgentTaskStatus.DRAFT, reason="workspace_prepared")
         self.store.save(task)
         return task
 
     def get_task(self, task_id: str) -> AgentTask:
         return self.store.load(task_id)
 
+    def get_project(self, project_id: str) -> Project:
+        return self.projects.get(project_id)
+
+    def resume_task_creation(self, task_id: str) -> AgentTask:
+        task = self.store.load(task_id)
+        self._require_status(task, AgentTaskStatus.PREPARING_WORKSPACE)
+        project = self.projects.get(task.project_id)
+        prepared = self._prepared_from_task(task, project)
+        self.git_worktrees.ensure_prepared(project, prepared)
+        task.transition(AgentTaskStatus.DRAFT, reason="workspace_prepared")
+        self.store.save(task)
+        return task
+
+    def cancel_task(self, task_id: str) -> AgentTask:
+        task = self.store.load(task_id)
+        if not task.project_id or not task.workspace or not task.task_branch:
+            raise ValueError("任务没有可清理的项目 worktree。")
+        project = self.projects.get(task.project_id)
+        prepared = self._prepared_from_task(task, project)
+        if task.status in (AgentTaskStatus.DRAFT, AgentTaskStatus.PREPARING_WORKSPACE):
+            task.transition(AgentTaskStatus.CANCELLING, reason="user_cancelled")
+            self.store.save(task)
+        elif task.status is not AgentTaskStatus.CANCELLING:
+            raise ValueError(
+                f"任务 {task.task_id} 状态为 {task.status.value}，要求 draft 或 cancelling。"
+            )
+        self.git_worktrees.remove(project, prepared)
+        task.transition(AgentTaskStatus.CANCELLED, reason="workspace_removed")
+        self.store.save(task)
+        return task
+
     def workspace_path(self, task_id: str) -> Path:
-        return self.store.workspace_path(task_id)
+        task = self.store.load(task_id)
+        if not task.workspace:
+            raise ValueError(f"任务 {task_id} 没有 Git worktree。")
+        return Path(task.workspace)
 
     def analyze(self, task_id: str) -> AgentTask:
         task = self.store.load(task_id)
@@ -200,6 +285,22 @@ class AgentWorkflow:
     def _require_status(self, task: AgentTask, expected: AgentTaskStatus) -> None:
         if task.status is not expected:
             raise ValueError(f"任务 {task.task_id} 状态为 {task.status.value}，要求 {expected.value}。")
+
+    def _prepared_from_task(self, task: AgentTask, project: Project) -> PreparedWorktree:
+        expected_workspace = self.store.workspace_location(task.task_id).resolve()
+        actual_workspace = Path(task.workspace).resolve()
+        expected_branch = f"workloop/{task.task_id.lower()}"
+        if actual_workspace != expected_workspace or task.task_branch != expected_branch:
+            raise ValueError("任务身份与 workspace 或任务分支不匹配。")
+        if task.target_branch != project.default_branch:
+            raise ValueError("任务目标分支与注册项目不匹配。")
+        return PreparedWorktree(
+            task_id=task.task_id,
+            path=actual_workspace,
+            base_commit=task.base_commit,
+            target_branch=task.target_branch,
+            task_branch=task.task_branch,
+        )
 
     def _invoke_agent(self, task: AgentTask, request: AgentRequest) -> AgentResult:
         task.run_count += 1

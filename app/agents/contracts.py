@@ -9,6 +9,7 @@ from app.core.contracts import Severity, new_id, utc_now
 
 
 class AgentTaskStatus(str, Enum):
+    PREPARING_WORKSPACE = "preparing_workspace"
     DRAFT = "draft"
     ANALYZING = "analyzing"
     WAITING_FOR_PLAN_APPROVAL = "waiting_for_plan_approval"
@@ -18,10 +19,20 @@ class AgentTaskStatus(str, Enum):
     READY_TO_DELIVER = "ready_to_deliver"
     BLOCKED = "blocked"
     FAILED = "failed"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
 
 
 ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
-    AgentTaskStatus.DRAFT: {AgentTaskStatus.ANALYZING},
+    AgentTaskStatus.DRAFT: {
+        AgentTaskStatus.PREPARING_WORKSPACE,
+        AgentTaskStatus.ANALYZING,
+        AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.PREPARING_WORKSPACE: {
+        AgentTaskStatus.DRAFT,
+        AgentTaskStatus.CANCELLING,
+    },
     AgentTaskStatus.ANALYZING: {
         AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
         AgentTaskStatus.FAILED,
@@ -45,6 +56,8 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     AgentTaskStatus.READY_TO_DELIVER: set(),
     AgentTaskStatus.BLOCKED: set(),
     AgentTaskStatus.FAILED: set(),
+    AgentTaskStatus.CANCELLING: {AgentTaskStatus.CANCELLED},
+    AgentTaskStatus.CANCELLED: set(),
 }
 
 
@@ -297,6 +310,11 @@ class ValidationResult:
 class AgentTask:
     title: str
     requirement: str
+    project_id: str = ""
+    base_commit: str = ""
+    target_branch: str = ""
+    task_branch: str = ""
+    workspace: str = ""
     task_id: str = field(default_factory=lambda: new_id("TASK"))
     status: AgentTaskStatus = AgentTaskStatus.DRAFT
     plan_version: int = 0
@@ -327,6 +345,11 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
     return AgentTask(
         title=str(data["title"]),
         requirement=str(data["requirement"]),
+        project_id=str(data.get("project_id", "")),
+        base_commit=str(data.get("base_commit", "")),
+        target_branch=str(data.get("target_branch", "")),
+        task_branch=str(data.get("task_branch", "")),
+        workspace=str(data.get("workspace", "")),
         task_id=str(data["task_id"]),
         status=AgentTaskStatus(data.get("status", AgentTaskStatus.DRAFT.value)),
         plan_version=int(data.get("plan_version", 0)),

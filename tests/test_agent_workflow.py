@@ -15,6 +15,7 @@ from app.agents.contracts import (
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
 from app.agents.runtime import AgentRuntime
 from app.agents.workflow import AgentWorkflow
+from tests.git_support import create_repository
 
 
 def execution_plan() -> dict:
@@ -57,6 +58,13 @@ class InspectingRaisingRuntime(AgentRuntime):
         raise RuntimeError("boom")
 
 
+def project_workflow(root: Path, runtime: AgentRuntime, validator):
+    repository = create_repository(root)
+    workflow = AgentWorkflow(root, runtime=runtime, validator=validator)
+    project = workflow.register_project("测试项目", repository, "main")
+    return workflow, project
+
+
 class AgentWorkflowTest(unittest.TestCase):
     def test_task_rejects_illegal_state_transition(self) -> None:
         task = AgentTask(title="非法迁移", requirement="不能跳过工作流")
@@ -87,8 +95,8 @@ class AgentWorkflowTest(unittest.TestCase):
                     ],
                 }
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=RaisingValidator())
-            task = workflow.create_task("验证异常", "验证器会抛异常")
+            workflow, project = project_workflow(root, runtime, RaisingValidator())
+            task = workflow.create_task("验证异常", "验证器会抛异常", project.project_id)
             workflow.analyze(task.task_id)
 
             result = workflow.approve_plan(task.task_id)
@@ -101,8 +109,8 @@ class AgentWorkflowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = InspectingRaisingRuntime(root)
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
-            task = workflow.create_task("异常持久化", "运行时会抛异常")
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("异常持久化", "运行时会抛异常", project.project_id)
 
             result = workflow.analyze(task.task_id)
 
@@ -132,8 +140,8 @@ class AgentWorkflowTest(unittest.TestCase):
             runtime = ScriptedFakeRuntime(
                 {"planner": [FakeAgentStep(output=execution_plan(), writes={"unauthorized.txt": "x"})]}
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
-            task = workflow.create_task("只读分析", "分析但不要修改")
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("只读分析", "分析但不要修改", project.project_id)
 
             result = workflow.analyze(task.task_id)
 
@@ -173,8 +181,8 @@ class AgentWorkflowTest(unittest.TestCase):
                     ],
                 }
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
-            task = workflow.create_task("审核门禁", "result.txt 必须为 done")
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("审核门禁", "result.txt 必须为 done", project.project_id)
             workflow.analyze(task.task_id)
 
             result = workflow.approve_plan(task.task_id)
@@ -224,8 +232,8 @@ class AgentWorkflowTest(unittest.TestCase):
                     ],
                 }
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
-            task = workflow.create_task("阻断门禁", "阻断问题不得通过")
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("阻断门禁", "阻断问题不得通过", project.project_id)
             workflow.analyze(task.task_id)
 
             result = workflow.approve_plan(task.task_id)
@@ -265,9 +273,9 @@ class AgentWorkflowTest(unittest.TestCase):
                     ],
                 }
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
+            workflow, project = project_workflow(root, runtime, PassingValidator())
 
-            task = workflow.create_task("生成结果", "创建 result.txt")
+            task = workflow.create_task("生成结果", "创建 result.txt", project.project_id)
             planned = workflow.analyze(task.task_id)
 
             self.assertEqual(planned.status, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
@@ -372,8 +380,8 @@ class AgentWorkflowTest(unittest.TestCase):
                     ],
                 }
             )
-            workflow = AgentWorkflow(root, runtime=runtime, validator=PassingValidator())
-            task = workflow.create_task("返修结果", "result.txt 最终必须为 done")
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("返修结果", "result.txt 最终必须为 done", project.project_id)
             workflow.analyze(task.task_id)
 
             completed = workflow.approve_plan(task.task_id)

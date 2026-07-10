@@ -22,10 +22,10 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 建立持久工作流与 FakeRuntime 纵向闭环。
 
-- [ ] 项目记录仓库根、默认目标分支和配置引用。
-- [ ] 脏工作区默认阻止任务启动。
-- [ ] 任务保存 `base_commit`、worktree 和任务分支身份。
-- [ ] 取消或清理任务不会修改真实工作目录。
+- [x] 项目记录仓库根、默认目标分支和配置引用。
+- [x] 脏工作区默认阻止任务启动。
+- [x] 任务保存 `base_commit`、worktree 和任务分支身份。
+- [x] 取消或清理任务不会修改真实工作目录。
 
 ## 执行项目策略与确定性验证
 

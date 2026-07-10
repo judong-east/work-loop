@@ -4,10 +4,9 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from app.agents.contracts import AgentTask, agent_task_from_dict
-from app.core.contracts import to_plain
+from app.core.atomic_files import write_json_atomic, write_text_atomic
 
 
 class AgentTaskStore:
@@ -18,12 +17,17 @@ class AgentTaskStore:
     def task_dir(self, task_id: str) -> Path:
         self._validate_task_id(task_id)
         path = self.root / task_id
-        for child in ("workspace", "artifacts/plans", "artifacts/rounds", "artifacts/runs", "logs"):
+        for child in ("artifacts/plans", "artifacts/rounds", "artifacts/runs", "logs"):
             (path / child).mkdir(parents=True, exist_ok=True)
         return path
 
-    def workspace_path(self, task_id: str) -> Path:
+    def workspace_location(self, task_id: str) -> Path:
         return self.task_dir(task_id) / "workspace"
+
+    def workspace_path(self, task_id: str) -> Path:
+        path = self.workspace_location(task_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def save(self, task: AgentTask) -> Path:
         path = self.task_dir(task.task_id) / "workflow-state.json"
@@ -38,19 +42,10 @@ class AgentTaskStore:
         return agent_task_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def write_json(self, path: Path, data: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-        temporary.write_text(
-            json.dumps(to_plain(data), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        write_json_atomic(path, data)
 
     def write_text(self, path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-        temporary.write_text(text, encoding="utf-8")
-        temporary.replace(path)
+        write_text_atomic(path, text)
 
     def _validate_task_id(self, task_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id):
