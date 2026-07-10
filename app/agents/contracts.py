@@ -35,23 +35,30 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     },
     AgentTaskStatus.ANALYZING: {
         AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+        AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
-    AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL: {AgentTaskStatus.EXECUTING},
+    AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL: {
+        AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.CANCELLING,
+    },
     AgentTaskStatus.EXECUTING: {
         AgentTaskStatus.VALIDATING,
         AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.VALIDATING: {
         AgentTaskStatus.REVIEWING,
         AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.REVIEWING: {
         AgentTaskStatus.EXECUTING,
         AgentTaskStatus.READY_TO_DELIVER,
         AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.READY_TO_DELIVER: set(),
@@ -73,6 +80,36 @@ class AgentPolicy:
     protected_paths: list[str] = field(default_factory=list)
     timeout_seconds: int = 300
     network_allowed: bool = False
+    redact_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentBudget:
+    total_timeout_seconds: int = 1800
+    idle_timeout_seconds: int = 120
+    max_cost_usd: float | None = None
+
+
+class AgentEventType(str, Enum):
+    SESSION_STARTED = "session_started"
+    MESSAGE_DELTA = "message_delta"
+    TOOL_STARTED = "tool_started"
+    TOOL_COMPLETED = "tool_completed"
+    USAGE_UPDATED = "usage_updated"
+    HEARTBEAT = "heartbeat"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class AgentEvent:
+    event_type: AgentEventType
+    role: str
+    data: dict[str, Any] = field(default_factory=dict)
+    raw_type: str = ""
+    at: str = field(default_factory=utc_now)
+    schema_version: int = 1
 
 
 class ReviewVerdict(str, Enum):
@@ -298,6 +335,7 @@ class AgentRequest:
     workspace: Path
     access: AgentAccess
     policy: AgentPolicy = field(default_factory=AgentPolicy)
+    budget: AgentBudget = field(default_factory=AgentBudget)
     session_id: str = ""
 
 
@@ -307,7 +345,15 @@ class AgentResult:
     output: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
     error: str = ""
-    events: list[dict[str, Any]] = field(default_factory=list)
+    error_type: str = ""
+    final_message: str = ""
+    events: list[AgentEvent] = field(default_factory=list)
+    raw_events: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
+    runtime: str = ""
+    runtime_version: str = ""
+    model: str = ""
+    runtime_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

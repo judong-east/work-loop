@@ -44,11 +44,11 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 执行项目策略与确定性验证。
 
-- [ ] 指令通过标准输入传递，不进入命令行参数。
-- [ ] Codex 使用 workspace-write 沙箱和非交互审批策略。
-- [ ] JSONL 事件转换为统一 AgentEvent。
-- [ ] session、runtime 版本、model、预算和最终结果落盘。
-- [ ] 取消终止完整进程树并记录终态。
+- [x] 指令通过标准输入传递，不进入命令行参数。
+- [x] Codex 使用 workspace-write 沙箱和非交互审批策略。
+- [x] JSONL 事件转换为统一 AgentEvent。
+- [x] session、runtime 版本、model、预算和最终结果落盘。
+- [x] 取消终止完整进程树并记录终态。
 
 ## 使用 Claude Code 规划与独立审核
 

@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from app.agents.contracts import (
     AgentAccess,
+    AgentResult,
     AgentTask,
     AgentTaskStatus,
     ExecutionPlan,
     ValidationResult,
 )
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
-from app.agents.runtime import AgentRuntime
+from app.agents.runtime import AgentRuntime, RoleRoutedRuntime
 from app.agents.workflow import AgentWorkflow
 from tests.git_support import create_repository
 
@@ -58,6 +60,90 @@ class InspectingRaisingRuntime(AgentRuntime):
         raise RuntimeError("boom")
 
 
+class CancellableRuntime(AgentRuntime):
+    def __init__(self):
+        self.executor_started = threading.Event()
+        self.cancelled = threading.Event()
+
+    def invoke(self, request):
+        if request.role == "planner":
+            return AgentResult(
+                succeeded=True,
+                output=execution_plan(),
+                session_id="planner-session",
+                runtime="fake-cancellable",
+                runtime_version="1",
+                model="scripted",
+            )
+        if request.role == "executor":
+            self.executor_started.set()
+            self.cancelled.wait(timeout=10)
+            return AgentResult(
+                succeeded=False,
+                session_id="executor-session",
+                error="cancelled",
+                error_type="user_cancelled",
+                runtime="fake-cancellable",
+                runtime_version="1",
+                model="scripted",
+            )
+        return AgentResult(succeeded=False, error="unexpected role")
+
+    def cancel(self, task_id: str) -> bool:
+        self.cancelled.set()
+        return True
+
+
+class PausingRoleRoutedRuntime(RoleRoutedRuntime):
+    def __init__(self, runtimes):
+        super().__init__(runtimes)
+        self.executor_route_removed = threading.Event()
+        self.release_executor_result = threading.Event()
+
+    def invoke(self, request):
+        result = super().invoke(request)
+        if request.role == "executor":
+            self.executor_route_removed.set()
+            self.release_executor_result.wait(timeout=10)
+        return result
+
+
+class IdentityFailureRuntime(AgentRuntime):
+    def invoke(self, request):
+        raise RuntimeError("identity failure")
+
+    def describe(self, request):
+        return {
+            "runtime": "identity-runtime",
+            "runtime_version": "9.8.7",
+            "model": "identity-model",
+            "config": {"sandbox": "read-only"},
+        }
+
+
+class SecretRuntime(AgentRuntime):
+    def invoke(self, request):
+        plan = execution_plan()
+        plan["requirement_understanding"] = "password=planner-output-secret"
+        return AgentResult(
+            succeeded=True,
+            output=plan,
+            session_id="secret-session",
+            final_message="api_key=final-message-secret",
+            raw_events=[
+                {
+                    "password": "raw-event-secret",
+                    "accessToken": "camel-access-secret",
+                    "input_tokens": 42,
+                }
+            ],
+            error="token=error-secret",
+            runtime="secret-runtime",
+            runtime_version="1",
+            model="secret-model",
+        )
+
+
 def project_workflow(root: Path, runtime: AgentRuntime, validator):
     repository = create_repository(root)
     workflow = AgentWorkflow(root, runtime=runtime, validator=validator)
@@ -66,6 +152,86 @@ def project_workflow(root: Path, runtime: AgentRuntime, validator):
 
 
 class AgentWorkflowTest(unittest.TestCase):
+    def test_cancel_after_delegate_exit_cannot_be_overwritten_by_stale_workflow_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scripted = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=execution_plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["写入"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                }
+            )
+            runtime = PausingRoleRoutedRuntime(
+                {"planner": scripted, "executor": scripted, "reviewer": scripted}
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("竞态取消", "executor 退出后立即取消", project.project_id)
+            workflow.analyze(task.task_id)
+            result: dict[str, AgentTask] = {}
+            thread = threading.Thread(
+                target=lambda: result.setdefault("task", workflow.approve_plan(task.task_id))
+            )
+            thread.start()
+            self.assertTrue(runtime.executor_route_removed.wait(timeout=5))
+
+            try:
+                cancelling = workflow.cancel_task(task.task_id)
+            finally:
+                runtime.release_executor_result.set()
+
+            self.assertEqual(cancelling.status, AgentTaskStatus.CANCELLING)
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["task"].status, AgentTaskStatus.CANCELLED)
+            self.assertEqual(workflow.get_task(task.task_id).status, AgentTaskStatus.CANCELLED)
+            self.assertFalse(Path(task.workspace).exists())
+
+    def test_active_executor_cancellation_reaches_terminal_state_and_removes_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = CancellableRuntime()
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("取消执行", "终止正在运行的 executor", project.project_id)
+            workflow.analyze(task.task_id)
+            result: dict[str, AgentTask] = {}
+            thread = threading.Thread(
+                target=lambda: result.setdefault("task", workflow.approve_plan(task.task_id))
+            )
+            thread.start()
+            self.assertTrue(runtime.executor_started.wait(timeout=5))
+
+            cancelling = workflow.cancel_task(task.task_id)
+
+            self.assertEqual(cancelling.status, AgentTaskStatus.CANCELLING)
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            cancelled = result["task"]
+            self.assertEqual(cancelled.status, AgentTaskStatus.CANCELLED)
+            self.assertEqual(workflow.get_task(task.task_id).status, AgentTaskStatus.CANCELLED)
+            self.assertFalse(Path(cancelled.workspace).exists())
+            executor_run = json.loads(
+                (
+                    root
+                    / "tasks"
+                    / task.task_id
+                    / "artifacts/runs/2-executor.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(executor_run["status"], "cancelled")
+            self.assertEqual(executor_run["error_type"], "user_cancelled")
+
     def test_task_rejects_illegal_state_transition(self) -> None:
         task = AgentTask(title="非法迁移", requirement="不能跳过工作流")
 
@@ -123,6 +289,57 @@ class AgentWorkflowTest(unittest.TestCase):
             record = json.loads(run_files[0].read_text(encoding="utf-8"))
             self.assertEqual(record["status"], "failed")
             self.assertIn("boom", record["error"])
+
+    def test_failed_result_preserves_preflight_runtime_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow, project = project_workflow(
+                root, IdentityFailureRuntime(), PassingValidator()
+            )
+            task = workflow.create_task("身份保留", "运行失败也保留身份", project.project_id)
+
+            result = workflow.analyze(task.task_id)
+
+            self.assertEqual(result.status, AgentTaskStatus.FAILED)
+            run = json.loads(
+                (
+                    root
+                    / "tasks"
+                    / task.task_id
+                    / "artifacts/runs/1-planner.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(run["runtime"], "identity-runtime")
+            self.assertEqual(run["runtime_version"], "9.8.7")
+            self.assertEqual(run["model"], "identity-model")
+            self.assertEqual(run["runtime_config"]["sandbox"], "read-only")
+
+    def test_agent_run_and_structured_artifacts_redact_sensitive_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow, project = project_workflow(root, SecretRuntime(), PassingValidator())
+            task = workflow.create_task(
+                "脱敏", "分析 api_key=prompt-secret", project.project_id
+            )
+
+            result = workflow.analyze(task.task_id)
+
+            self.assertEqual(result.status, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
+            task_dir = root / "tasks" / task.task_id
+            run_text = (task_dir / "artifacts/runs/1-planner.json").read_text("utf-8")
+            plan_text = (task_dir / "artifacts/plans/1.json").read_text("utf-8")
+            for secret in (
+                "prompt-secret",
+                "planner-output-secret",
+                "final-message-secret",
+                "raw-event-secret",
+                "camel-access-secret",
+                "error-secret",
+            ):
+                self.assertNotIn(secret, run_text)
+                self.assertNotIn(secret, plan_text)
+            self.assertIn("[REDACTED]", run_text)
+            self.assertIn('"input_tokens": 42', run_text)
 
     def test_task_id_cannot_escape_task_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,6 +529,18 @@ class AgentWorkflowTest(unittest.TestCase):
                 "artifacts/rounds/1/changes.diff",
             ]:
                 self.assertTrue((task_dir / relative).is_file(), relative)
+
+            executor_run = json.loads(
+                (task_dir / "artifacts/runs/2-executor.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(executor_run["runtime"], "fake")
+            self.assertEqual(executor_run["runtime_version"], "1")
+            self.assertEqual(executor_run["model"], "scripted")
+            self.assertIn("runtime_config", executor_run)
+            self.assertEqual(executor_run["budget"]["total_timeout_seconds"], 1800)
+            self.assertEqual(executor_run["output"]["modified_files"], ["result.txt"])
+            self.assertIn("usage", executor_run)
+            self.assertIn("raw_events", executor_run)
 
             reloaded = AgentWorkflow(root, runtime=ScriptedFakeRuntime({}), validator=PassingValidator())
             restored = reloaded.get_task(task.task_id)

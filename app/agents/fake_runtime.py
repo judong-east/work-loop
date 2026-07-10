@@ -37,6 +37,9 @@ class ScriptedFakeRuntime(AgentRuntime):
                 succeeded=False,
                 session_id=step.session_id or request.session_id,
                 error=f"{request.role} 以只读权限运行，不能修改工作区。",
+                runtime="fake",
+                runtime_version="1",
+                model="scripted",
             )
         if step.succeeded:
             self._apply_writes(request.workspace, step.writes)
@@ -46,6 +49,9 @@ class ScriptedFakeRuntime(AgentRuntime):
             output=dict(step.output),
             session_id=session_id,
             error=step.error,
+            runtime="fake",
+            runtime_version="1",
+            model="scripted",
         )
 
     def _apply_writes(self, workspace: Path, writes: dict[str, str | bytes | None]) -> None:
@@ -65,3 +71,11 @@ class ScriptedFakeRuntime(AgentRuntime):
                 target.write_bytes(content)
             else:
                 target.write_text(content, encoding="utf-8")
+
+    def describe(self, request: AgentRequest) -> dict:
+        return {
+            "runtime": "fake",
+            "runtime_version": "1",
+            "model": "scripted",
+            "config": {},
+        }
