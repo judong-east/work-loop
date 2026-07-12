@@ -527,6 +527,8 @@ class AgentTask:
     title: str
     requirement: str
     project_id: str = ""
+    workflow_id: str = "guarded"
+    workflow: dict[str, Any] = field(default_factory=dict)
     base_commit: str = ""
     target_branch: str = ""
     task_branch: str = ""
@@ -575,6 +577,8 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         title=str(data["title"]),
         requirement=str(data["requirement"]),
         project_id=str(data.get("project_id", "")),
+        workflow_id=str(data.get("workflow_id", "guarded")),
+        workflow=dict(data.get("workflow", {})) if isinstance(data.get("workflow", {}), dict) else {},
         base_commit=str(data.get("base_commit", "")),
         target_branch=str(data.get("target_branch", "")),
         task_branch=str(data.get("task_branch", "")),

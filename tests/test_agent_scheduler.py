@@ -18,6 +18,7 @@ from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
 from app.agents.runtime import AgentRuntime
 from app.agents.scheduler import PersistentAgentScheduler, QueueEntryStatus
 from app.agents.workflow import AgentWorkflow
+from app.agents.workflow_config import workflow_from_dict
 from tests.git_support import create_repository
 
 
@@ -72,6 +73,16 @@ def revision_review() -> dict:
         ],
         "recommended_tests": [],
         "summary": "Revise",
+    }
+
+
+def replan_review() -> dict:
+    return {
+        "verdict": "replan",
+        "acceptance": [{"criterion": "result.txt contains done", "passed": False}],
+        "issues": [],
+        "recommended_tests": [],
+        "summary": "Plan needs revision",
     }
 
 
@@ -182,6 +193,101 @@ def create_workflow(root: Path, runtime: AgentRuntime) -> tuple[AgentWorkflow, s
 
 
 class PersistentAgentSchedulerTest(unittest.TestCase):
+    def test_autopilot_replan_queues_the_revised_plan_without_a_hidden_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=plan()), FakeAgentStep(output=plan())],
+                    "executor": [
+                        FakeAgentStep(output=execution_output(), writes={"result.txt": "first\n"}),
+                        FakeAgentStep(output=execution_output(), writes={"result.txt": "done\n"}),
+                    ],
+                    "reviewer": [
+                        FakeAgentStep(output=replan_review()),
+                        FakeAgentStep(output=passing_review()),
+                    ],
+                }
+            )
+            workflow, project_id = create_workflow(root, runtime)
+            task = workflow.create_task(
+                "Autopilot replan",
+                "Create result.txt",
+                project_id,
+                workflow_id="autopilot",
+            )
+            scheduler = PersistentAgentScheduler(workflow)
+            scheduler.enqueue_analysis(task.task_id)
+
+            self.assertEqual(
+                scheduler.run_next().status,
+                AgentTaskStatus.QUEUED_FOR_EXECUTION,
+            )
+            self.assertEqual(
+                scheduler.run_next().status,
+                AgentTaskStatus.QUEUED_FOR_EXECUTION,
+            )
+            self.assertEqual(
+                scheduler.run_next().status,
+                AgentTaskStatus.READY_TO_DELIVER,
+            )
+
+    def test_autopilot_workflow_queues_execution_without_plan_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "reviewer": [FakeAgentStep(output=passing_review())],
+                }
+            )
+            workflow, project_id = create_workflow(root, runtime)
+            workflow.workflows.save(
+                workflow_from_dict(
+                    {
+                        "workflow_id": "personal-auto",
+                        "label": "Personal auto",
+                        "nodes": [
+                            {
+                                "node_id": "plan",
+                                "kind": "planner",
+                                "label": "Plan",
+                                "instructions": "Inspect public APIs first.",
+                            },
+                            {"node_id": "execute", "kind": "executor", "label": "Execute"},
+                            {"node_id": "validate", "kind": "validation", "label": "Validate"},
+                            {"node_id": "review", "kind": "reviewer", "label": "Review"},
+                            {"node_id": "deliver", "kind": "delivery", "label": "Deliver"},
+                        ],
+                    }
+                )
+            )
+            task = workflow.create_task(
+                "Autopilot",
+                "Create result.txt",
+                project_id,
+                workflow_id="personal-auto",
+            )
+            scheduler = PersistentAgentScheduler(workflow)
+            scheduler.enqueue_analysis(task.task_id)
+
+            planned = scheduler.run_next()
+
+            self.assertEqual(planned.status, AgentTaskStatus.QUEUED_FOR_EXECUTION)
+            self.assertEqual(len(scheduler.pending()), 1)
+
+            completed = scheduler.run_next()
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual([request.role for request in runtime.requests], ["planner", "executor", "reviewer"])
+            self.assertIn("Inspect public APIs first.", runtime.requests[0].instructions)
+
     def test_queue_order_persists_and_human_waiting_releases_the_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

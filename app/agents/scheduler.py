@@ -207,7 +207,15 @@ class PersistentAgentScheduler:
                 else:
                     status = QueueEntryStatus.COMPLETED
                 self._finish_entry(entry.entry_id, status, result.error)
-                return self.workflow.get_task(entry.task_id)
+                latest = self.workflow.get_task(entry.task_id)
+                if (
+                    latest.status is AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL
+                    and not self.workflow.get_plan(entry.task_id).open_questions
+                    and not self.workflow.requires_plan_approval(entry.task_id)
+                ):
+                    self.enqueue_execution(entry.task_id)
+                    latest = self.workflow.get_task(entry.task_id)
+                return latest
         finally:
             self._execution_slot.release()
 
@@ -226,6 +234,19 @@ class PersistentAgentScheduler:
             self.store.save(state)
             self._refresh_positions(state)
         return task
+
+    def remove_task(self, task_id: str) -> None:
+        """彻底删除任务：停止运行中的进程、清理队列条目、删除任务数据目录。"""
+        try:
+            self.terminate(task_id)
+        except (ValueError, FileNotFoundError):
+            pass
+        with self._state_lock:
+            state = self.store.load()
+            state.entries = [entry for entry in state.entries if entry.task_id != task_id]
+            self.store.save(state)
+            self._refresh_positions(state)
+        self.workflow.store.delete(task_id)
 
     def scan_startup(self) -> list[str]:
         interrupted_ids: list[str] = []

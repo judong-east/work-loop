@@ -175,6 +175,47 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         return project
 
+    def test_workflow_api_persists_controlled_definition(self) -> None:
+        status, workflows = self.request("GET", "/api/agent/workflows")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            {item["workflow_id"] for item in workflows},
+            {"guarded", "autopilot"},
+        )
+
+        status, saved = self.request(
+            "POST",
+            "/api/agent/workflows",
+            {
+                "workflow_id": "personal",
+                "label": "Personal",
+                "nodes": [
+                    {"node_id": "plan", "kind": "planner", "label": "Plan"},
+                    {"node_id": "execute", "kind": "executor", "label": "Execute"},
+                    {"node_id": "validate", "kind": "validation", "label": "Validate"},
+                    {"node_id": "review", "kind": "reviewer", "label": "Review"},
+                    {"node_id": "deliver", "kind": "delivery", "label": "Deliver"},
+                ],
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["workflow_id"], "personal")
+
+        project = self.register_project()
+        status, task = self.request(
+            "POST",
+            "/api/agent/tasks",
+            {
+                "project_id": project["project_id"],
+                "workflow_id": "personal",
+                "title": "Configured task",
+                "requirement": "Create result.txt",
+            },
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(task["workflow_id"], "personal")
+        self.assertEqual(task["workflow"]["label"], "Personal")
+
     def test_agent_api_runs_state_driven_task_and_confirmed_delivery(self) -> None:
         project = self.register_project()
 
@@ -406,7 +447,7 @@ class AgentWebApiTest(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIn('@media (max-width: 820px)', page)
-        self.assertIn('@media (max-width: 389px)', page)
+        self.assertIn('@media (max-width: 520px)', page)
         self.assertIn('id="metrics" role="status" aria-live="polite"', page)
         self.assertIn('api("/api/agent/metrics")', page)
         self.assertIn('class="skip-link" href="#workspace"', page)

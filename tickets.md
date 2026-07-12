@@ -132,3 +132,14 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 - 恢复：19 次 recover 队列操作；服务重启后复用 executor session 并从可靠阶段继续。
 - 人工介入：计划批准 1 次；宿主侧处理了基线前进、Windows 短路径、Git worktree 基线、原生 reviewer 结果规范化和确认交付。
 - 审核：Claude reviewer 使用同一 session 完成两次独立复审，均判定通过；未发生 `revise_code`，因此对应验收项仍保持未完成。
+
+## 增加受控工作流配置
+
+**What to build:** 在不开放任意命令、任意权限或任意状态跳转的前提下，让个人任务选择可持久化的 Agent 节点工作流，并允许低风险流程自动越过计划审批。
+
+- [x] 提供“标准审批”和“自动推进”内置工作流。
+- [x] 自定义工作流固定 planner、executor、validation、reviewer、delivery 契约，并允许可选 plan approval。
+- [x] Agent 节点支持附加要求，权限仍由节点类型强制决定。
+- [x] 任务冻结工作流快照，目录后续修改不改变运行中任务。
+- [x] Web 支持配置、选择和查看任务工作流。
+- [x] 自动推进仍保留澄清、审核返修、策略验证和最终人工交付门禁。

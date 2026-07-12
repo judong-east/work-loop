@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,7 @@ from app.agents.runtime import RoleRoutedRuntime
 from app.agents.scheduler import PersistentAgentScheduler
 from app.agents.status_groups import task_status_group, task_status_priority
 from app.agents.workflow import AgentWorkflow
+from app.agents.workflow_config import workflow_from_dict
 from app.core.contracts import TaskStatus, to_plain, utc_now
 from app.core.workflow import WorkloopKernel
 from app.models.backends.cli_backend import cancel_task_processes, clear_task_cancel
@@ -89,6 +91,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/tasks/([\w-]+)$"), "handle_agent_task_detail"),
         (re.compile(r"^/api/agent/queue$"), "handle_agent_queue"),
         (re.compile(r"^/api/agent/runtime-health$"), "handle_agent_runtime_health"),
+        (re.compile(r"^/api/agent/workflows$"), "handle_agent_workflows"),
         (re.compile(r"^/api/agent/history$"), "handle_agent_history"),
         (re.compile(r"^/api/agent/history/([\w-]+)$"), "handle_agent_history_detail"),
         (re.compile(r"^/api/tasks$"), "handle_list_tasks"),
@@ -99,6 +102,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     ]
     POST_ROUTES = [
         (re.compile(r"^/api/agent/projects$"), "handle_agent_register_project"),
+        (re.compile(r"^/api/agent/workflows$"), "handle_agent_save_workflow"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_create_task"),
         (re.compile(r"^/api/agent/profiles/migrate$"), "handle_agent_migrate_profiles"),
         (re.compile(r"^/api/agent/queue/run-next$"), "handle_agent_run_next"),
@@ -110,6 +114,8 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/tasks/([\w-]+)/prepare-delivery$"), "handle_agent_prepare_delivery"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/integrate$"), "handle_agent_integrate"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/deliver$"), "handle_agent_deliver"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/delete$"), "handle_agent_delete_task"),
+        (re.compile(r"^/api/agent/history/([\w-]+)/delete$"), "handle_agent_delete_history"),
         (re.compile(r"^/api/tasks$"), "handle_create_task"),
         (re.compile(r"^/api/tasks/([\w-]+)/run$"), "handle_run"),
         (re.compile(r"^/api/tasks/([\w-]+)/continue$"), "handle_continue"),
@@ -139,6 +145,11 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         if needs_body and parsed.path.startswith(
             ("/api/tasks", "/api/models", "/api/workflow", "/api/memory")
         ):
+            # Consume the request body before replying so Windows does not reset the
+            # connection when the client is still sending a deprecated write request.
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length:
+                self.rfile.read(length)
             self._send_json(
                 410,
                 {
@@ -687,6 +698,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         projects = self._agent_workflow().projects.list_all()
         self._send_json(200, [to_plain(project) for project in projects])
 
+    def handle_agent_workflows(self) -> None:
+        workflows = self._agent_workflow().workflows.list_all()
+        self._send_json(200, [to_plain(workflow) for workflow in workflows])
+
     def handle_agent_tasks(self) -> None:
         tasks = self._agent_workflow().store.list_all()
         tasks.sort(
@@ -959,6 +974,11 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, to_plain(project))
 
+    def handle_agent_save_workflow(self, body: dict) -> None:
+        workflow = workflow_from_dict(body)
+        saved = self._agent_workflow().workflows.save(workflow)
+        self._send_json(200, to_plain(saved))
+
     def handle_agent_create_task(self, body: dict) -> None:
         title = str(body.get("title", "")).strip()
         requirement = str(body.get("requirement", "")).strip()
@@ -987,6 +1007,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             requirement,
             project_id,
             budget=budget,
+            workflow_id=str(body.get("workflow_id", "guarded")).strip() or "guarded",
         )
         self.server.agent_scheduler.enqueue_analysis(task.task_id)
         self.server.kick_agent_worker()
@@ -1081,6 +1102,20 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             confirmed=body.get("confirmed") is True,
         )
         self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_delete_task(self, task_id: str, body: dict) -> None:
+        del body
+        self.server.agent_scheduler.remove_task(task_id)
+        self._send_json(200, {"deleted": task_id})
+
+    def handle_agent_delete_history(self, task_id: str, body: dict) -> None:
+        del body
+        if not re.fullmatch(r"[\w-]+", task_id):
+            raise _HttpError(400, "task_id 不合法。")
+        task_dir = self._tasks_root() / task_id
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        self._send_json(200, {"deleted": task_id})
 
     # ---- POST ----
 

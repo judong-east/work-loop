@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,12 @@ class AgentTaskStore:
 
     def write_text(self, path: Path, text: str) -> None:
         write_text_atomic(path, text)
+
+    def delete(self, task_id: str) -> None:
+        self._validate_task_id(task_id)
+        path = self.root / task_id
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
 
     def _validate_task_id(self, task_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id):

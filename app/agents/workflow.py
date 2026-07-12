@@ -27,6 +27,13 @@ from app.agents.contracts import (
 )
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
+from app.agents.workflow_config import (
+    BUILTIN_WORKFLOWS,
+    WorkflowCatalog,
+    WorkflowDefinition,
+    WorkflowNodeKind,
+    workflow_from_dict,
+)
 from app.core.contracts import PolicyBoundary, PolicyCheck, to_plain, utc_now
 from app.core.redaction import redact, redact_value
 from app.policy.policy_checker import PolicyChecker
@@ -64,6 +71,7 @@ class AgentWorkflow:
         self.root = Path(root)
         self.store = AgentTaskStore(self.root / "tasks")
         self.projects = ProjectRegistry(self.root / "projects")
+        self.workflows = WorkflowCatalog(self.root / "workflows.json")
         self.git_worktrees = git_worktrees or GitWorktreeService()
         self.policy_loader = ProjectPolicyLoader()
         self.policy_checker = PolicyChecker()
@@ -104,6 +112,7 @@ class AgentWorkflow:
         requirement: str,
         project_id: str,
         budget: TaskBudget | None = None,
+        workflow_id: str = "guarded",
     ) -> AgentTask:
         if not title.strip() or not requirement.strip():
             raise ValueError("任务标题和需求不能为空。")
@@ -113,10 +122,13 @@ class AgentWorkflow:
             max_iterations=self.max_iterations
         )
         effective_budget.validate()
+        workflow = self.workflows.get(workflow_id)
         task = AgentTask(
             title=title.strip(),
             requirement=requirement.strip(),
             project_id=project_id,
+            workflow_id=workflow.workflow_id,
+            workflow=to_plain(workflow),
             budget=effective_budget,
         )
         project = self.projects.get(project_id)
@@ -144,6 +156,12 @@ class AgentWorkflow:
 
     def get_plan(self, task_id: str) -> ExecutionPlan:
         return self._load_plan(self.store.load(task_id))
+
+    def get_workflow(self, task_id: str) -> WorkflowDefinition:
+        return self._task_workflow(self.store.load(task_id))
+
+    def requires_plan_approval(self, task_id: str) -> bool:
+        return self.get_workflow(task_id).requires_plan_approval
 
     def record_clarification(self, task_id: str, answer: str) -> AgentTask:
         task = self.store.load(task_id)
@@ -465,7 +483,7 @@ class AgentWorkflow:
                     AgentRequest(
                         task_id=task.task_id,
                         role="executor",
-                        instructions=self._executor_instructions(plan, review_feedback),
+                        instructions=self._executor_instructions(task, plan, review_feedback),
                         workspace=workspace_path,
                         access=AgentAccess.WORKSPACE_WRITE,
                         policy=effective_agent_policy,
@@ -1264,20 +1282,31 @@ class AgentWorkflow:
             "requirement": task.requirement,
             "clarifications": task.clarifications,
         }
-        return (
+        instructions = (
             "分析任务并生成结构化 ExecutionPlan。每次最多保留一个高影响未决问题；"
             "已有澄清答复必须作为需求约束。只输出符合 ExecutionPlan Schema 的完整 "
             "JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
         )
+        return self._with_node_instructions(
+            instructions,
+            self._task_workflow(task).instructions_for(WorkflowNodeKind.PLANNER),
+        )
 
     def _executor_instructions(
         self,
+        task: AgentTask,
         plan: ExecutionPlan,
         review_feedback: ReviewResult | None,
     ) -> str:
         payload = {"plan": to_plain(plan), "review_feedback": to_plain(review_feedback)}
-        return "按照已批准的 ExecutionPlan 修改当前工作区。\n" + json.dumps(payload, ensure_ascii=False)
+        instructions = "按照已批准的 ExecutionPlan 修改当前工作区。\n" + json.dumps(
+            payload, ensure_ascii=False
+        )
+        return self._with_node_instructions(
+            instructions,
+            self._task_workflow(task).instructions_for(WorkflowNodeKind.EXECUTOR),
+        )
 
     def _reviewer_instructions(
         self,
@@ -1294,10 +1323,14 @@ class AgentWorkflow:
                 **to_plain(validation),
             },
         }
-        return (
+        instructions = (
             "独立审核当前只读工作区，并输出结构化 ReviewResult。只输出符合 "
             "ReviewResult Schema 的完整 JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
+        )
+        return self._with_node_instructions(
+            instructions,
+            self._task_workflow(task).instructions_for(WorkflowNodeKind.REVIEWER),
         )
 
     def _replanner_instructions(
@@ -1312,9 +1345,29 @@ class AgentWorkflow:
             "previous_plan": to_plain(previous_plan),
             "review": to_plain(review),
         }
-        return (
+        instructions = (
             "审核认定已批准计划需要重做。重新检查当前只读工作区并生成新的 "
             "ExecutionPlan；新计划必须再次由用户批准。只输出符合 ExecutionPlan "
             "Schema 的完整 JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
         )
+        return self._with_node_instructions(
+            instructions,
+            self._task_workflow(task).instructions_for(WorkflowNodeKind.PLANNER),
+        )
+
+    @staticmethod
+    def _with_node_instructions(base: str, additional: str) -> str:
+        if not additional:
+            return base
+        return f"{base}\n工作流节点附加要求：\n{additional}"
+
+    @staticmethod
+    def _task_workflow(task: AgentTask) -> WorkflowDefinition:
+        if task.workflow:
+            return workflow_from_dict(
+                task.workflow,
+                builtin=bool(task.workflow.get("builtin", False)),
+            )
+        # Tasks created before workflow snapshots were introduced retain guarded behavior.
+        return BUILTIN_WORKFLOWS["guarded"]

@@ -5,13 +5,21 @@ and reviewer roles, gives Codex CLI the executor role, and keeps Git isolation,
 validation evidence, recovery, review loops, and delivery gates under host
 control.
 
-The current workflow is fixed:
+Workloop executes controlled workflow definitions. The built-in `guarded`
+workflow is:
 
 ```text
 request -> Claude plan -> human approval -> Codex execute
         -> deterministic validation -> independent Claude review
         -> delivery report -> human-confirmed Git delivery
 ```
+
+The built-in `autopilot` workflow removes only the plan approval gate: a plan
+without open questions proceeds directly to Codex. Git delivery always requires
+explicit human confirmation. Custom workflows may add role-specific
+instructions and may include or omit the plan approval node, while the host
+keeps node order, access, validation, review outcomes, and delivery authority
+fixed.
 
 ## Requirements
 
@@ -59,12 +67,26 @@ Open `http://127.0.0.1:8765`, register a clean Git project, and create a task.
 The task console supports:
 
 - structured plan review and clarification;
+- per-task workflow selection and immutable workflow snapshots;
+- controlled custom workflows with planner, executor, and reviewer instructions;
 - persistent FIFO scheduling with one local agent slot;
 - normalized Claude/Codex events, sessions, budgets, and runtime health;
 - worktree diffs, policy evidence, deterministic validation, and review issues;
 - interrupted-stage recovery, rerun, cancellation, and budget adjustment;
 - auditable task commits, target-branch reintegration, and confirmed delivery;
 - read-only display of `legacy-v1` tasks and their surviving artifacts.
+
+## Workflows
+
+Use the **工作流** control in the console to create a personal workflow. Every
+workflow contains one planner, executor, validation, reviewer, and delivery
+node, plus an optional plan approval node. Agent nodes can add instructions,
+but cannot change their access: planner and reviewer remain read-only, the
+executor remains restricted to its task worktree, validation remains limited to
+project-policy commands, and delivery remains human-confirmed.
+
+The selected definition is copied into each task state. Later edits to the
+catalog therefore do not change an in-flight task or its recovery behavior.
 
 ## Agent Profiles
 

@@ -9,7 +9,10 @@ import subprocess
 import tempfile
 import threading
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
