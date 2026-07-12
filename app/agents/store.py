@@ -41,6 +41,16 @@ class AgentTaskStore:
             raise FileNotFoundError(f"代理任务 {task_id} 不存在：{path}")
         return agent_task_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
+    def list_all(self) -> list[AgentTask]:
+        tasks: list[AgentTask] = []
+        for path in sorted(self.root.glob("*/workflow-state.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                tasks.append(agent_task_from_dict(data))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+                continue
+        return tasks
+
     def write_json(self, path: Path, data: Any) -> None:
         write_json_atomic(path, data)
 

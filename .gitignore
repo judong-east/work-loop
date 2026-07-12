@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .idea/
 tasks/
+.selfhost-data/
+.selfhost-runtime/
+.preview_server.py

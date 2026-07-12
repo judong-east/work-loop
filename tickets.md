@@ -56,11 +56,11 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 执行项目策略与确定性验证。
 
-- [ ] 规划与审核使用相互隔离的 Claude session。
-- [ ] 工具、权限、目录和设置来源由适配器显式约束。
-- [ ] 计划与审核结果使用结构化 Schema。
-- [ ] 审核支持 `pass`、`revise_code`、`replan` 和 `blocked`。
-- [ ] 多轮审核能够恢复审核 session。
+- [x] 规划与审核使用相互隔离的 Claude session。
+- [x] 工具、权限、目录和设置来源由适配器显式约束。
+- [x] 计划与审核结果使用结构化 Schema。
+- [x] 审核支持 `pass`、`revise_code`、`replan` 和 `blocked`。
+- [x] 多轮审核能够恢复审核 session。
 
 ## 持久队列、预算与重启恢复
 
@@ -68,11 +68,11 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 使用 Codex CLI 执行和返修；使用 Claude Code 规划与独立审核。
 
-- [ ] 队列位置、AgentRun、session、轮次和预算持久化。
-- [ ] 等待澄清、计划批准、权限和交付的任务不占执行槽。
-- [ ] 总超时、无事件超时、费用和最大轮次触发暂停。
-- [ ] 启动扫描将残留运行标记为 `interrupted`。
-- [ ] 用户可以恢复、重跑当前阶段或终止。
+- [x] 队列位置、AgentRun、session、轮次和预算持久化。
+- [x] 等待澄清、计划批准、权限和交付的任务不占执行槽。
+- [x] 总超时、无事件超时、费用和最大轮次触发暂停。
+- [x] 启动扫描将残留运行标记为 `interrupted`。
+- [x] 用户可以恢复、重跑当前阶段或终止。
 
 ## 生成可审核提交并安全交付
 
@@ -80,11 +80,11 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 持久队列、预算与重启恢复。
 
-- [ ] DeliveryReport 覆盖验收、变更、验证、审核、风险和后续步骤。
-- [ ] 待交付任务形成独立任务提交。
-- [ ] 目标分支前进使旧验证与审核失效。
-- [ ] 冲突暂停人工处理。
-- [ ] 未经人工确认不得修改目标分支。
+- [x] DeliveryReport 覆盖验收、变更、验证、审核、风险和后续步骤。
+- [x] 待交付任务形成独立任务提交。
+- [x] 目标分支前进使旧验证与审核失效。
+- [x] 冲突暂停人工处理。
+- [x] 未经人工确认不得修改目标分支。
 
 ## 将 Web 控制台重构为任务操作台
 
@@ -92,12 +92,12 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 持久队列、预算与重启恢复；生成可审核提交并安全交付。
 
-- [ ] 首页优先展示运行中、待人工、失败、阻塞和待交付任务。
-- [ ] 任务详情展示计划、变更、验证、审核和标准化事件。
-- [ ] 不同阻塞原因提供定向操作。
-- [ ] 模型配置收缩为 runtime 健康状态和角色 Profile。
-- [ ] 移除任意流程节点编辑和第一版经验记忆主导航。
-- [ ] 桌面、窄屏、键盘和可访问性测试通过。
+- [x] 首页优先展示运行中、待人工、失败、阻塞和待交付任务。
+- [x] 任务详情展示计划、变更、验证、审核和标准化事件。
+- [x] 不同阻塞原因提供定向操作。
+- [x] 模型配置收缩为 runtime 健康状态和角色 Profile。
+- [x] 移除任意流程节点编辑和第一版经验记忆主导航。
+- [x] 桌面、窄屏、键盘和可访问性测试通过。
 
 ## 兼容旧任务并收缩旧入口
 
@@ -105,11 +105,11 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 将 Web 控制台重构为任务操作台。
 
-- [ ] 旧任务只读展示并标明历史工作流版本。
-- [ ] 缺失或绝对路径工件显示局部不可用。
-- [ ] 旧模型配置可以迁移为 AgentProfile。
-- [ ] 任意命令模板不能获得可写 executor 权限。
-- [ ] 旧入口有明确弃用或移除路径。
+- [x] 旧任务只读展示并标明历史工作流版本。
+- [x] 缺失或绝对路径工件显示局部不可用。
+- [x] 旧模型配置可以迁移为 AgentProfile。
+- [x] 任意命令模板不能获得可写 executor 权限。
+- [x] 旧入口有明确弃用或移除路径。
 
 ## 使用 Workloop 完成真实自举验收
 
@@ -117,8 +117,18 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 
 **Blocked by:** 兼容旧任务并收缩旧入口。
 
-- [ ] 真实需求跨多个文件并补充测试。
+- [x] 真实需求跨多个文件并补充测试。
 - [ ] 至少完成一次有效 `revise_code` 循环。
-- [ ] 中途重启后从可靠节点恢复。
-- [ ] 最终测试、DeliveryReport、审核和提交均可审计。
-- [ ] 记录成功率、人工介入、时间、费用、恢复和无关 diff 指标。
+- [x] 中途重启后从可靠节点恢复。
+- [x] 最终测试、DeliveryReport、审核和提交均可审计。
+- [x] 记录成功率、人工介入、时间、费用、恢复和无关 diff 指标。
+
+### 本次验收记录（TASK-7f09af231d62）
+
+- 结果：1/1 任务交付成功；交付提交 `f7a644a`；交付后测试 172/172 通过。
+- 变更：10 个提交文件，包含指标功能、Web/API 测试及自托管过程中发现的验证和交付可靠性修复；非预期无关 diff 为 0。
+- 时间：墙钟时间约 3 小时 6 分钟；累计 agent 活跃时间 2631.861 秒。
+- 费用：累计 0.254638 USD。
+- 恢复：19 次 recover 队列操作；服务重启后复用 executor session 并从可靠阶段继续。
+- 人工介入：计划批准 1 次；宿主侧处理了基线前进、Windows 短路径、Git worktree 基线、原生 reviewer 结果规范化和确认交付。
+- 审核：Claude reviewer 使用同一 session 完成两次独立复审，均判定通过；未发生 `revise_code`，因此对应验收项仍保持未完成。

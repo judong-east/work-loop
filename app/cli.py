@@ -13,6 +13,9 @@ from app.models.backends.fake_backend import FakeBackend
 from app.models.config import load_routing_config
 
 
+LEGACY_COMMANDS = {"create-task", "run-loop", "resume", "deliver", "memory"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Workloop reliable loop-engineering kernel")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -68,6 +71,13 @@ def _print_task(task) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     root = Path(args.root).resolve()
+    if args.command in LEGACY_COMMANDS:
+        print(
+            "该命令属于 legacy-v1 写工作流，已停用。请启动 `serve` 并通过 "
+            "Agent Runtime 任务接口操作；历史任务仍可只读查看。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     kernel = WorkloopKernel(root)
 
     if args.command == "create-task":

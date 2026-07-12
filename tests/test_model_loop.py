@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from app.cli import build_backends, build_parser
+from app.cli import build_backends, build_parser, main
 from app.core.artifact_store import ArtifactStore
 from app.core.contracts import ModelProfile, ModelRoutingConfig, TaskStatus, task_state_from_dict
 from app.core.workflow import WorkloopKernel, default_policy_boundary
@@ -385,6 +387,18 @@ class ParseRetryTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
+    def test_legacy_write_commands_exit_with_migration_direction(self) -> None:
+        with mock.patch(
+            "sys.argv",
+            ["workloop", "create-task", "--title", "t", "--goal", "g", "--input", "i"],
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as stopped:
+                main()
+
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn("legacy-v1", stderr.getvalue())
+        self.assertIn("Agent Runtime", stderr.getvalue())
+
     def test_run_loop_args_parse(self) -> None:
         args = build_parser().parse_args(
             ["run-loop", "--task-id", "TASK-1", "--root", "/tmp/x", "--models-config", "m.json"]

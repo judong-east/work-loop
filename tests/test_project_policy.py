@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 import tempfile
 import time
@@ -155,6 +156,7 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
         class RecordingProcesses:
             def __init__(self):
                 self.calls: list[list[str]] = []
+                self.environments: list[dict[str, str]] = []
                 self.outcomes = [
                     ProcessOutcome(exit_code=0),
                     ProcessOutcome(exit_code=0),
@@ -163,6 +165,7 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
 
             def run(self, argv, workspace, timeout_seconds, environment):
                 self.calls.append(list(argv))
+                self.environments.append(dict(environment))
                 return self.outcomes.pop(0)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +184,14 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
             self.assertEqual(len(processes.calls), 3)
             for argv in processes.calls:
                 self.assertIn("--sandbox-state-disable-network", argv)
+                self.assertEqual(argv[argv.index("-P") + 1], ":workspace")
+                if platform.system() == "Windows":
+                    self.assertIn('windows.sandbox="elevated"', argv)
             self.assertIn("print('target')", processes.calls[2])
+            validation_temp = Path(processes.environments[2]["TEMP"])
+            self.assertEqual(validation_temp.parent, Path(tmp))
+            self.assertEqual(processes.environments[2]["TMP"], str(validation_temp))
+            self.assertFalse(validation_temp.exists())
 
     def test_runs_only_approved_required_validation_and_records_complete_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,15 +260,10 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
                 {"unit": [sys.executable, "-c", "print('ok')"]},
             )
             task = workflow.create_task("拒绝未知验证", "不能执行未授权命令", project_id)
-            workflow.analyze(task.task_id)
+            failed = workflow.analyze(task.task_id)
 
-            with self.assertRaisesRegex(ValueError, "未获项目策略允许"):
-                workflow.approve_plan(task.task_id)
-
-            self.assertEqual(
-                workflow.get_task(task.task_id).status,
-                AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
-            )
+            self.assertEqual(failed.status, AgentTaskStatus.FAILED)
+            self.assertIn("required_tests", failed.error)
             self.assertEqual([request.role for request in runtime.requests], ["planner"])
 
     def test_plan_without_required_validation_cannot_reach_approval(self) -> None:
@@ -448,7 +453,9 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
 
             blocked = workflow.approve_plan(task.task_id)
 
-            self.assertEqual(blocked.status, AgentTaskStatus.BLOCKED)
+            self.assertEqual(blocked.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(blocked.pause_reason, "validation_failed")
+            self.assertEqual(blocked.interrupted_status, AgentTaskStatus.VALIDATING.value)
             self.assertEqual([request.role for request in runtime.requests], ["planner", "executor"])
             validation_path = (
                 root
@@ -562,7 +569,8 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
 
             blocked = workflow.approve_plan(task.task_id)
 
-            self.assertEqual(blocked.status, AgentTaskStatus.BLOCKED)
+            self.assertEqual(blocked.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(blocked.pause_reason, "validation_failed")
             validation_path = (
                 root
                 / "workloop-data"
@@ -728,7 +736,8 @@ class ProjectPolicyWorkflowTest(unittest.TestCase):
             blocked = workflow.approve_plan(task.task_id)
             time.sleep(2.5)
 
-            self.assertEqual(blocked.status, AgentTaskStatus.BLOCKED)
+            self.assertEqual(blocked.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(blocked.pause_reason, "validation_failed")
             self.assertFalse(marker.exists())
 
 

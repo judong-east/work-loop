@@ -25,6 +25,17 @@ class ProjectRegistry:
             raise FileNotFoundError(f"项目 {project_id} 不存在：{path}")
         return project_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
+    def list_all(self) -> list[Project]:
+        projects: list[Project] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                projects.append(
+                    project_from_dict(json.loads(path.read_text(encoding="utf-8")))
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+                continue
+        return projects
+
     def _validate_project_id(self, project_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", project_id):
             raise ValueError(f"project_id 不是安全的单段标识：{project_id!r}")

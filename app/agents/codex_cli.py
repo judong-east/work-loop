@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
+from urllib.parse import urlsplit
 
 from app.agents.contracts import (
     AgentAccess,
@@ -24,11 +27,95 @@ from app.core.process_tree import ProcessTreeHandle, process_group_options
 from app.core.redaction import redact, redact_value
 
 
+_PROVIDER_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+@dataclass(frozen=True)
+class CodexProviderConfig:
+    provider_id: str
+    name: str
+    base_url: str
+    wire_api: str = "responses"
+    requires_openai_auth: bool = True
+
+    def __post_init__(self) -> None:
+        if not _PROVIDER_ID.fullmatch(self.provider_id):
+            raise ValueError("Codex provider id 只能包含字母、数字、下划线和连字符。")
+        parsed = urlsplit(self.base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("Codex provider base_url 必须是无嵌入凭据的 HTTP(S) URL。")
+        if self.wire_api != "responses":
+            raise ValueError("Workloop 当前只允许 Codex provider 使用 responses 协议。")
+        if not self.requires_openai_auth:
+            raise ValueError("Codex provider 必须使用 Codex 管理的 OpenAI 认证。")
+
+
 @dataclass(frozen=True)
 class CodexCliProfile:
     command: list[str] = field(default_factory=lambda: ["codex"])
     model: str = ""
     ignore_user_config: bool = True
+    provider: CodexProviderConfig | None = None
+    windows_sandbox: str = ""
+
+
+def load_codex_cli_profile(
+    model: str = "",
+    config_path: Path | None = None,
+) -> CodexCliProfile:
+    """Load only the provider fields needed to reach a configured relay."""
+    path = config_path or (Path.home() / ".codex" / "config.toml")
+    if not path.is_file():
+        return CodexCliProfile(model=model or "gpt-5.2-codex")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"无法读取 Codex 配置 {path}：{error}") from error
+
+    configured_model = data.get("model", "")
+    effective_model = model or (
+        configured_model if isinstance(configured_model, str) else ""
+    ) or "gpt-5.2-codex"
+    provider_id = data.get("model_provider", "")
+    windows = data.get("windows", {})
+    windows_sandbox = windows.get("sandbox", "") if isinstance(windows, dict) else ""
+    if not isinstance(windows_sandbox, str) or windows_sandbox not in {
+        "",
+        "elevated",
+        "unelevated",
+    }:
+        raise ValueError("Codex windows.sandbox 必须是 elevated 或 unelevated。")
+    if not isinstance(provider_id, str) or not provider_id or provider_id == "openai":
+        return CodexCliProfile(model=effective_model, windows_sandbox=windows_sandbox)
+
+    providers = data.get("model_providers", {})
+    raw_provider = providers.get(provider_id) if isinstance(providers, dict) else None
+    if not isinstance(raw_provider, dict):
+        raise ValueError(f"Codex 配置缺少 model_providers.{provider_id}。")
+    name = raw_provider.get("name", provider_id)
+    base_url = raw_provider.get("base_url", "")
+    wire_api = raw_provider.get("wire_api", "responses")
+    requires_auth = raw_provider.get("requires_openai_auth", True)
+    if not all(isinstance(value, str) for value in (name, base_url, wire_api)):
+        raise ValueError("Codex provider 的 name、base_url 和 wire_api 必须是字符串。")
+    if not isinstance(requires_auth, bool):
+        raise ValueError("Codex provider 的 requires_openai_auth 必须是布尔值。")
+    return CodexCliProfile(
+        model=effective_model,
+        provider=CodexProviderConfig(
+            provider_id=provider_id,
+            name=name,
+            base_url=base_url,
+            wire_api=wire_api,
+            requires_openai_auth=requires_auth,
+        ),
+        windows_sandbox=windows_sandbox,
+    )
 
 
 def _is_workloop_controlled_argument(argument: str) -> bool:
@@ -263,8 +350,17 @@ class CodexCliRuntime(AgentRuntime):
                 and isinstance(item.get("text"), str)
             ):
                 final_message = item["text"]
+            if turn_completed:
+                break
 
-        if process.poll() is None and not failure_type:
+        forced_exit_after_terminal = False
+        if process.poll() is None and turn_completed and not failure_type:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                forced_exit_after_terminal = True
+                tree.terminate()
+        elif process.poll() is None and not failure_type:
             now = time.monotonic()
             idle_deadline = last_activity + request.budget.idle_timeout_seconds
             remaining = min(total_deadline, idle_deadline) - now
@@ -354,7 +450,7 @@ class CodexCliRuntime(AgentRuntime):
                 usage=usage,
                 **identity,
             )
-        if return_code != 0:
+        if return_code != 0 and not forced_exit_after_terminal:
             return AgentResult(
                 succeeded=False,
                 session_id=session_id,
@@ -461,10 +557,28 @@ class CodexCliRuntime(AgentRuntime):
             "workspace-write",
             "--config",
             "sandbox_workspace_write.network_access=false",
-            "--cd",
-            str(request.workspace),
-            "exec",
         ]
+        provider = self.profile.provider
+        if provider is not None:
+            provider_key = f"model_providers.{provider.provider_id}"
+            overrides = {
+                "model_provider": provider.provider_id,
+                f"{provider_key}.name": provider.name,
+                f"{provider_key}.base_url": provider.base_url,
+                f"{provider_key}.wire_api": provider.wire_api,
+                f"{provider_key}.requires_openai_auth": provider.requires_openai_auth,
+            }
+            for key, value in overrides.items():
+                encoded = json.dumps(value) if isinstance(value, str) else str(value).lower()
+                command.extend(["--config", f"{key}={encoded}"])
+        if self.profile.windows_sandbox:
+            command.extend(
+                [
+                    "--config",
+                    f"windows.sandbox={json.dumps(self.profile.windows_sandbox)}",
+                ]
+            )
+        command.extend(["--cd", str(request.workspace), "exec"])
         if request.session_id:
             command.append("resume")
         command.extend(["--json", "--model", self.profile.model])
@@ -562,6 +676,7 @@ class CodexCliRuntime(AgentRuntime):
         )
 
     def _runtime_config(self, request: AgentRequest) -> dict:
+        provider = self.profile.provider
         return {
             "approval_policy": "never",
             "sandbox": "workspace-write",
@@ -570,6 +685,10 @@ class CodexCliRuntime(AgentRuntime):
             "allowed_commands": request.policy.allowed_commands,
             "protected_paths": request.policy.protected_paths,
             "launcher": self.command,
+            "model_provider": provider.provider_id if provider else "openai",
+            "provider_base_url": provider.base_url if provider else "",
+            "wire_api": provider.wire_api if provider else "responses",
+            "windows_sandbox": self.profile.windows_sandbox,
         }
 
     def _probe_version(
