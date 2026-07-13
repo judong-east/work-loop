@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from app.agents.contracts import AgentTaskStatus, ExecutionPlan, ValidationResult
 from app.agents.fake_runtime import ScriptedFakeRuntime
@@ -47,6 +48,30 @@ class PartialDirectoryPrepareService(GitWorktreeService):
 
 
 class ProjectWorktreeTest(unittest.TestCase):
+    def test_git_commands_trust_only_the_registered_repository(self) -> None:
+        repository = Path("relative-repository").resolve()
+        completed = Mock(returncode=0, stdout="ok\n", stderr="")
+
+        with patch(
+            "app.projects.git_worktree.subprocess.run",
+            return_value=completed,
+        ) as run:
+            output = GitWorktreeService()._git(repository, "rev-parse", "HEAD")
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository}",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "HEAD",
+            ],
+        )
+
     def test_preparing_task_can_cancel_unregistered_partial_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

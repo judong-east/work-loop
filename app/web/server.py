@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +11,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from app.cli import build_backends
+from app.agents.claude_code import ClaudeCodeProfile, ClaudeCodeRuntime
+from app.agents.codex_cli import CodexCliRuntime, load_codex_cli_profile
+from app.agents.contracts import AgentTaskStatus, TaskBudget
+from app.agents.delivery import DeliveryService
+from app.agents.profiles import load_agent_profiles, migrate_legacy_profiles
+from app.agents.runtime import RoleRoutedRuntime
+from app.agents.scheduler import PersistentAgentScheduler
+from app.agents.status_groups import task_status_group, task_status_priority
+from app.agents.workflow import AgentWorkflow
+from app.agents.workflow_config import workflow_from_dict
 from app.core.contracts import TaskStatus, to_plain, utc_now
 from app.core.workflow import WorkloopKernel
 from app.models.backends.cli_backend import cancel_task_processes, clear_task_cancel
@@ -73,6 +85,15 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     GET_ROUTES = [
         (re.compile(r"^/$"), "handle_index"),
+        (re.compile(r"^/api/agent/projects$"), "handle_agent_projects"),
+        (re.compile(r"^/api/agent/tasks$"), "handle_agent_tasks"),
+        (re.compile(r"^/api/agent/metrics$"), "handle_agent_metrics"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)$"), "handle_agent_task_detail"),
+        (re.compile(r"^/api/agent/queue$"), "handle_agent_queue"),
+        (re.compile(r"^/api/agent/runtime-health$"), "handle_agent_runtime_health"),
+        (re.compile(r"^/api/agent/workflows$"), "handle_agent_workflows"),
+        (re.compile(r"^/api/agent/history$"), "handle_agent_history"),
+        (re.compile(r"^/api/agent/history/([\w-]+)$"), "handle_agent_history_detail"),
         (re.compile(r"^/api/tasks$"), "handle_list_tasks"),
         (re.compile(r"^/api/tasks/([\w-]+)$"), "handle_task_detail"),
         (re.compile(r"^/api/models/config$"), "handle_model_config"),
@@ -80,6 +101,21 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/memory$"), "handle_list_memory"),
     ]
     POST_ROUTES = [
+        (re.compile(r"^/api/agent/projects$"), "handle_agent_register_project"),
+        (re.compile(r"^/api/agent/workflows$"), "handle_agent_save_workflow"),
+        (re.compile(r"^/api/agent/tasks$"), "handle_agent_create_task"),
+        (re.compile(r"^/api/agent/profiles/migrate$"), "handle_agent_migrate_profiles"),
+        (re.compile(r"^/api/agent/queue/run-next$"), "handle_agent_run_next"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/approve$"), "handle_agent_approve"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/clarify$"), "handle_agent_clarify"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/(resume|rerun)$"), "handle_agent_recover"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/terminate$"), "handle_agent_terminate"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/budget$"), "handle_agent_budget"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/prepare-delivery$"), "handle_agent_prepare_delivery"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/integrate$"), "handle_agent_integrate"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/deliver$"), "handle_agent_deliver"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/delete$"), "handle_agent_delete_task"),
+        (re.compile(r"^/api/agent/history/([\w-]+)/delete$"), "handle_agent_delete_history"),
         (re.compile(r"^/api/tasks$"), "handle_create_task"),
         (re.compile(r"^/api/tasks/([\w-]+)/run$"), "handle_run"),
         (re.compile(r"^/api/tasks/([\w-]+)/continue$"), "handle_continue"),
@@ -106,6 +142,25 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def _dispatch(self, routes, needs_body: bool) -> None:
         parsed = urlsplit(self.path)
         self.query_params = parse_qs(parsed.query)
+        if needs_body and parsed.path.startswith(
+            ("/api/tasks", "/api/models", "/api/workflow", "/api/memory")
+        ):
+            # Consume the request body before replying so Windows does not reset the
+            # connection when the client is still sending a deprecated write request.
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length:
+                self.rfile.read(length)
+            self._send_json(
+                410,
+                {
+                    "error": (
+                        "旧工作流写接口已移除。请通过 /api/agent/projects 和 "
+                        "/api/agent/tasks 创建新任务；历史任务仅支持只读访问。"
+                    ),
+                    "migration": "/api/agent/runtime-health",
+                },
+            )
+            return
         for pattern, name in routes:
             match = pattern.match(parsed.path)
             if not match:
@@ -161,6 +216,17 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def _root_relative_path(self, raw: str) -> Path:
         path = Path(raw)
         return path if path.is_absolute() else self.server.workloop_root / path
+
+    def _agent_config_path(self, raw: str, default: str) -> Path:
+        relative = Path(raw.strip() or default)
+        if relative.is_absolute():
+            raise _HttpError(400, "Agent 配置路径必须位于 Workloop 数据根内。")
+        path = (self.server.workloop_root / relative).resolve()
+        try:
+            path.relative_to(self.server.workloop_root)
+        except ValueError:
+            raise _HttpError(400, "Agent 配置路径越出 Workloop 数据根。")
+        return path
 
     def _model_config_payload(self, config_path: Path) -> dict:
         routing = load_routing_config(config_path)
@@ -451,6 +517,349 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         threading.Thread(target=worker, name=f"run-loop-{task_id}", daemon=True).start()
         return {"started": True, "task_id": task_id, "roles": dict(routing.roles)}
 
+    # ---- Agent workflow API ----
+
+    def _agent_workflow(self) -> AgentWorkflow:
+        return self.server.agent_workflow
+
+    def _agent_actions(self, task) -> list[dict]:
+        action = lambda name, label, confirm=False, manual=False, description="": {
+            "id": name,
+            "label": label,
+            "requires_confirmation": confirm,
+            "manual": manual,
+            "description": description,
+        }
+        if task.status is AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL:
+            try:
+                plan = self._agent_workflow().get_plan(task.task_id)
+            except (FileNotFoundError, KeyError, ValueError):
+                return []
+            return (
+                [
+                    action(
+                        "clarify",
+                        "回答澄清",
+                        description=plan.open_questions[0],
+                    )
+                ]
+                if plan.open_questions
+                else [action("approve", "批准计划")]
+            )
+        if task.status is AgentTaskStatus.INTERRUPTED:
+            return [
+                action("resume", "恢复阶段"),
+                action("rerun", "重新运行阶段"),
+                action("terminate", "终止任务", True),
+            ]
+        if task.status is AgentTaskStatus.PAUSED:
+            if task.pause_reason == "permission_required":
+                return [
+                    action(
+                        "permission_required",
+                        "检查项目权限策略",
+                        manual=True,
+                        description="在版本控制的项目策略中授权后重新运行当前阶段。",
+                    ),
+                    action("rerun", "重新运行阶段"),
+                    action("terminate", "终止任务", True),
+                ]
+            return [
+                action("update_budget", "调整预算"),
+                action("resume", "恢复任务"),
+                action("terminate", "终止任务", True),
+            ]
+        if task.status is AgentTaskStatus.INTEGRATION_REQUIRED:
+            return [action("integrate", "重新整合目标分支")]
+        if task.status is AgentTaskStatus.READY_TO_DELIVER:
+            if task.artifacts.get("delivery_report"):
+                return [action("deliver", "确认交付", True)]
+            return [action("prepare_delivery", "生成交付报告")]
+        if task.status is AgentTaskStatus.BLOCKED and task.pause_reason == "integration_conflict":
+            return [
+                action(
+                    "resolve_conflict",
+                    "处理 Git 冲突",
+                    manual=True,
+                    description="在任务 worktree 中解决冲突后重新发起整合。",
+                )
+            ]
+        if task.status is AgentTaskStatus.BLOCKED and task.error.startswith("验证 "):
+            return [
+                action("resume", "重新运行验证"),
+                action("terminate", "终止任务", True),
+            ]
+        if task.status is AgentTaskStatus.BLOCKED:
+            return [
+                action(
+                    "review_policy_block",
+                    "检查策略阻塞",
+                    manual=True,
+                    description="查看策略证据并修正越权变更或项目策略。",
+                )
+            ]
+        if task.status is AgentTaskStatus.FAILED:
+            return [
+                action(
+                    "inspect_failure",
+                    "检查运行失败",
+                    manual=True,
+                    description="查看最后一个 AgentRun 的错误分类、事件和运行时健康状态。",
+                )
+            ]
+        if task.status in {
+            AgentTaskStatus.QUEUED_FOR_ANALYSIS,
+            AgentTaskStatus.QUEUED_FOR_EXECUTION,
+            AgentTaskStatus.QUEUED_FOR_RECOVERY,
+            AgentTaskStatus.ANALYZING,
+            AgentTaskStatus.EXECUTING,
+            AgentTaskStatus.VALIDATING,
+            AgentTaskStatus.REVIEWING,
+            AgentTaskStatus.REPLANNING,
+        }:
+            return [action("terminate", "终止任务", True)]
+        return []
+
+    def _agent_summary(self, task) -> dict:
+        payload = to_plain(task)
+        payload["actions"] = self._agent_actions(task)
+        payload["workflow_version"] = "agent-runtime-v1"
+        payload["read_only"] = False
+        payload["detail_url"] = f"/api/agent/tasks/{task.task_id}"
+        payload["project_name"] = ""
+        try:
+            payload["project_name"] = self._agent_workflow().get_project(task.project_id).name
+        except (FileNotFoundError, ValueError):
+            pass
+        return payload
+
+    def _safe_agent_artifact(self, task_dir: Path, reference: str, text=False):
+        if not reference:
+            return None
+        relative = Path(reference)
+        if relative.is_absolute() or relative.drive or ".." in relative.parts:
+            return {"available": False, "error": "工件路径越出任务目录。"}
+        path = task_dir / relative
+        try:
+            path.parent.resolve().relative_to(task_dir.resolve())
+        except ValueError:
+            return {"available": False, "error": "工件路径越出任务目录。"}
+        if path.is_symlink():
+            return {"available": False, "error": "工件路径越出任务目录。"}
+        if not path.is_file():
+            return {"available": False, "error": "工件不存在。"}
+        if text:
+            content = _read_text_if_exists(path)
+            return content if content else {"available": False, "error": "工件不可读。"}
+        data = _read_json_if_exists(path)
+        return data if data is not None else {"available": False, "error": "工件不可解析。"}
+
+    def _agent_detail(self, task) -> dict:
+        payload = self._agent_summary(task)
+        task_dir = self._agent_workflow().store.task_dir(task.task_id)
+        payload["plan"] = self._safe_agent_artifact(
+            task_dir,
+            task.artifacts.get("plan", ""),
+        )
+        rounds = []
+        rounds_root = task_dir / "artifacts" / "rounds"
+        for path in sorted(
+            (item for item in rounds_root.iterdir() if item.is_dir()),
+            key=lambda item: int(item.name) if item.name.isdigit() else 10**9,
+        ):
+            rounds.append(
+                {
+                    "round": path.name,
+                    "execution": _read_json_if_exists(path / "execution.json"),
+                    "validation": _read_json_if_exists(path / "validation.json"),
+                    "review": _read_json_if_exists(path / "review.json"),
+                    "diff": _read_text_if_exists(path / "changes.diff"),
+                    "policy": _read_json_if_exists(path / "policy-validation.json"),
+                }
+            )
+        payload["rounds"] = rounds
+        runs = []
+        for path in sorted((task_dir / "artifacts" / "runs").glob("*.json")):
+            data = _read_json_if_exists(path)
+            if isinstance(data, dict):
+                runs.append(data)
+        payload["runs"] = runs
+        payload["delivery_report"] = self._safe_agent_artifact(
+            task_dir,
+            task.artifacts.get("delivery_report", ""),
+        )
+        queue = self.server.agent_scheduler.store.load()
+        payload["queue_entries"] = [
+            to_plain(entry) for entry in queue.entries if entry.task_id == task.task_id
+        ]
+        return payload
+
+    def handle_agent_projects(self) -> None:
+        projects = self._agent_workflow().projects.list_all()
+        self._send_json(200, [to_plain(project) for project in projects])
+
+    def handle_agent_workflows(self) -> None:
+        workflows = self._agent_workflow().workflows.list_all()
+        self._send_json(200, [to_plain(workflow) for workflow in workflows])
+
+    def handle_agent_tasks(self) -> None:
+        tasks = self._agent_workflow().store.list_all()
+        tasks.sort(
+            key=lambda task: (
+                task_status_priority(task.status),
+                -datetime.fromisoformat(task.updated_at).timestamp(),
+            )
+        )
+        self._send_json(200, [self._agent_summary(task) for task in tasks])
+
+    def handle_agent_metrics(self) -> None:
+        counts = {
+            "running": 0,
+            "waiting_for_human": 0,
+            "failed": 0,
+            "blocked": 0,
+            "ready_to_deliver": 0,
+            "other": 0,
+            "total": 0,
+        }
+        for task in self._agent_workflow().store.list_all():
+            counts[task_status_group(task.status)] += 1
+            counts["total"] += 1
+        self._send_json(
+            200,
+            {
+                "schema_version": 1,
+                "generated_at": utc_now(),
+                "tasks": counts,
+                "scheduler": {
+                    "queued": len(self.server.agent_scheduler.pending()),
+                    "running": len(self.server.agent_scheduler.running()),
+                },
+            },
+        )
+
+    def handle_agent_task_detail(self, task_id: str) -> None:
+        task = self._agent_workflow().get_task(task_id)
+        self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_queue(self) -> None:
+        state = self.server.agent_scheduler.store.load()
+        self._send_json(200, to_plain(state))
+
+    def handle_agent_runtime_health(self) -> None:
+        self._send_json(
+            200,
+            {
+                "profiles": self.server.agent_profiles,
+                "health": self._agent_workflow().runtime.health_check(),
+                "worker_error": self.server.agent_worker_error,
+            },
+        )
+
+    def _legacy_summary(self, state: dict, task_id: str) -> dict:
+        return {
+            "task_id": task_id,
+            "task_key": f"legacy:{task_id}",
+            "title": str(state.get("title", "")),
+            "project_name": "历史工作流",
+            "status": str(state.get("status", "unknown")),
+            "iteration": int(state.get("iteration", 0) or 0),
+            "updated_at": str(state.get("updated_at", "")),
+            "workflow_version": "legacy-v1",
+            "read_only": True,
+            "detail_url": f"/api/agent/history/{task_id}",
+            "actions": [],
+        }
+
+    def _legacy_artifact(self, task_dir: Path, reference: str, text: bool = False):
+        if not reference:
+            return {"available": False, "error": "工件引用为空。"}
+        raw = Path(reference)
+        if raw.is_absolute():
+            return {"available": False, "error": "历史绝对路径工件不再自动读取。"}
+        path = (task_dir / raw).resolve()
+        try:
+            path.relative_to(task_dir.resolve())
+        except ValueError:
+            return {"available": False, "error": "工件路径越出历史任务目录。"}
+        if not path.is_file():
+            return {"available": False, "error": f"工件不存在：{reference}"}
+        if text:
+            try:
+                return {"available": True, "content": path.read_text(encoding="utf-8")}
+            except (OSError, UnicodeDecodeError):
+                return {"available": False, "error": f"工件不可读：{reference}"}
+        data = _read_json_if_exists(path)
+        return (
+            {"available": True, "content": data}
+            if data is not None
+            else {"available": False, "error": f"工件不可解析：{reference}"}
+        )
+
+    def _legacy_detail(self, task_id: str) -> dict:
+        task_dir = self._tasks_root() / task_id
+        state_path = task_dir / "state.json"
+        state = _read_json_if_exists(state_path)
+        if not isinstance(state, dict):
+            raise FileNotFoundError(f"历史任务 {task_id} 不存在或状态已损坏。")
+        detail = self._legacy_summary(state, task_id)
+        detail["task"] = state
+        detail["goal"] = str(state.get("goal", ""))
+        detail["artifacts"] = {
+            str(name): self._legacy_artifact(
+                task_dir,
+                str(reference),
+                text=str(reference).lower().endswith((".md", ".txt", ".diff", ".jsonl")),
+            )
+            for name, reference in state.get("artifacts", {}).items()
+            if isinstance(reference, str)
+        }
+        detail["plan"] = self._legacy_artifact(task_dir, "artifacts/plan.md", text=True)
+        rounds = []
+        rounds_dir = task_dir / "artifacts" / "rounds"
+        if rounds_dir.is_dir():
+            for round_dir in sorted(
+                rounds_dir.iterdir(),
+                key=lambda path: int(path.name) if path.name.isdigit() else 10**9,
+            ):
+                if not round_dir.is_dir():
+                    continue
+                rounds.append(
+                    {
+                        "round": round_dir.name,
+                        "diff": self._legacy_artifact(
+                            task_dir,
+                            str((round_dir / "changes.diff").relative_to(task_dir)),
+                            text=True,
+                        ),
+                        "review": self._legacy_artifact(
+                            task_dir,
+                            str((round_dir / "review.json").relative_to(task_dir)),
+                        ),
+                    }
+                )
+        detail["rounds"] = rounds
+        return detail
+
+    def handle_agent_history(self) -> None:
+        items = []
+        tasks_root = self._tasks_root()
+        if tasks_root.is_dir():
+            for state_path in tasks_root.glob("*/state.json"):
+                state = _read_json_if_exists(state_path)
+                if isinstance(state, dict):
+                    items.append(
+                        self._legacy_summary(
+                            state,
+                            str(state.get("task_id", state_path.parent.name)),
+                        )
+                    )
+        items.sort(key=lambda item: item["updated_at"], reverse=True)
+        self._send_json(200, items)
+
+    def handle_agent_history_detail(self, task_id: str) -> None:
+        self._send_json(200, self._legacy_detail(task_id))
+
     # ---- GET ----
 
     def handle_index(self) -> None:
@@ -549,6 +958,165 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, payload)
 
+    def handle_agent_register_project(self, body: dict) -> None:
+        name = str(body.get("name", "")).strip()
+        repository = str(body.get("repository", "")).strip()
+        branch = str(body.get("default_branch", "")).strip()
+        config_path = str(body.get("config_path", ".workloop/project.toml")).strip()
+        if not name or not repository:
+            raise _HttpError(400, "name 和 repository 不能为空。")
+        path = self._root_relative_path(repository)
+        project = self._agent_workflow().register_project(
+            name,
+            path,
+            branch,
+            config_path or ".workloop/project.toml",
+        )
+        self._send_json(200, to_plain(project))
+
+    def handle_agent_save_workflow(self, body: dict) -> None:
+        workflow = workflow_from_dict(body)
+        saved = self._agent_workflow().workflows.save(workflow)
+        self._send_json(200, to_plain(saved))
+
+    def handle_agent_create_task(self, body: dict) -> None:
+        title = str(body.get("title", "")).strip()
+        requirement = str(body.get("requirement", "")).strip()
+        project_id = str(body.get("project_id", "")).strip()
+        if not title or not requirement or not project_id:
+            raise _HttpError(400, "title、requirement 和 project_id 不能为空。")
+        raw_budget = body.get("budget")
+        budget = None
+        if raw_budget is not None:
+            if not isinstance(raw_budget, dict):
+                raise _HttpError(400, "budget 必须是对象。")
+            budget = TaskBudget(
+                total_timeout_seconds=float(raw_budget.get("total_timeout_seconds", 7200)),
+                call_timeout_seconds=float(raw_budget.get("call_timeout_seconds", 1800)),
+                idle_timeout_seconds=float(raw_budget.get("idle_timeout_seconds", 120)),
+                max_cost_usd=(
+                    float(raw_budget["max_cost_usd"])
+                    if raw_budget.get("max_cost_usd") is not None
+                    else None
+                ),
+                max_iterations=int(raw_budget.get("max_iterations", 3)),
+            )
+            budget.validate()
+        task = self._agent_workflow().create_task(
+            title,
+            requirement,
+            project_id,
+            budget=budget,
+            workflow_id=str(body.get("workflow_id", "guarded")).strip() or "guarded",
+        )
+        self.server.agent_scheduler.enqueue_analysis(task.task_id)
+        self.server.kick_agent_worker()
+        self._send_json(202, self._agent_summary(self._agent_workflow().get_task(task.task_id)))
+
+    def handle_agent_migrate_profiles(self, body: dict) -> None:
+        source = self._agent_config_path(str(body.get("source", "")), "models.json")
+        destination = self._agent_config_path(
+            str(body.get("destination", "")), "agent-profiles.json"
+        )
+        payload = migrate_legacy_profiles(source, destination)
+        self._send_json(
+            200,
+            {
+                "path": str(destination),
+                "profiles": payload["roles"],
+                "commands_discarded": True,
+                "restart_required": True,
+            },
+        )
+
+    def handle_agent_run_next(self, body: dict) -> None:
+        del body
+        task = self.server.agent_scheduler.run_next()
+        self._send_json(200, self._agent_summary(task) if task is not None else {})
+
+    def handle_agent_approve(self, task_id: str, body: dict) -> None:
+        del body
+        self.server.agent_scheduler.enqueue_execution(task_id)
+        self.server.kick_agent_worker()
+        self._send_json(202, self._agent_summary(self._agent_workflow().get_task(task_id)))
+
+    def handle_agent_clarify(self, task_id: str, body: dict) -> None:
+        answer = str(body.get("answer", "")).strip()
+        if not answer:
+            raise _HttpError(400, "answer 不能为空。")
+        self.server.agent_scheduler.answer_clarification(task_id, answer)
+        self.server.kick_agent_worker()
+        self._send_json(202, self._agent_summary(self._agent_workflow().get_task(task_id)))
+
+    def handle_agent_recover(self, task_id: str, action: str, body: dict) -> None:
+        del body
+        if action == "resume":
+            self.server.agent_scheduler.resume(task_id)
+        else:
+            self.server.agent_scheduler.rerun(task_id)
+        self.server.kick_agent_worker()
+        self._send_json(202, self._agent_summary(self._agent_workflow().get_task(task_id)))
+
+    def handle_agent_terminate(self, task_id: str, body: dict) -> None:
+        del body
+        task = self.server.agent_scheduler.terminate(task_id)
+        self._send_json(200, self._agent_summary(task))
+
+    def handle_agent_budget(self, task_id: str, body: dict) -> None:
+        task = self._agent_workflow().get_task(task_id)
+        current = task.budget
+        budget = TaskBudget(
+            total_timeout_seconds=float(
+                body.get("total_timeout_seconds", current.total_timeout_seconds)
+            ),
+            call_timeout_seconds=float(
+                body.get("call_timeout_seconds", current.call_timeout_seconds)
+            ),
+            idle_timeout_seconds=float(
+                body.get("idle_timeout_seconds", current.idle_timeout_seconds)
+            ),
+            max_cost_usd=(
+                float(body["max_cost_usd"])
+                if body.get("max_cost_usd") is not None
+                else current.max_cost_usd
+            ),
+            max_iterations=int(body.get("max_iterations", current.max_iterations)),
+        )
+        updated = self.server.agent_scheduler.update_budget(task_id, budget)
+        self._send_json(200, self._agent_summary(updated))
+
+    def handle_agent_prepare_delivery(self, task_id: str, body: dict) -> None:
+        del body
+        task = self.server.agent_delivery.prepare(task_id)
+        self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_integrate(self, task_id: str, body: dict) -> None:
+        del body
+        task = self.server.agent_delivery.integrate(task_id)
+        self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_deliver(self, task_id: str, body: dict) -> None:
+        task = self.server.agent_delivery.deliver(
+            task_id,
+            strategy=str(body.get("strategy", "merge")),
+            confirmed=body.get("confirmed") is True,
+        )
+        self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_delete_task(self, task_id: str, body: dict) -> None:
+        del body
+        self.server.agent_scheduler.remove_task(task_id)
+        self._send_json(200, {"deleted": task_id})
+
+    def handle_agent_delete_history(self, task_id: str, body: dict) -> None:
+        del body
+        if not re.fullmatch(r"[\w-]+", task_id):
+            raise _HttpError(400, "task_id 不合法。")
+        task_dir = self._tasks_root() / task_id
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        self._send_json(200, {"deleted": task_id})
+
     # ---- POST ----
 
     def handle_create_task(self, body: dict) -> None:
@@ -636,11 +1204,92 @@ class _HttpError(Exception):
 class WorkloopServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, root: Path, port: int):
+    def __init__(
+        self,
+        root: Path,
+        port: int,
+        agent_workflow: AgentWorkflow | None = None,
+        agent_scheduler: PersistentAgentScheduler | None = None,
+        agent_delivery: DeliveryService | None = None,
+        auto_run_agent: bool = True,
+    ):
         super().__init__(("127.0.0.1", port), WorkloopRequestHandler)
         self.workloop_root = Path(root).resolve()
         self.registry = RunRegistry()
+        if agent_workflow is None:
+            profile_path = self.workloop_root / "agent-profiles.json"
+            configured = load_agent_profiles(profile_path) if profile_path.is_file() else {}
+            planner_model = (
+                configured["planner"].model
+                if configured
+                else os.environ.get("WORKLOOP_CLAUDE_MODEL", "sonnet")
+            )
+            executor_model = (
+                configured["executor"].model
+                if configured
+                else os.environ.get("WORKLOOP_CODEX_MODEL", "")
+            )
+            reviewer_model = configured["reviewer"].model if configured else planner_model
+            runtime = RoleRoutedRuntime(
+                {
+                    "planner": ClaudeCodeRuntime(ClaudeCodeProfile(model=planner_model)),
+                    "executor": CodexCliRuntime(load_codex_cli_profile(executor_model)),
+                    "reviewer": ClaudeCodeRuntime(ClaudeCodeProfile(model=reviewer_model)),
+                }
+            )
+            agent_workflow = AgentWorkflow(self.workloop_root / "agent-runtime", runtime)
+        self.agent_workflow = agent_workflow
+        self.agent_scheduler = agent_scheduler or PersistentAgentScheduler(agent_workflow)
+        self.agent_delivery = agent_delivery or DeliveryService(agent_workflow)
+        self.auto_run_agent = auto_run_agent
+        self.agent_worker_error = ""
+        self._agent_worker_lock = threading.Lock()
+        self._agent_worker_running = False
+        self.agent_profiles = self._agent_profile_payload()
+
+    def _agent_profile_payload(self) -> dict:
+        runtime = self.agent_workflow.runtime
+        routed = getattr(runtime, "runtimes", {})
+        payload = {}
+        for role, selected in routed.items():
+            profile = getattr(selected, "profile", None)
+            payload[role] = {
+                "runtime": type(selected).__name__,
+                "model": str(getattr(profile, "model", "")),
+                "access": "workspace_write" if role == "executor" else "read_only",
+            }
+        if not payload:
+            payload["default"] = {
+                "runtime": type(runtime).__name__,
+                "model": "",
+                "access": "role_defined",
+            }
+        return payload
+
+    def kick_agent_worker(self) -> None:
+        if not self.auto_run_agent:
+            return
+        with self._agent_worker_lock:
+            if self._agent_worker_running:
+                return
+            self._agent_worker_running = True
+        threading.Thread(target=self._drain_agent_queue, daemon=True).start()
+
+    def _drain_agent_queue(self) -> None:
+        try:
+            while self.agent_scheduler.run_next() is not None:
+                pass
+            self.agent_worker_error = ""
+        except Exception as error:  # noqa: BLE001 - surfaced by runtime health endpoint
+            self.agent_worker_error = str(error)
+        finally:
+            with self._agent_worker_lock:
+                self._agent_worker_running = False
 
 
-def make_server(root: Path, port: int = 8765) -> WorkloopServer:
-    return WorkloopServer(root, port)
+def make_server(
+    root: Path,
+    port: int = 8765,
+    **kwargs,
+) -> WorkloopServer:
+    return WorkloopServer(root, port, **kwargs)

@@ -152,6 +152,133 @@ def project_workflow(root: Path, runtime: AgentRuntime, validator):
 
 
 class AgentWorkflowTest(unittest.TestCase):
+    def test_canonical_plan_maps_only_explicit_policy_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_plan = execution_plan()
+            canonical_plan["required_tests"] = ["API test", "responsive test"]
+            canonical_plan["steps"].append("Run fake-check")
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [
+                        FakeAgentStep(output=canonical_plan, session_id="canonical-plan")
+                    ]
+                }
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("Canonical plan", "Write result.txt", project.project_id)
+
+            analyzed = workflow.analyze(task.task_id)
+            plan = workflow.get_plan(task.task_id)
+
+            self.assertEqual(analyzed.status, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
+            self.assertEqual(plan.required_tests, ["fake-check"])
+
+    def test_canonical_plan_without_named_validation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_plan = execution_plan()
+            canonical_plan["required_tests"] = ["API test", "responsive test"]
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [
+                        FakeAgentStep(output=canonical_plan, session_id="canonical-plan")
+                    ]
+                }
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("Canonical plan", "Write result.txt", project.project_id)
+
+            analyzed = workflow.analyze(task.task_id)
+
+            self.assertEqual(analyzed.status, AgentTaskStatus.FAILED)
+            self.assertIn("required_tests", analyzed.error)
+
+    def test_native_claude_plan_maps_only_explicit_policy_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native_plan = {
+                "title": "Write result",
+                "plan": {
+                    "steps": [
+                        {"description": "Write result.txt"},
+                        {"description": "Run fake-check"},
+                    ]
+                },
+                "requirements": {
+                    "acceptance_criteria": ["result.txt contains done"],
+                    "clarifications": [],
+                },
+                "risks": [],
+                "issues": [],
+            }
+            runtime = ScriptedFakeRuntime(
+                {"planner": [FakeAgentStep(output=native_plan, session_id="native-plan")]}
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("Native plan", "Write result.txt", project.project_id)
+
+            analyzed = workflow.analyze(task.task_id)
+            plan = workflow.get_plan(task.task_id)
+
+            self.assertEqual(analyzed.status, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
+            self.assertEqual(plan.steps, ["Write result.txt", "Run fake-check"])
+            self.assertEqual(plan.required_tests, ["fake-check"])
+            self.assertEqual(plan.acceptance_criteria, ["result.txt contains done"])
+
+    def test_native_claude_plan_without_explicit_validation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native_plan = {
+                "title": "Write result",
+                "plan": {"steps": [{"description": "Write result.txt"}]},
+                "requirements": {
+                    "acceptance_criteria": ["result.txt contains done"],
+                    "clarifications": [],
+                },
+                "risks": [],
+                "issues": [],
+            }
+            runtime = ScriptedFakeRuntime(
+                {"planner": [FakeAgentStep(output=native_plan, session_id="native-plan")]}
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("Native plan", "Write result.txt", project.project_id)
+
+            analyzed = workflow.analyze(task.task_id)
+
+            self.assertEqual(analyzed.status, AgentTaskStatus.FAILED)
+            self.assertIn("required_tests", analyzed.error)
+
+    def test_native_top_level_steps_use_explicit_numbered_requirement_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native_plan = {
+                "title": "Write result",
+                "steps": [
+                    {"description": "Write result.txt"},
+                    {"description": "Run fake-check"},
+                ],
+                "issues": [],
+                "optimistic": False,
+            }
+            runtime = ScriptedFakeRuntime(
+                {"planner": [FakeAgentStep(output=native_plan, session_id="native-plan")]}
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task(
+                "Native plan",
+                "Acceptance criteria:\n1. result.txt contains done",
+                project.project_id,
+            )
+
+            analyzed = workflow.analyze(task.task_id)
+            plan = workflow.get_plan(task.task_id)
+
+            self.assertEqual(analyzed.status, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
+            self.assertEqual(plan.acceptance_criteria, ["result.txt contains done"])
+            self.assertEqual(plan.required_tests, ["fake-check"])
+
     def test_cancel_after_delegate_exit_cannot_be_overwritten_by_stale_workflow_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -553,7 +680,9 @@ class AgentWorkflowTest(unittest.TestCase):
             root = Path(tmp)
             runtime = ScriptedFakeRuntime(
                 {
-                    "planner": [FakeAgentStep(output=execution_plan())],
+                    "planner": [
+                        FakeAgentStep(output=execution_plan(), session_id="planner-claude-session")
+                    ],
                     "executor": [
                         FakeAgentStep(
                             output={
@@ -595,7 +724,8 @@ class AgentWorkflowTest(unittest.TestCase):
                                 ],
                                 "recommended_tests": [],
                                 "summary": "需要返修。",
-                            }
+                            },
+                            session_id="reviewer-claude-session",
                         ),
                         FakeAgentStep(
                             output={
@@ -622,7 +752,11 @@ class AgentWorkflowTest(unittest.TestCase):
                 ["planner", "executor", "reviewer", "executor", "reviewer"],
             )
             executor_requests = [request for request in runtime.requests if request.role == "executor"]
+            reviewer_requests = [request for request in runtime.requests if request.role == "reviewer"]
             self.assertEqual(executor_requests[1].session_id, completed.sessions["executor"])
+            self.assertEqual(reviewer_requests[0].session_id, "")
+            self.assertEqual(reviewer_requests[1].session_id, "reviewer-claude-session")
+            self.assertNotEqual(completed.sessions["planner"], completed.sessions["reviewer"])
             self.assertIn("内容不是 done", executor_requests[1].instructions)
             self.assertEqual(
                 (workflow.workspace_path(task.task_id) / "result.txt").read_text(encoding="utf-8"),
@@ -633,6 +767,197 @@ class AgentWorkflowTest(unittest.TestCase):
                 self.assertTrue((round_dir / "execution.json").is_file())
                 self.assertTrue((round_dir / "validation.json").is_file())
                 self.assertTrue((round_dir / "review.json").is_file())
+
+    def test_planner_and_reviewer_cannot_share_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared_session = "shared-claude-session"
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [
+                        FakeAgentStep(output=execution_plan(), session_id=shared_session)
+                    ],
+                    "executor": [
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["写入"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "reviewer": [
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "通过。",
+                            },
+                            session_id=shared_session,
+                        )
+                    ],
+                }
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("会话隔离", "规划与审核会话必须隔离", project.project_id)
+            workflow.analyze(task.task_id)
+
+            result = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(result.status, AgentTaskStatus.FAILED)
+            self.assertIn("相互隔离", result.error)
+            reviewer_run = json.loads(
+                (
+                    root
+                    / "tasks"
+                    / task.task_id
+                    / "artifacts/runs/3-reviewer.json"
+                ).read_text("utf-8")
+            )
+            self.assertEqual(reviewer_run["status"], "failed")
+            self.assertEqual(reviewer_run["error_type"], "policy_blocked")
+            self.assertEqual(reviewer_run["events"][-1]["event_type"], "failed")
+
+    def test_replan_generates_new_plan_and_requires_new_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            second_plan = execution_plan()
+            second_plan["steps"] = ["根据审核意见重新实现 result.txt"]
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [
+                        FakeAgentStep(
+                            output=execution_plan(),
+                            session_id="planner-replan-session",
+                        ),
+                        FakeAgentStep(output=second_plan),
+                    ],
+                    "executor": [
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["初版"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "first\n"},
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["按新计划返工"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        ),
+                    ],
+                    "reviewer": [
+                        FakeAgentStep(
+                            output={
+                                "verdict": "replan",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": False}
+                                ],
+                                "issues": [
+                                    {
+                                        "file": "result.txt",
+                                        "line": 1,
+                                        "severity": "blocker",
+                                        "message": "原计划遗漏关键约束",
+                                        "suggestion": "重新规划后再执行",
+                                        "evidence": "初版结果不满足需求",
+                                    }
+                                ],
+                                "recommended_tests": [],
+                                "summary": "计划本身需要重做。",
+                            },
+                            session_id="reviewer-replan-session",
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "新计划实现通过。",
+                            }
+                        ),
+                    ],
+                }
+            )
+            workflow, project = project_workflow(root, runtime, PassingValidator())
+            task = workflow.create_task("重新规划", "计划错误时必须重新批准", project.project_id)
+            workflow.analyze(task.task_id)
+
+            replanned = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(
+                replanned.status,
+                AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+            )
+            self.assertEqual(replanned.plan_version, 2)
+            self.assertEqual(replanned.approved_plan_version, 1)
+            self.assertEqual(replanned.artifacts["plan"], "artifacts/plans/2.json")
+            self.assertEqual(
+                [request.role for request in runtime.requests],
+                ["planner", "executor", "reviewer", "planner"],
+            )
+            second_planner_request = runtime.requests[-1]
+            self.assertEqual(second_planner_request.session_id, "planner-replan-session")
+            self.assertIn("原计划遗漏关键约束", second_planner_request.instructions)
+            self.assertEqual(
+                json.loads(
+                    (
+                        root
+                        / "tasks"
+                        / task.task_id
+                        / "artifacts/plans/2.json"
+                    ).read_text("utf-8")
+                )["steps"],
+                second_plan["steps"],
+            )
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(completed.approved_plan_version, 2)
+            self.assertEqual(
+                [request.role for request in runtime.requests],
+                ["planner", "executor", "reviewer", "planner", "executor", "reviewer"],
+            )
+            self.assertEqual(runtime.requests[-1].session_id, "reviewer-replan-session")
+            first_review = json.loads(
+                (
+                    root
+                    / "tasks"
+                    / task.task_id
+                    / "artifacts/rounds/1/review.json"
+                ).read_text("utf-8")
+            )
+            self.assertEqual(first_review["verdict"], "replan")
+            final_diff = (
+                root
+                / "tasks"
+                / task.task_id
+                / "artifacts/rounds/2/changes.diff"
+            ).read_text("utf-8")
+            self.assertIn("result.txt", final_diff)
+            self.assertIn("+done", final_diff)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,12 @@ class GitWorktreeService:
             task_branch=task_branch,
         )
 
-    def ensure_prepared(self, project: Project, prepared: PreparedWorktree) -> PreparedWorktree:
+    def ensure_prepared(
+        self,
+        project: Project,
+        prepared: PreparedWorktree,
+        allow_task_changes: bool = False,
+    ) -> PreparedWorktree:
         repository = Path(project.repository)
         target = prepared.path.resolve()
         self._validate_task_branch(prepared.task_id, prepared.task_branch)
@@ -60,7 +65,8 @@ class GitWorktreeService:
                 raise ValueError(
                     f"任务 worktree 基线不匹配：期望 {prepared.base_commit}，实际 {actual_commit}。"
                 )
-            self._require_clean(target)
+            if not allow_task_changes:
+                self._require_clean(target)
             return prepared
         if target.exists():
             raise ValueError(f"任务路径存在但不是项目已注册的 worktree：{target}")
@@ -147,9 +153,17 @@ class GitWorktreeService:
             raise ValueError("目标项目存在未提交修改，不能创建任务 worktree。")
 
     def _git(self, repository: Path, *args: str) -> str:
+        trusted_repository = Path(repository).resolve()
         try:
             result = subprocess.run(
-                ["git", "-C", str(repository), *args],
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={trusted_repository}",
+                    "-C",
+                    str(trusted_repository),
+                    *args,
+                ],
                 check=False,
                 capture_output=True,
                 text=True,

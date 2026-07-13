@@ -8,7 +8,11 @@ import time
 import unittest
 from pathlib import Path
 
-from app.agents.codex_cli import CodexCliProfile, CodexCliRuntime
+from app.agents.codex_cli import (
+    CodexCliProfile,
+    CodexCliRuntime,
+    load_codex_cli_profile,
+)
 from app.agents.contracts import (
     AgentAccess,
     AgentBudget,
@@ -82,6 +86,11 @@ events = [
 ]
 for event in events:
     print(json.dumps(event), flush=True)
+'''
+
+HANGING_COMPLETE_FAKE_CODEX = FAKE_CODEX + r'''
+import time
+time.sleep(30)
 '''
 
 SLOW_FAKE_CODEX = r'''
@@ -236,6 +245,90 @@ class CodexCliRuntimeTest(unittest.TestCase):
                         model="gpt-test",
                     )
                 )
+
+    def test_allowlists_relay_provider_while_ignoring_other_user_config(self) -> None:
+        config = self.root / "config.toml"
+        config.write_text(
+            """
+model_provider = "relay"
+model = "relay-model"
+dangerously_bypass_approvals_and_sandbox = true
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example.test/api/coding"
+wire_api = "responses"
+requires_openai_auth = true
+
+[mcp_servers.untrusted]
+command = "untrusted-command"
+
+[windows]
+sandbox = "elevated"
+""".strip(),
+            encoding="utf-8",
+        )
+        profile = load_codex_cli_profile(config_path=config)
+        runtime = CodexCliRuntime(
+            CodexCliProfile(
+                command=[sys.executable, str(self.script)],
+                model=profile.model,
+                provider=profile.provider,
+                windows_sandbox=profile.windows_sandbox,
+            )
+        )
+
+        result = runtime.invoke(self.request("use the relay"))
+
+        self.assertTrue(result.succeeded, result.error)
+        args = self.invocation()["args"]
+        self.assertIn("--ignore-user-config", args)
+        self.assertIn('model_provider="relay"', args)
+        self.assertIn(
+            'model_providers.relay.base_url="https://relay.example.test/api/coding"',
+            args,
+        )
+        self.assertNotIn("untrusted-command", args)
+        self.assertNotIn("dangerously_bypass_approvals_and_sandbox", args)
+        self.assertIn('windows.sandbox="elevated"', args)
+        self.assertEqual(result.model, "relay-model")
+        self.assertEqual(result.runtime_config["model_provider"], "relay")
+        self.assertEqual(result.runtime_config["windows_sandbox"], "elevated")
+
+    def test_turn_completed_is_terminal_when_process_does_not_exit(self) -> None:
+        hanging_script = self.root / "hanging_complete_codex.py"
+        hanging_script.write_text(HANGING_COMPLETE_FAKE_CODEX, encoding="utf-8")
+        runtime = CodexCliRuntime(
+            CodexCliProfile(
+                command=[sys.executable, str(hanging_script)],
+                model="gpt-test",
+            )
+        )
+
+        started = time.monotonic()
+        result = runtime.invoke(self.request("finish without process EOF"))
+
+        self.assertTrue(result.succeeded, result.error)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(result.session_id, "session-123")
+        self.assertEqual(result.events[-1].event_type, AgentEventType.COMPLETED)
+
+    def test_rejects_unsafe_relay_provider_configuration(self) -> None:
+        config = self.root / "unsafe-config.toml"
+        config.write_text(
+            """
+model_provider = "relay"
+[model_providers.relay]
+name = "Relay"
+base_url = "https://user:secret@relay.example.test"
+wire_api = "responses"
+requires_openai_auth = true
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "无嵌入凭据"):
+            load_codex_cli_profile(config_path=config)
 
     def test_health_check_maps_authentication_status(self) -> None:
         logged_out_script = self.root / "logged_out_codex.py"

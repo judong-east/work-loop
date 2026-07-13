@@ -28,6 +28,7 @@ _INHERITED_ENVIRONMENT = {
     "SYSTEMROOT",
     "TEMP",
     "TMP",
+    "USERPROFILE",
     "WINDIR",
 }
 @dataclass
@@ -208,36 +209,45 @@ class CodexCommandSandbox:
                 inherited_names=sorted(environment),
             )
 
-        outcome = self.processes.run(
-            self._sandbox_argv(workspace, command.argv),
-            workspace,
-            timeout_seconds,
-            environment,
-        )
+        validation_temp = workspace / ".wl-vtmp"
+        validation_temp.mkdir()
+        command_environment = {
+            **environment,
+            "TEMP": str(validation_temp),
+            "TMP": str(validation_temp),
+        }
+        try:
+            outcome = self.processes.run(
+                self._sandbox_argv(workspace, command.argv),
+                workspace,
+                timeout_seconds,
+                command_environment,
+            )
+        finally:
+            shutil.rmtree(validation_temp, ignore_errors=True)
         return SandboxedCommandOutcome(
             **outcome.__dict__,
             sandbox="codex-cli",
-            inherited_names=sorted(environment),
+            inherited_names=sorted(command_environment),
         )
 
     def _sandbox_argv(self, workspace: Path, command: list[str]) -> list[str]:
         executable = shutil.which(self.executable, path=minimal_environment().get("PATH"))
         if not executable:
             return []
-        return [
+        argv = [
             executable,
             "sandbox",
             "--include-managed-config",
-            "-c",
-            'permissions.workloop-validation.default_permissions="workspace-write"',
             "-P",
-            "workloop-validation",
+            ":workspace",
             "--sandbox-state-disable-network",
             "-C",
             str(workspace),
-            "--",
-            *command,
         ]
+        if platform.system() == "Windows":
+            argv.extend(["-c", 'windows.sandbox="elevated"'])
+        return [*argv, "--", *command]
 
     def _canary_failure(self, outcome: ProcessOutcome, boundary: str) -> str:
         if outcome.exit_code == 86:

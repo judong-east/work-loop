@@ -11,12 +11,21 @@ from app.core.contracts import Severity, new_id, utc_now
 class AgentTaskStatus(str, Enum):
     PREPARING_WORKSPACE = "preparing_workspace"
     DRAFT = "draft"
+    QUEUED_FOR_ANALYSIS = "queued_for_analysis"
     ANALYZING = "analyzing"
     WAITING_FOR_PLAN_APPROVAL = "waiting_for_plan_approval"
+    QUEUED_FOR_EXECUTION = "queued_for_execution"
+    QUEUED_FOR_RECOVERY = "queued_for_recovery"
     EXECUTING = "executing"
     VALIDATING = "validating"
     REVIEWING = "reviewing"
+    REPLANNING = "replanning"
+    INTERRUPTED = "interrupted"
+    PAUSED = "paused"
     READY_TO_DELIVER = "ready_to_deliver"
+    INTEGRATION_REQUIRED = "integration_required"
+    INTEGRATING = "integrating"
+    DELIVERED = "delivered"
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLING = "cancelling"
@@ -26,6 +35,7 @@ class AgentTaskStatus(str, Enum):
 ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     AgentTaskStatus.DRAFT: {
         AgentTaskStatus.PREPARING_WORKSPACE,
+        AgentTaskStatus.QUEUED_FOR_ANALYSIS,
         AgentTaskStatus.ANALYZING,
         AgentTaskStatus.CANCELLING,
     },
@@ -33,36 +43,98 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
         AgentTaskStatus.DRAFT,
         AgentTaskStatus.CANCELLING,
     },
+    AgentTaskStatus.QUEUED_FOR_ANALYSIS: {
+        AgentTaskStatus.ANALYZING,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.CANCELLING,
+    },
     AgentTaskStatus.ANALYZING: {
         AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
         AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL: {
+        AgentTaskStatus.QUEUED_FOR_ANALYSIS,
+        AgentTaskStatus.QUEUED_FOR_EXECUTION,
         AgentTaskStatus.EXECUTING,
         AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.QUEUED_FOR_EXECUTION: {
+        AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.QUEUED_FOR_RECOVERY: {
+        AgentTaskStatus.ANALYZING,
+        AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.REVIEWING,
+        AgentTaskStatus.REPLANNING,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
+        AgentTaskStatus.CANCELLING,
+        AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.EXECUTING: {
         AgentTaskStatus.VALIDATING,
         AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
         AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.VALIDATING: {
         AgentTaskStatus.REVIEWING,
         AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
         AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.REVIEWING: {
         AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.REPLANNING,
         AgentTaskStatus.READY_TO_DELIVER,
+        AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
+        AgentTaskStatus.CANCELLING,
+        AgentTaskStatus.FAILED,
+    },
+    AgentTaskStatus.REPLANNING: {
+        AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+        AgentTaskStatus.INTERRUPTED,
+        AgentTaskStatus.PAUSED,
+        AgentTaskStatus.CANCELLING,
+        AgentTaskStatus.FAILED,
+    },
+    AgentTaskStatus.INTERRUPTED: {
+        AgentTaskStatus.QUEUED_FOR_RECOVERY,
+        AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.PAUSED: {
+        AgentTaskStatus.QUEUED_FOR_RECOVERY,
+        AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.READY_TO_DELIVER: {
+        AgentTaskStatus.INTEGRATION_REQUIRED,
+        AgentTaskStatus.DELIVERED,
+    },
+    AgentTaskStatus.INTEGRATION_REQUIRED: {
+        AgentTaskStatus.INTEGRATING,
+        AgentTaskStatus.CANCELLING,
+    },
+    AgentTaskStatus.INTEGRATING: {
+        AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.INTEGRATION_REQUIRED,
         AgentTaskStatus.BLOCKED,
         AgentTaskStatus.CANCELLING,
         AgentTaskStatus.FAILED,
     },
-    AgentTaskStatus.READY_TO_DELIVER: set(),
-    AgentTaskStatus.BLOCKED: set(),
+    AgentTaskStatus.DELIVERED: set(),
+    AgentTaskStatus.BLOCKED: {AgentTaskStatus.QUEUED_FOR_RECOVERY},
     AgentTaskStatus.FAILED: set(),
     AgentTaskStatus.CANCELLING: {AgentTaskStatus.CANCELLED},
     AgentTaskStatus.CANCELLED: set(),
@@ -85,9 +157,34 @@ class AgentPolicy:
 
 @dataclass
 class AgentBudget:
-    total_timeout_seconds: int = 1800
-    idle_timeout_seconds: int = 120
+    total_timeout_seconds: float = 1800
+    idle_timeout_seconds: float = 120
     max_cost_usd: float | None = None
+
+
+@dataclass
+class TaskBudget:
+    total_timeout_seconds: float = 7200
+    call_timeout_seconds: float = 1800
+    idle_timeout_seconds: float = 120
+    max_cost_usd: float | None = None
+    max_iterations: int = 3
+    consumed_active_seconds: float = 0.0
+    consumed_cost_usd: float = 0.0
+
+    def validate(self) -> None:
+        if (
+            self.total_timeout_seconds <= 0
+            or self.call_timeout_seconds <= 0
+            or self.idle_timeout_seconds <= 0
+        ):
+            raise ValueError("任务时间预算必须是正数。")
+        if self.max_cost_usd is not None and self.max_cost_usd <= 0:
+            raise ValueError("任务费用预算必须是正数。")
+        if self.max_iterations <= 0:
+            raise ValueError("任务最大返修轮次必须大于 0。")
+        if self.consumed_active_seconds < 0 or self.consumed_cost_usd < 0:
+            raise ValueError("任务已消耗预算不能为负数。")
 
 
 class AgentEventType(str, Enum):
@@ -328,6 +425,53 @@ class ReviewResult:
 
 
 @dataclass
+class DeliveryReport:
+    requirement_summary: str
+    acceptance: list[AcceptanceResult]
+    modified_files: list[str]
+    implementation_summary: list[str]
+    validation_evidence: list[dict[str, Any]]
+    review_verdict: str
+    review_summary: str
+    known_risks: list[str]
+    human_next_steps: list[str]
+    task_branch: str
+    target_branch: str
+    target_commit: str
+    task_commit: str
+    generated_at: str = field(default_factory=utc_now)
+    schema_version: int = 1
+
+
+def delivery_report_from_dict(data: dict[str, Any]) -> DeliveryReport:
+    if not isinstance(data, dict):
+        raise ValueError("DeliveryReport 必须是对象。")
+    raw_acceptance = data.get("acceptance")
+    evidence = data.get("validation_evidence")
+    if not isinstance(raw_acceptance, list):
+        raise ValueError("DeliveryReport acceptance 必须是数组。")
+    if not isinstance(evidence, list) or not all(isinstance(item, dict) for item in evidence):
+        raise ValueError("DeliveryReport validation_evidence 必须是对象数组。")
+    return DeliveryReport(
+        requirement_summary=_string(data, "requirement_summary"),
+        acceptance=[AcceptanceResult.from_dict(item) for item in raw_acceptance],
+        modified_files=_string_list(data, "modified_files"),
+        implementation_summary=_string_list(data, "implementation_summary"),
+        validation_evidence=[dict(item) for item in evidence],
+        review_verdict=_string(data, "review_verdict"),
+        review_summary=_string(data, "review_summary"),
+        known_risks=_string_list(data, "known_risks"),
+        human_next_steps=_string_list(data, "human_next_steps"),
+        task_branch=_string(data, "task_branch"),
+        target_branch=_string(data, "target_branch"),
+        target_commit=_string(data, "target_commit"),
+        task_commit=_string(data, "task_commit"),
+        generated_at=str(data.get("generated_at", utc_now())),
+        schema_version=int(data.get("schema_version", 1)),
+    )
+
+
+@dataclass
 class AgentRequest:
     task_id: str
     role: str
@@ -363,23 +507,52 @@ class ValidationResult:
     error: str = ""
     schema_version: int = 1
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ValidationResult":
+        if not isinstance(data, dict) or not isinstance(data.get("passed"), bool):
+            raise ValueError("验证结果必须包含 passed 布尔值。")
+        checks = data.get("checks", [])
+        if not isinstance(checks, list) or not all(isinstance(item, dict) for item in checks):
+            raise ValueError("验证结果 checks 必须是对象数组。")
+        return cls(
+            passed=data["passed"],
+            checks=[dict(item) for item in checks],
+            error=str(data.get("error", "")),
+            schema_version=int(data.get("schema_version", 1)),
+        )
+
 
 @dataclass
 class AgentTask:
     title: str
     requirement: str
     project_id: str = ""
+    workflow_id: str = "guarded"
+    workflow: dict[str, Any] = field(default_factory=dict)
     base_commit: str = ""
     target_branch: str = ""
     task_branch: str = ""
     workspace: str = ""
+    delivery_base_commit: str = ""
+    task_commit: str = ""
+    delivery_target_commit: str = ""
+    delivered_commit: str = ""
+    integration_count: int = 0
     task_id: str = field(default_factory=lambda: new_id("TASK"))
     status: AgentTaskStatus = AgentTaskStatus.DRAFT
     plan_version: int = 0
     approved_plan_version: int = 0
     iteration: int = 0
+    plan_iteration: int = 0
     run_count: int = 0
+    queue_position: int = 0
+    active_operation: str = ""
+    recovery_mode: str = ""
+    interrupted_status: str = ""
+    pause_reason: str = ""
+    budget: TaskBudget = field(default_factory=TaskBudget)
     sessions: dict[str, str] = field(default_factory=dict)
+    clarifications: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     transitions: list[dict[str, str]] = field(default_factory=list)
     error: str = ""
@@ -404,17 +577,36 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         title=str(data["title"]),
         requirement=str(data["requirement"]),
         project_id=str(data.get("project_id", "")),
+        workflow_id=str(data.get("workflow_id", "guarded")),
+        workflow=dict(data.get("workflow", {})) if isinstance(data.get("workflow", {}), dict) else {},
         base_commit=str(data.get("base_commit", "")),
         target_branch=str(data.get("target_branch", "")),
         task_branch=str(data.get("task_branch", "")),
         workspace=str(data.get("workspace", "")),
+        delivery_base_commit=str(data.get("delivery_base_commit", "")),
+        task_commit=str(data.get("task_commit", "")),
+        delivery_target_commit=str(data.get("delivery_target_commit", "")),
+        delivered_commit=str(data.get("delivered_commit", "")),
+        integration_count=int(data.get("integration_count", 0)),
         task_id=str(data["task_id"]),
         status=AgentTaskStatus(data.get("status", AgentTaskStatus.DRAFT.value)),
         plan_version=int(data.get("plan_version", 0)),
         approved_plan_version=int(data.get("approved_plan_version", 0)),
         iteration=int(data.get("iteration", 0)),
+        plan_iteration=int(data.get("plan_iteration", data.get("iteration", 0))),
         run_count=int(data.get("run_count", 0)),
+        queue_position=int(data.get("queue_position", 0)),
+        active_operation=str(data.get("active_operation", "")),
+        recovery_mode=str(data.get("recovery_mode", "")),
+        interrupted_status=str(data.get("interrupted_status", "")),
+        pause_reason=str(data.get("pause_reason", "")),
+        budget=task_budget_from_dict(data.get("budget", {})),
         sessions={str(key): str(value) for key, value in data.get("sessions", {}).items()},
+        clarifications=[
+            {str(key): str(value) for key, value in item.items()}
+            for item in data.get("clarifications", [])
+            if isinstance(item, dict)
+        ],
         artifacts={str(key): str(value) for key, value in data.get("artifacts", {}).items()},
         transitions=[
             {str(key): str(value) for key, value in item.items()}
@@ -426,3 +618,22 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         created_at=str(data.get("created_at", utc_now())),
         updated_at=str(data.get("updated_at", utc_now())),
     )
+
+
+def task_budget_from_dict(data: Any) -> TaskBudget:
+    source = data if isinstance(data, dict) else {}
+    budget = TaskBudget(
+        total_timeout_seconds=float(source.get("total_timeout_seconds", 7200)),
+        call_timeout_seconds=float(source.get("call_timeout_seconds", 1800)),
+        idle_timeout_seconds=float(source.get("idle_timeout_seconds", 120)),
+        max_cost_usd=(
+            float(source["max_cost_usd"])
+            if source.get("max_cost_usd") is not None
+            else None
+        ),
+        max_iterations=int(source.get("max_iterations", 3)),
+        consumed_active_seconds=float(source.get("consumed_active_seconds", 0.0)),
+        consumed_cost_usd=float(source.get("consumed_cost_usd", 0.0)),
+    )
+    budget.validate()
+    return budget
