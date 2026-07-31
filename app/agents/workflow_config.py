@@ -19,11 +19,19 @@ class WorkflowNodeKind(str, Enum):
     DELIVERY = "delivery"
 
 
+# Nodes that invoke an LLM agent and can carry rich instructions.
 AGENT_NODE_KINDS = {
     WorkflowNodeKind.PLANNER,
     WorkflowNodeKind.EXECUTOR,
     WorkflowNodeKind.REVIEWER,
 }
+# Kinds that may appear multiple times in a workflow (flexible middle section).
+MULTI_INSTANCE_KINDS = {
+    WorkflowNodeKind.EXECUTOR,
+    WorkflowNodeKind.VALIDATION,
+    WorkflowNodeKind.REVIEWER,
+}
+# Kinds that must appear at least once.
 REQUIRED_NODE_KINDS = [
     WorkflowNodeKind.PLANNER,
     WorkflowNodeKind.EXECUTOR,
@@ -56,6 +64,10 @@ class WorkflowDefinition:
 
     def node(self, kind: WorkflowNodeKind) -> WorkflowNode:
         return next(node for node in self.nodes if node.kind is kind)
+
+    def nodes_of(self, kind: WorkflowNodeKind) -> list[WorkflowNode]:
+        """Return all nodes matching *kind*, preserving workflow order."""
+        return [node for node in self.nodes if node.kind is kind]
 
     def instructions_for(self, kind: WorkflowNodeKind) -> str:
         return self.node(kind).instructions.strip()
@@ -131,8 +143,6 @@ def workflow_from_dict(data: Any, *, builtin: bool = False) -> WorkflowDefinitio
         if not node_label or len(node_label) > 80:
             raise ValueError(f"第 {index} 个节点名称不能为空且不能超过 80 个字符。")
         instructions = str(raw.get("instructions", "")).strip()
-        if instructions and kind not in AGENT_NODE_KINDS:
-            raise ValueError(f"只有 Agent 节点可以设置附加指令：{node_id}。")
         if len(instructions) > 4000:
             raise ValueError(f"节点附加指令不能超过 4000 个字符：{node_id}。")
         nodes.append(
@@ -144,21 +154,35 @@ def workflow_from_dict(data: Any, *, builtin: bool = False) -> WorkflowDefinitio
             )
         )
 
+    # ---- Structural validation (flexible) ----
     kinds = [node.kind for node in nodes]
+
+    # Every required kind must appear at least once.
     for required in REQUIRED_NODE_KINDS:
-        if kinds.count(required) != 1:
-            raise ValueError(f"工作流必须且只能包含一个 {required.value} 节点。")
+        if required not in kinds:
+            raise ValueError(f"工作流必须至少包含一个 {required.value} 节点。")
+
+    # plan_approval is optional but at most one.
     if kinds.count(WorkflowNodeKind.PLAN_APPROVAL) > 1:
         raise ValueError("工作流最多包含一个 plan_approval 节点。")
-    expected = [WorkflowNodeKind.PLANNER]
+
+    # planner must be the first node; delivery must be the last.
+    if kinds[0] is not WorkflowNodeKind.PLANNER:
+        raise ValueError("工作流的第一个节点必须是 planner。")
+    if kinds[-1] is not WorkflowNodeKind.DELIVERY:
+        raise ValueError("工作流的最后一个节点必须是 delivery。")
+
+    # plan_approval may only appear between planner and the first executor.
     if WorkflowNodeKind.PLAN_APPROVAL in kinds:
-        expected.append(WorkflowNodeKind.PLAN_APPROVAL)
-    expected.extend(REQUIRED_NODE_KINDS[1:])
-    if kinds != expected:
-        raise ValueError(
-            "工作流节点顺序必须是 planner、可选 plan_approval、executor、"
-            "validation、reviewer、delivery。"
-        )
+        approval_index = kinds.index(WorkflowNodeKind.PLAN_APPROVAL)
+        if approval_index != 1:
+            raise ValueError("plan_approval 节点必须紧跟在 planner 之后。")
+
+    # Kinds that are NOT multi-instance must appear at most once.
+    for kind in set(kinds):
+        count = kinds.count(kind)
+        if count > 1 and kind not in MULTI_INSTANCE_KINDS:
+            raise ValueError(f"节点类型 {kind.value} 只能出现一次。")
     return WorkflowDefinition(
         workflow_id=workflow_id,
         label=label,
@@ -207,3 +231,13 @@ class WorkflowCatalog:
         by_id[workflow.workflow_id] = workflow
         write_json_atomic(self.path, {"schema_version": 1, "workflows": list(by_id.values())})
         return workflow
+
+    def delete(self, workflow_id: str) -> None:
+        if workflow_id in BUILTIN_WORKFLOWS:
+            raise ValueError("不能删除内置工作流。")
+        custom = [item for item in self.list_all() if not item.builtin]
+        by_id = {item.workflow_id: item for item in custom}
+        if workflow_id not in by_id:
+            raise ValueError(f"工作流不存在：{workflow_id}。")
+        del by_id[workflow_id]
+        write_json_atomic(self.path, {"schema_version": 1, "workflows": list(by_id.values())})

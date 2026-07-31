@@ -16,6 +16,19 @@ from app.models.config import load_routing_config
 LEGACY_COMMANDS = {"create-task", "run-loop", "resume", "deliver", "memory"}
 
 
+def _is_frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+def _default_root() -> str:
+    """Return the default data root: ~/.workloop when frozen, '.' otherwise."""
+    if _is_frozen():
+        data_dir = Path.home() / ".workloop"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return str(data_dir)
+    return "."
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Workloop reliable loop-engineering kernel")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -49,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser("serve", help="Start the local web console (binds 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--root", default=".", help="Project root that contains the tasks directory")
+    serve.add_argument("--root", default=_default_root(), help="Project root that contains the tasks directory")
+    serve.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser (frozen mode only)")
 
     memory = sub.add_parser("memory", help="List or review the cross-task experience memory")
     memory.add_argument("--approve", default=None, metavar="EXP_ID", help="Approve a pending experience")
@@ -138,10 +152,10 @@ def main() -> None:
             sys.exit(2)
         print(f"已交付 {len(applied)} 项变更到 {args.dest}")
     elif args.command == "serve":
-        # 局部导入避免 cli <-> web 循环依赖（web.server 复用本模块的 build_backends）
         from app.web.server import make_server
 
-        server = make_server(root, args.port)
+        should_open_browser = _is_frozen() and not args.no_browser
+        server = make_server(root, args.port, open_browser=should_open_browser)
         print(f"Workloop 控制台已启动：http://127.0.0.1:{server.server_address[1]}（Ctrl+C 停止）")
         try:
             server.serve_forever()

@@ -4,7 +4,9 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
+import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +29,16 @@ from app.models.backends.cli_backend import cancel_task_processes, clear_task_ca
 from app.models.config import load_routing_config
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
-STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _resolve_static_dir() -> Path:
+    """Return the static directory, handling both normal and PyInstaller-frozen modes."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "app" / "web" / "static"
+    return Path(__file__).parent / "static"
+
+
+STATIC_DIR = _resolve_static_dir()
 WORKFLOW_KINDS = {"parse", "planner", "executor", "reviewer", "delivery"}
 ROLE_KINDS = {"planner", "executor", "reviewer"}
 
@@ -127,6 +138,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/memory$"), "handle_add_memory"),
         (re.compile(r"^/api/memory/([\w-]+)/(approve|reject)$"), "handle_review_memory"),
     ]
+    DELETE_ROUTES = [
+        (re.compile(r"^/api/agent/workflows/([\w-]+)$"), "handle_agent_delete_workflow"),
+    ]
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - 基类签名
         pass  # 本机工具，静默访问日志
@@ -138,6 +152,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._dispatch(self.POST_ROUTES, needs_body=True)
+
+    def do_DELETE(self) -> None:
+        self._dispatch(self.DELETE_ROUTES, needs_body=False)
 
     def _dispatch(self, routes, needs_body: bool) -> None:
         parsed = urlsplit(self.path)
@@ -979,6 +996,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         saved = self._agent_workflow().workflows.save(workflow)
         self._send_json(200, to_plain(saved))
 
+    def handle_agent_delete_workflow(self, workflow_id: str) -> None:
+        self._agent_workflow().workflows.delete(workflow_id)
+        self._send_json(200, {"deleted": workflow_id})
+
     def handle_agent_create_task(self, body: dict) -> None:
         title = str(body.get("title", "")).strip()
         requirement = str(body.get("requirement", "")).strip()
@@ -1290,6 +1311,11 @@ class WorkloopServer(ThreadingHTTPServer):
 def make_server(
     root: Path,
     port: int = 8765,
+    open_browser: bool = False,
     **kwargs,
 ) -> WorkloopServer:
-    return WorkloopServer(root, port, **kwargs)
+    server = WorkloopServer(root, port, **kwargs)
+    if open_browser:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    return server
