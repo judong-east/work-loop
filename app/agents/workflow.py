@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -25,6 +26,8 @@ from app.agents.contracts import (
     TaskBudget,
     ValidationResult,
 )
+from app.agents.context_ledger import ContextLedger, ContextPack
+from app.agents.plan_graph import PlanGraph, PlanNode, PlanNodeKind
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
 from app.agents.workflow_config import (
@@ -70,6 +73,7 @@ class AgentWorkflow:
             raise ValueError("max_iterations 必须大于 0。")
         self.root = Path(root)
         self.store = AgentTaskStore(self.root / "tasks")
+        self.context_ledger = ContextLedger(self.root / "tasks")
         self.projects = ProjectRegistry(self.root / "projects")
         self.workflows = WorkflowCatalog(self.root / "workflows.json")
         self.git_worktrees = git_worktrees or GitWorktreeService()
@@ -156,6 +160,34 @@ class AgentWorkflow:
 
     def get_plan(self, task_id: str) -> ExecutionPlan:
         return self._load_plan(self.store.load(task_id))
+
+    def get_plan_graph(self, task_id: str) -> PlanGraph:
+        task = self.store.load(task_id)
+        if task.plan_graph:
+            return PlanGraph.from_dict(task.plan_graph)
+        plan = self.get_plan(task_id)
+        graph = PlanGraph.from_execution_plan(plan)
+        task.plan_graph = graph.to_dict()
+        self.store.save(task)
+        return graph
+
+    def save_plan_graph(self, task_id: str, graph: PlanGraph) -> AgentTask:
+        graph.validate()
+        task = self.store.load(task_id)
+        if task.status not in {
+            AgentTaskStatus.ANALYZING,
+            AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+            AgentTaskStatus.QUEUED_FOR_EXECUTION,
+        }:
+            raise ValueError(
+                f"plan graph can only be changed before execution; current status is {task.status.value}"
+            )
+        graph_ref = f"artifacts/plan-graphs/{graph.version}.json"
+        self.store.write_json(self.store.task_dir(task_id) / graph_ref, graph.to_dict())
+        task.plan_graph = graph.to_dict()
+        task.artifacts["plan_graph"] = graph_ref
+        self.store.save(task)
+        return task
 
     def get_workflow(self, task_id: str) -> WorkflowDefinition:
         return self._task_workflow(self.store.load(task_id))
@@ -359,6 +391,7 @@ class AgentWorkflow:
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
                 session_id=task.sessions.get("planner", ""),
+                **self._node_request_fields(task, PlanNodeKind.PLANNING),
             ),
         )
         if not response.succeeded:
@@ -378,6 +411,7 @@ class AgentWorkflow:
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
         task.artifacts["plan"] = plan_ref
+        self._save_generated_plan_graph(task, plan)
         if not self._transition_unless_cancelled(
             task, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL
         ):
@@ -406,6 +440,11 @@ class AgentWorkflow:
         policy = self.policy_loader.load(self.workspace_path(task.task_id), project.config_path)
         policy.required_commands(plan.required_tests)
         effective_agent_policy = self._agent_policy(policy, plan.required_tests)
+
+        # Opt-in to graph-driven execution: one executor call per plan node,
+        # in topological order, with structured context handoff. Off by default
+        # keeps the proven single-executor path untouched.
+        task.graph_execution = os.environ.get("WORKLOOP_EXECUTION", "").strip().lower() == "graph"
 
         if task.approved_plan_version != task.plan_version:
             task.plan_iteration = 0
@@ -478,29 +517,45 @@ class AgentWorkflow:
                 self.store.write_json(round_dir / "policy-before.json", before_check)
                 if not before_check.passed:
                     return self._block_policy(task, before_check)
-                execution = self._invoke_agent(
-                    task,
-                    AgentRequest(
-                        task_id=task.task_id,
-                        role="executor",
-                        instructions=self._executor_instructions(task, plan, review_feedback),
-                        workspace=workspace_path,
-                        access=AgentAccess.WORKSPACE_WRITE,
-                        policy=effective_agent_policy,
-                        budget=self._agent_budget(task),
-                        session_id=task.sessions.get("executor", ""),
-                    ),
-                )
-                if not execution.succeeded:
-                    return self._fail(task, execution)
-                try:
-                    execution_result = ExecutionResult.from_dict(execution.output)
-                except ValueError as error:
-                    return self._fail(
-                        task,
-                        AgentResult(succeeded=False, error=f"执行结果无效：{error}"),
+                if task.graph_execution:
+                    graph_outcome = self._execute_plan_graph(
+                        task=task,
+                        plan=plan,
+                        policy=policy,
+                        effective_agent_policy=effective_agent_policy,
+                        workspace=workspace,
+                        workspace_path=workspace_path,
+                        base=base,
+                        round_dir=round_dir,
+                        review_feedback=review_feedback,
                     )
-                self.store.write_json(round_dir / "execution.json", execution_result)
+                    if graph_outcome is not None:
+                        return graph_outcome
+                else:
+                    execution = self._invoke_agent(
+                        task,
+                        AgentRequest(
+                            task_id=task.task_id,
+                            role="executor",
+                            instructions=self._executor_instructions(task, plan, review_feedback),
+                            workspace=workspace_path,
+                            access=AgentAccess.WORKSPACE_WRITE,
+                            policy=effective_agent_policy,
+                            budget=self._agent_budget(task),
+                            session_id=task.sessions.get("executor", ""),
+                            **self._node_request_fields(task, PlanNodeKind.IMPLEMENTATION),
+                        ),
+                    )
+                    if not execution.succeeded:
+                        return self._fail(task, execution)
+                    try:
+                        execution_result = ExecutionResult.from_dict(execution.output)
+                    except ValueError as error:
+                        return self._fail(
+                            task,
+                            AgentResult(succeeded=False, error=f"执行结果无效：{error}"),
+                        )
+                    self.store.write_json(round_dir / "execution.json", execution_result)
                 current = workspace.snapshot()
                 self.store.write_text(round_dir / "changes.diff", workspace.diff(base, current))
                 phase = AgentTaskStatus.VALIDATING
@@ -618,6 +673,7 @@ class AgentWorkflow:
                     policy=effective_agent_policy,
                     budget=self._agent_budget(task),
                     session_id=task.sessions.get("reviewer", ""),
+                    **self._node_request_fields(task, PlanNodeKind.REVIEW),
                 ),
             )
             if not review.succeeded:
@@ -663,6 +719,10 @@ class AgentWorkflow:
     ) -> AgentTask:
         if not self._transition_unless_cancelled(task, AgentTaskStatus.REPLANNING):
             return self._finish_or_return_cancellation(task)
+        # A replan produces a fresh linear plan; reset graph mode so the next
+        # approval re-evaluates it (approve_plan re-reads WORKLOOP_EXECUTION).
+        task.graph_execution = False
+        task.node_runs = {}
         response = self._invoke_agent(
             task,
             AgentRequest(
@@ -674,6 +734,7 @@ class AgentWorkflow:
                 policy=self._agent_policy(policy, []),
                 budget=self._agent_budget(task),
                 session_id=task.sessions.get("planner", ""),
+                **self._node_request_fields(task, PlanNodeKind.PLANNING),
             ),
         )
         if not response.succeeded:
@@ -694,6 +755,7 @@ class AgentWorkflow:
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
         task.artifacts["plan"] = plan_ref
+        self._save_generated_plan_graph(task, plan)
         task.error = ""
         if not self._transition_unless_cancelled(
             task,
@@ -811,6 +873,371 @@ class AgentWorkflow:
                 f"Workloop ExecutionPlan 无效：{canonical_error}；"
                 f"Claude 原生计划映射无效：{native_error}"
             ) from native_error
+
+    def _save_generated_plan_graph(self, task: AgentTask, plan: ExecutionPlan) -> None:
+        graph = PlanGraph.from_execution_plan(plan)
+        graph = PlanGraph(
+            requirement_summary=graph.requirement_summary,
+            nodes=graph.nodes,
+            graph_id=graph.graph_id,
+            version=task.plan_version,
+            status=graph.status,
+            created_at=graph.created_at,
+            approved_at=graph.approved_at,
+        )
+        graph_ref = f"artifacts/plan-graphs/{graph.version}.json"
+        plan_ref = task.artifacts.get("plan", "") or f"artifacts/plans/{task.plan_version}.json"
+        self.store.write_json(self.store.task_dir(task.task_id) / graph_ref, graph.to_dict())
+        task.plan_graph = graph.to_dict()
+        task.artifacts["plan_graph"] = graph_ref
+        pack = ContextPack(
+            task_id=task.task_id,
+            node_id="planning",
+            summary=plan.requirement_understanding,
+            facts=list(plan.acceptance_criteria),
+            constraints=list(plan.constraints),
+            inputs=[task.requirement],
+            artifacts=[plan_ref, graph_ref],
+            open_questions=list(plan.open_questions),
+            source_sessions=[task.sessions.get("planner", "")],
+        )
+        task.artifacts["context_plan"] = self.context_ledger.write(pack)
+        self.store.save(task)
+
+    @staticmethod
+    def _node_request_fields(task: AgentTask, kind: PlanNodeKind) -> dict[str, str]:
+        if not task.plan_graph:
+            return {
+                "node_id": "",
+                "provider": "",
+                "model": "",
+                "thinking": "",
+                "context_ref": task.artifacts.get("context_plan", ""),
+            }
+        try:
+            graph = PlanGraph.from_dict(task.plan_graph)
+        except (TypeError, ValueError):
+            return {
+                "node_id": "",
+                "provider": "",
+                "model": "",
+                "thinking": "",
+                "context_ref": task.artifacts.get("context_plan", ""),
+            }
+        candidates = [node for node in graph.nodes if node.kind is kind and node.enabled]
+        if not candidates:
+            return {
+                "node_id": "",
+                "provider": "",
+                "model": "",
+                "thinking": "",
+                "context_ref": task.artifacts.get("context_plan", ""),
+            }
+        node = next((item for item in candidates if item.model.model or item.model.provider), candidates[0])
+        return {
+            "node_id": node.node_id,
+            "provider": node.model.provider,
+            "model": node.model.model,
+            "thinking": node.model.thinking,
+            "context_ref": task.artifacts.get("context_plan", ""),
+        }
+
+    # ------------------------------------------------------------------
+    # Graph-driven execution (one executor call per implementation node)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _node_fields(node: PlanNode, context_ref: str) -> dict[str, str]:
+        return {
+            "node_id": node.node_id,
+            "provider": node.model.provider,
+            "model": node.model.model,
+            "thinking": node.model.thinking,
+            "context_ref": context_ref,
+        }
+
+    def _node_context(self, task: AgentTask, node: PlanNode) -> ContextPack | None:
+        """Merge the ContextPacks produced by this node's dependencies (plus the
+        approved-plan pack) into one durable handoff pack. Returns ``None`` when
+        there is no upstream context to inject — the node then runs standalone.
+        """
+        packs: list[ContextPack] = []
+        for dependency in node.depends_on:
+            reference = str(task.node_runs.get(dependency, {}).get("context_ref", ""))
+            if reference:
+                pack = self.context_ledger.read_ref(task.task_id, reference)
+                if pack is not None:
+                    packs.append(pack)
+        plan_reference = task.artifacts.get("context_plan", "")
+        if plan_reference:
+            plan_pack = self.context_ledger.read_ref(task.task_id, plan_reference)
+            if plan_pack is not None:
+                packs.append(plan_pack)
+        if not packs:
+            return None
+        return self.context_ledger.merge(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            packs=packs,
+            summary=node.title or node.node_id,
+            inputs=list(node.inputs),
+        )
+
+    @staticmethod
+    def _node_instructions(node: PlanNode, context: ContextPack | None) -> str:
+        base = (node.instructions or node.title).strip() or node.title
+        if context is None:
+            return base
+        lines: list[str] = []
+        if context.facts:
+            lines.append("已完成的关键事实：")
+            lines.extend(f"- {fact}" for fact in context.facts)
+        if context.constraints:
+            lines.append("约束：")
+            lines.extend(f"- {constraint}" for constraint in context.constraints)
+        if context.decisions:
+            lines.append("已确定的决策：")
+            lines.extend(f"- {decision}" for decision in context.decisions)
+        if context.open_questions:
+            lines.append("未决问题：")
+            lines.extend(f"- {question}" for question in context.open_questions)
+        if not lines:
+            return base
+        return base + "\n\n# 上游节点交接的压缩上下文\n" + "\n".join(lines)
+
+    def _execute_plan_graph(
+        self,
+        task: AgentTask,
+        plan: ExecutionPlan,
+        policy: ProjectPolicy,
+        effective_agent_policy: AgentPolicy,
+        workspace: Workspace,
+        workspace_path: Path,
+        base: dict[str, str],
+        round_dir: Path,
+        review_feedback: ReviewResult | None,
+    ) -> AgentTask | None:
+        """Run the implementation/integration nodes of the task PlanGraph in
+        topological order, one executor call per node, with structured context
+        handoff between nodes. Returns ``None`` when the graph finished cleanly
+        (the combined ``ExecutionResult`` is written to ``round_dir``); returns
+        the task on a terminal outcome (paused/failed/blocked)."""
+        try:
+            graph = PlanGraph.from_dict(task.plan_graph)
+        except (TypeError, ValueError):
+            graph = PlanGraph.from_execution_plan(plan)
+        if not graph.implementation_nodes():
+            self.store.write_json(round_dir / "execution.json", ExecutionResult())
+            return None
+
+        completed: set[str] = set()
+        failed: set[str] = set()
+        # Replay finished nodes (resume path): completed/skipped nodes are left
+        # done; everything else (pending/running/failed) is re-run. Pre-complete
+        # the planning node, which represents the already-approved plan.
+        for node in graph.nodes:
+            status = str(task.node_runs.get(node.node_id, {}).get("status", ""))
+            if status in {"completed", "skipped"}:
+                completed.add(node.node_id)
+            if node.kind is PlanNodeKind.PLANNING and node.node_id not in completed:
+                completed.add(node.node_id)
+                task.node_runs.setdefault(
+                    node.node_id,
+                    {
+                        "status": "completed",
+                        "round": task.iteration,
+                        "session_id": task.sessions.get("planner", ""),
+                        "context_ref": task.artifacts.get("context_plan", ""),
+                        "run_ref": "",
+                        "result_ref": "",
+                        "started_at": "",
+                        "finished_at": "",
+                        "error": "",
+                    },
+                )
+        self.store.save(task)
+
+        while True:
+            ready = [
+                node
+                for node in graph.ready(completed, failed)
+                if node.kind in {PlanNodeKind.IMPLEMENTATION, PlanNodeKind.INTEGRATION}
+            ]
+            if not ready:
+                break
+            for node in ready:
+                outcome = self._run_plan_node(
+                    task, node, plan, policy, effective_agent_policy,
+                    workspace_path, review_feedback,
+                )
+                if outcome is not None:
+                    return outcome
+                completed.add(node.node_id)
+                self.store.save(task)
+
+        # Assemble the combined result from every completed implementation node,
+        # including nodes finished on a prior run that we just replayed (resume).
+        per_node_results: list[ExecutionResult] = []
+        for node in graph.implementation_nodes():
+            if node.node_id not in completed:
+                continue
+            result_ref = str(task.node_runs.get(node.node_id, {}).get("result_ref", ""))
+            if not result_ref:
+                continue
+            path = self.store.task_dir(task.task_id) / result_ref
+            if path.is_file():
+                per_node_results.append(
+                    ExecutionResult.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                )
+        self.store.write_json(round_dir / "execution.json", self._merge_node_results(per_node_results))
+        return None
+
+    def _run_plan_node(
+        self,
+        task: AgentTask,
+        node: PlanNode,
+        plan: ExecutionPlan,
+        policy: ProjectPolicy,
+        effective_agent_policy: AgentPolicy,
+        workspace_path: Path,
+        review_feedback: ReviewResult | None,
+    ) -> AgentTask | None:
+        """Execute one plan node via the executor runtime. Returns ``None`` on
+        success or skip (node state persisted); returns the task on a terminal
+        pause/failure that should stop the round."""
+        state = task.node_runs.setdefault(
+            node.node_id,
+            {
+                "status": "pending",
+                "round": task.iteration,
+                "session_id": "",
+                "context_ref": "",
+                "run_ref": "",
+                "result_ref": "",
+                "started_at": "",
+                "finished_at": "",
+                "error": "",
+            },
+        )
+        if state.get("status") in {"completed", "skipped"}:
+            return None
+
+        budget_error = self._task_budget_error(task)
+        if budget_error:
+            return self._pause(
+                task, budget_error, "节点执行前预算已耗尽。",
+                resume_phase=AgentTaskStatus.EXECUTING,
+            )
+
+        context = self._node_context(task, node)
+        context_ref = ""
+        if context is not None:
+            context_ref = f"artifacts/context/{node.node_id}/{context.version}.json"
+        request = AgentRequest(
+            task_id=task.task_id,
+            role="executor",
+            instructions=self._node_instructions(node, context),
+            workspace=workspace_path,
+            access=AgentAccess.WORKSPACE_WRITE,
+            policy=effective_agent_policy,
+            budget=self._agent_budget(task),
+            session_id=str(state.get("session_id", "")),
+            **self._node_fields(node, context_ref),
+        )
+
+        max_attempts = 2 if node.on_failure == "retry" else 1
+        result: AgentResult | None = None
+        for _ in range(max_attempts):
+            state["status"] = "running"
+            state["started_at"] = utc_now()
+            self.store.save(task)
+            result = self._invoke_agent(task, request)
+            if result.succeeded:
+                try:
+                    node_result = ExecutionResult.from_dict(result.output)
+                    break
+                except ValueError as error:
+                    result = AgentResult(
+                        succeeded=False, error=f"节点 {node.node_id} 结果无效：{error}"
+                    )
+            # failed attempt; loop again if attempts remain
+        else:
+            assert result is not None
+            return self._handle_node_failure(task, node, result, plan, policy, state)
+
+        result_ref = f"artifacts/node-runs/{node.node_id}/{task.iteration}.json"
+        self.store.write_json(self.store.task_dir(task.task_id) / result_ref, node_result)
+        state["status"] = "completed"
+        state["session_id"] = result.session_id
+        state["run_ref"] = task.artifacts.get("last_agent_run", "")
+        state["result_ref"] = result_ref
+        state["finished_at"] = utc_now()
+        state["error"] = ""
+        pack = ContextPack(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            summary=node.title or node.node_id,
+            facts=list(node_result.completed_steps),
+            inputs=list(node.inputs),
+            artifacts=[result_ref],
+            source_sessions=[result.session_id] if result.session_id else [],
+        )
+        state["context_ref"] = self.context_ledger.write(pack)
+        self.store.save(task)
+        return None
+
+    def _handle_node_failure(
+        self,
+        task: AgentTask,
+        node: PlanNode,
+        result: AgentResult,
+        plan: ExecutionPlan,
+        policy: ProjectPolicy,
+        state: dict,
+    ) -> AgentTask | None:
+        state["status"] = "failed"
+        state["error"] = result.error
+        state["finished_at"] = utc_now()
+        self.store.save(task)
+        if node.on_failure == "skip":
+            # Skip this node and let its dependents proceed; not terminal.
+            state["status"] = "skipped"
+            self.store.save(task)
+            return None
+        # NOTE(v1): node-level replan is mapped to a human pause rather than an
+        # automatic replan, because a true replan needs a reviewer-style
+        # handoff that node failures do not carry. The review-driven REPLAN
+        # path (REVIEWING phase -> reviewer verdict REPLAN) stays fully intact.
+        return self._pause(
+            task,
+            "node_failed",
+            f"节点 {node.node_id} 执行失败：{result.error}",
+            resume_phase=AgentTaskStatus.EXECUTING,
+        )
+
+    @staticmethod
+    def _merge_node_results(results: list[ExecutionResult]) -> ExecutionResult:
+        completed_steps: list[str] = []
+        modified_files: list[str] = []
+        tests: list = []
+        deviations: list[str] = []
+        remaining_risks: list[str] = []
+        next_steps: list[str] = []
+        for result in results:
+            completed_steps.extend(result.completed_steps)
+            modified_files.extend(result.modified_files)
+            tests.extend(result.tests)
+            deviations.extend(result.deviations)
+            remaining_risks.extend(result.remaining_risks)
+            next_steps.extend(result.next_steps)
+        return ExecutionResult(
+            completed_steps=list(dict.fromkeys(completed_steps)),
+            modified_files=list(dict.fromkeys(modified_files)),
+            tests=list(tests),
+            deviations=list(dict.fromkeys(deviations)),
+            remaining_risks=list(dict.fromkeys(remaining_risks)),
+            next_steps=list(dict.fromkeys(next_steps)),
+        )
 
     @staticmethod
     def _explicit_policy_tests(output: dict, policy: ProjectPolicy) -> list[str]:

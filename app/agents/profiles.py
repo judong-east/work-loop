@@ -13,6 +13,11 @@ ROLE_RUNTIME = {
     "executor": ("codex_cli", "workspace_write"),
     "reviewer": ("claude_code", "read_only"),
 }
+ROLE_RUNTIME_OPTIONS = {
+    "planner": {"claude_code", "pi_rpc"},
+    "executor": {"codex_cli", "pi_rpc"},
+    "reviewer": {"claude_code", "pi_rpc"},
+}
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,7 @@ def load_agent_profiles(path: Path) -> dict[str, AgentProfile]:
             raise ValueError("AgentProfile 禁止配置任意 command 模板。")
         selected_runtime = str(raw.get("runtime", ""))
         selected_access = str(raw.get("access", ""))
-        if selected_runtime != runtime or selected_access != access:
+        if selected_runtime not in ROLE_RUNTIME_OPTIONS[role] or selected_access != access:
             raise ValueError(
                 f"角色 {role} 必须使用 runtime={runtime}、access={access}。"
             )

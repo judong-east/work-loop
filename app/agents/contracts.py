@@ -481,6 +481,13 @@ class AgentRequest:
     policy: AgentPolicy = field(default_factory=AgentPolicy)
     budget: AgentBudget = field(default_factory=AgentBudget)
     session_id: str = ""
+    # Optional node-level overrides. Existing runtimes may ignore these fields.
+    node_id: str = ""
+    provider: str = ""
+    model: str = ""
+    thinking: str = ""
+    tools: list[str] = field(default_factory=list)
+    context_ref: str = ""
 
 
 @dataclass
@@ -552,6 +559,16 @@ class AgentTask:
     pause_reason: str = ""
     budget: TaskBudget = field(default_factory=TaskBudget)
     sessions: dict[str, str] = field(default_factory=dict)
+    plan_graph: dict[str, Any] = field(default_factory=dict)
+    # Per-node execution state for graph-driven tasks. Schema:
+    #   {node_id: {"status": "pending"|"running"|"completed"|"failed"|"skipped",
+    #              "round": int, "session_id": str, "context_ref": str,
+    #              "run_ref": str, "started_at": str, "finished_at": str, "error": str}}
+    node_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # When True, the EXECUTING phase is driven by the PlanGraph (one executor
+    # call per implementation node, in topological order) instead of a single
+    # executor invocation over the whole plan. Opt-in; default path unchanged.
+    graph_execution: bool = False
     clarifications: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     transitions: list[dict[str, str]] = field(default_factory=list)
@@ -602,6 +619,17 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         pause_reason=str(data.get("pause_reason", "")),
         budget=task_budget_from_dict(data.get("budget", {})),
         sessions={str(key): str(value) for key, value in data.get("sessions", {}).items()},
+        plan_graph=(
+            dict(data.get("plan_graph", {}))
+            if isinstance(data.get("plan_graph", {}), dict)
+            else {}
+        ),
+        node_runs={
+            str(key): dict(value)
+            for key, value in data.get("node_runs", {}).items()
+            if isinstance(value, dict)
+        },
+        graph_execution=bool(data.get("graph_execution", False)),
         clarifications=[
             {str(key): str(value) for key, value in item.items()}
             for item in data.get("clarifications", [])

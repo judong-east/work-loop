@@ -18,6 +18,8 @@ from app.agents.codex_cli import CodexCliRuntime, load_codex_cli_profile
 from app.agents.contracts import AgentTaskStatus, TaskBudget
 from app.agents.delivery import DeliveryService
 from app.agents.profiles import load_agent_profiles, migrate_legacy_profiles
+from app.agents.pi_rpc import PiRpcProfile, PiRpcRuntime
+from app.agents.plan_graph import PlanGraph
 from app.agents.runtime import RoleRoutedRuntime
 from app.agents.scheduler import PersistentAgentScheduler
 from app.agents.status_groups import task_status_group, task_status_priority
@@ -99,6 +101,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/projects$"), "handle_agent_projects"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_tasks"),
         (re.compile(r"^/api/agent/metrics$"), "handle_agent_metrics"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/plan-graph$"), "handle_agent_plan_graph"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)$"), "handle_agent_task_detail"),
         (re.compile(r"^/api/agent/queue$"), "handle_agent_queue"),
         (re.compile(r"^/api/agent/runtime-health$"), "handle_agent_runtime_health"),
@@ -115,6 +118,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/projects$"), "handle_agent_register_project"),
         (re.compile(r"^/api/agent/workflows$"), "handle_agent_save_workflow"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_create_task"),
+        (re.compile(r"^/api/agent/tasks/([\w-]+)/plan-graph$"), "handle_agent_save_plan_graph"),
         (re.compile(r"^/api/agent/profiles/migrate$"), "handle_agent_migrate_profiles"),
         (re.compile(r"^/api/agent/queue/run-next$"), "handle_agent_run_next"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/approve$"), "handle_agent_approve"),
@@ -678,6 +682,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             task_dir,
             task.artifacts.get("plan", ""),
         )
+        payload["plan_graph"] = task.plan_graph or self._safe_agent_artifact(
+            task_dir,
+            task.artifacts.get("plan_graph", ""),
+        )
         rounds = []
         rounds_root = task_dir / "artifacts" / "rounds"
         for path in sorted(
@@ -758,6 +766,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_agent_task_detail(self, task_id: str) -> None:
         task = self._agent_workflow().get_task(task_id)
         self._send_json(200, self._agent_detail(task))
+
+    def handle_agent_plan_graph(self, task_id: str) -> None:
+        self._send_json(200, self._agent_workflow().get_plan_graph(task_id).to_dict())
 
     def handle_agent_queue(self) -> None:
         state = self.server.agent_scheduler.store.load()
@@ -1034,6 +1045,11 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self.server.kick_agent_worker()
         self._send_json(202, self._agent_summary(self._agent_workflow().get_task(task.task_id)))
 
+    def handle_agent_save_plan_graph(self, task_id: str, body: dict) -> None:
+        graph = PlanGraph.from_dict(body)
+        task = self._agent_workflow().save_plan_graph(task_id, graph)
+        self._send_json(200, self._agent_detail(task))
+
     def handle_agent_migrate_profiles(self, body: dict) -> None:
         source = self._agent_config_path(str(body.get("source", "")), "models.json")
         destination = self._agent_config_path(
@@ -1251,11 +1267,48 @@ class WorkloopServer(ThreadingHTTPServer):
                 else os.environ.get("WORKLOOP_CODEX_MODEL", "")
             )
             reviewer_model = configured["reviewer"].model if configured else planner_model
+
+            def pi_runtime(model: str) -> PiRpcRuntime:
+                return PiRpcRuntime(
+                    PiRpcProfile(
+                        command=[os.environ.get("WORKLOOP_PI_COMMAND", "pi")],
+                        model=model or os.environ.get("WORKLOOP_PI_MODEL", ""),
+                        provider=os.environ.get("WORKLOOP_PI_PROVIDER", ""),
+                        config_dir=(
+                            Path(os.environ["WORKLOOP_PI_CONFIG_DIR"])
+                            if os.environ.get("WORKLOOP_PI_CONFIG_DIR")
+                            else None
+                        ),
+                    )
+                )
+
+            use_pi = os.environ.get("WORKLOOP_RUNTIME", "").strip().lower() == "pi_rpc"
+            planner_pi = use_pi or (
+                bool(configured) and configured["planner"].runtime == "pi_rpc"
+            )
+            executor_pi = use_pi or (
+                bool(configured) and configured["executor"].runtime == "pi_rpc"
+            )
+            reviewer_pi = use_pi or (
+                bool(configured) and configured["reviewer"].runtime == "pi_rpc"
+            )
             runtime = RoleRoutedRuntime(
                 {
-                    "planner": ClaudeCodeRuntime(ClaudeCodeProfile(model=planner_model)),
-                    "executor": CodexCliRuntime(load_codex_cli_profile(executor_model)),
-                    "reviewer": ClaudeCodeRuntime(ClaudeCodeProfile(model=reviewer_model)),
+                    "planner": (
+                        pi_runtime(os.environ.get("WORKLOOP_PI_PLANNER_MODEL", planner_model))
+                        if planner_pi
+                        else ClaudeCodeRuntime(ClaudeCodeProfile(model=planner_model))
+                    ),
+                    "executor": (
+                        pi_runtime(os.environ.get("WORKLOOP_PI_EXECUTOR_MODEL", executor_model))
+                        if executor_pi
+                        else CodexCliRuntime(load_codex_cli_profile(executor_model))
+                    ),
+                    "reviewer": (
+                        pi_runtime(os.environ.get("WORKLOOP_PI_REVIEWER_MODEL", reviewer_model))
+                        if reviewer_pi
+                        else ClaudeCodeRuntime(ClaudeCodeProfile(model=reviewer_model))
+                    ),
                 }
             )
             agent_workflow = AgentWorkflow(self.workloop_root / "agent-runtime", runtime)
