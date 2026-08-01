@@ -437,6 +437,71 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertEqual(result.status, AgentTaskStatus.READY_TO_DELIVER)
             self.assertEqual(result.node_runs["step-1"]["status"], "skipped")
 
+    def test_per_node_model_binding_flows_into_request(self) -> None:
+        # The headline feature: each node's ModelBinding (provider/model/thinking)
+        # reaches the runtime on the AgentRequest, so a single Pi runtime can
+        # route per node (Opus-planning / GPT-execution / Kimi-ui) without a
+        # separate runtime per node. This locks the wiring end-to-end.
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "backend": [
+                        FakeStep(
+                            output=executor_output(["实现后端 API"], ["backend.txt"]),
+                            writes={"backend.txt": "api\n"},
+                        )
+                    ],
+                    "ui": [
+                        FakeStep(
+                            output=executor_output(["实现前端页面"], ["ui.txt"]),
+                            writes={"ui.txt": "page\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("全栈任务", "后端加前端", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="后端加前端",
+                nodes=[
+                    planning_node(),
+                    impl_node(
+                        "backend",
+                        "实现后端 API",
+                        depends_on=["planning"],
+                        model=ModelBinding(provider="openai", model="gpt-5", thinking="high"),
+                    ),
+                    impl_node(
+                        "ui",
+                        "实现前端页面",
+                        depends_on=["backend"],
+                        model=ModelBinding(provider="moonshot", model="kimi-k2", thinking="low"),
+                    ),
+                    review_node("review", depends_on=["ui"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            backend_req = next(r for r in runtime.requests if r.node_id == "backend")
+            ui_req = next(r for r in runtime.requests if r.node_id == "ui")
+            # Each node's ModelBinding is honored on its request.
+            self.assertEqual(backend_req.model, "gpt-5")
+            self.assertEqual(backend_req.provider, "openai")
+            self.assertEqual(backend_req.thinking, "high")
+            self.assertEqual(ui_req.model, "kimi-k2")
+            self.assertEqual(ui_req.provider, "moonshot")
+            self.assertEqual(ui_req.thinking, "low")
+            # node_id is carried so a node-aware runtime could route per node.
+            self.assertEqual(backend_req.node_id, "backend")
+            self.assertEqual(ui_req.node_id, "ui")
+
     def test_default_path_is_single_executor_without_graph_env(self) -> None:
         # With WORKLOOP_EXECUTION unset, the proven single-executor path runs
         # and the per-node graph driver is dormant (regression guard).
