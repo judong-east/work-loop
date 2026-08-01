@@ -802,5 +802,171 @@ class NodeWorktreeExecutionTest(unittest.TestCase):
             )
 
 
+# ---------------------------------------------------------------------------
+# Bounded output self-repair
+# ---------------------------------------------------------------------------
+
+
+def invalid_executor_output() -> dict:
+    """A shape a real text-JSON model emits that ExecutionResult.from_dict
+    rejects: test items use name/status/detail instead of command/exit_code."""
+    return {
+        "completed_steps": ["写入 result.txt"],
+        "modified_files": ["result.txt"],
+        "tests": [{"name": "fake-check", "status": "pass", "detail": "ok"}],
+        "deviations": [],
+        "remaining_risks": [],
+        "next_steps": [],
+    }
+
+
+def invalid_review_output() -> dict:
+    """A shape a real text-JSON model emits that ReviewResult.from_dict
+    rejects: acceptance_results instead of acceptance."""
+    return {
+        "verdict": "pass",
+        "acceptance_results": [{"criterion": "result.txt 内容为 done", "passed": True}],
+        "issues": [],
+        "recommended_tests": [],
+        "summary": "实现和验证均通过。",
+    }
+
+
+class OutputRepairTest(unittest.TestCase):
+    """When a text-JSON runtime emits an unparseable output, the loop re-invokes
+    once with the parse error and a strict schema reminder (bounded self-repair).
+    Existing happy-path tests never trigger this — they emit valid output — so
+    these are the only tests covering the repair path. Repair is bounded to one
+    attempt; a still-bad output falls through to the existing failure handling."""
+
+    def _linear_workflow(self, root, runtime):
+        workflow, project = project_workflow(root, runtime)
+        task = workflow.create_task("生成结果", "创建 result.txt", project.project_id)
+        workflow.analyze(task.task_id)
+        return workflow, task
+
+    def test_executor_invalid_then_valid_self_repairs_and_delivers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        # First turn: writes the file but emits an unparseable
+                        # result (the test item lacks command/exit_code).
+                        FakeStep(
+                            output=invalid_executor_output(),
+                            writes={"result.txt": "done\n"},
+                        ),
+                        # Repair turn: emits a conforming result.
+                        FakeStep(output=executor_output(["写入 result.txt"], ["result.txt"])),
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, task = self._linear_workflow(root, runtime)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            # The original turn's file write survives (the model wrote the file
+            # correctly; only its JSON was wrong).
+            self.assertEqual(
+                (workflow.workspace_path(task.task_id) / "result.txt").read_text(encoding="utf-8"),
+                "done\n",
+            )
+            self.assertEqual(completed.node_runs["step-1"]["status"], "completed")
+            executor_reqs = [r for r in runtime.requests if r.role == "executor"]
+            self.assertEqual(len(executor_reqs), 2)
+            # The second executor invoke is the repair and carries the parse error.
+            self.assertIn("解析错误", executor_reqs[1].instructions)
+
+    def test_executor_repair_still_invalid_fails_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(output=invalid_executor_output()),
+                        FakeStep(output=invalid_executor_output()),
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, task = self._linear_workflow(root, runtime)
+            graph = PlanGraph(
+                requirement_summary="生成结果文件",
+                nodes=[
+                    planning_node(),
+                    impl_node("step-1", "写入 result.txt", depends_on=["planning"], on_failure="human"),
+                    review_node("review", depends_on=["step-1"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            result = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(result.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(result.pause_reason, "node_failed")
+            self.assertEqual(result.node_runs["step-1"]["status"], "failed")
+            self.assertIn("结果无效", result.node_runs["step-1"]["error"])
+            # Bounded: exactly one original invoke + one repair invoke, no more.
+            self.assertEqual(len([r for r in runtime.requests if r.role == "executor"]), 2)
+
+    def test_reviewer_invalid_then_valid_self_repairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(
+                            output=executor_output(["写入 result.txt"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "review": [
+                        FakeStep(output=invalid_review_output()),
+                        FakeStep(output=passing_review()),
+                    ],
+                }
+            )
+            workflow, task = self._linear_workflow(root, runtime)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            review_reqs = [r for r in runtime.requests if r.role == "reviewer"]
+            self.assertEqual(len(review_reqs), 2)
+            self.assertIn("解析错误", review_reqs[1].instructions)
+
+    def test_reviewer_repair_still_invalid_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(
+                            output=executor_output(["写入 result.txt"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "review": [
+                        FakeStep(output=invalid_review_output()),
+                        FakeStep(output=invalid_review_output()),
+                    ],
+                }
+            )
+            workflow, task = self._linear_workflow(root, runtime)
+
+            result = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(result.status, AgentTaskStatus.FAILED)
+            self.assertIn("审核结果无效", result.error)
+            self.assertEqual(len([r for r in runtime.requests if r.role == "reviewer"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

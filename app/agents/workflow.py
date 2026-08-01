@@ -93,6 +93,15 @@ def _bound_run_events(events: Any) -> list[Any]:
     ]
 
 
+# When a text-JSON runtime (PiRpcRuntime) emits output the strict from_dict
+# parsers reject, the model often only needs a nudge: re-invoke once with the
+# parse error and a strict schema reminder so it can self-correct, instead of
+# failing the whole task. Bounded to one attempt; a still-bad output falls
+# through to the existing failure handling. ClaudeCodeRuntime enforces the
+# schema via tool input_schema and never reaches this path.
+_MAX_OUTPUT_REPAIR_ATTEMPTS = 1
+
+
 # PiRpcRuntime gets structured output by parsing the model's final text
 # message as JSON (see app/agents/pi_rpc.py), so the executor prompt must
 # explicitly request an ExecutionResult JSON object. ClaudeCodeRuntime
@@ -783,24 +792,37 @@ class AgentWorkflow:
                 )
             ):
                 return self._finish_or_return_cancellation(task)
-            review = self._invoke_agent(
-                task,
-                AgentRequest(
-                    task_id=task.task_id,
-                    role="reviewer",
-                    instructions=self._reviewer_instructions(task, plan, diff, validation),
-                    workspace=workspace_path,
-                    access=AgentAccess.READ_ONLY,
-                    policy=effective_agent_policy,
-                    budget=self._agent_budget(task),
-                    session_id=task.sessions.get("reviewer", ""),
-                    **self._node_request_fields(task, PlanNodeKind.REVIEW),
-                ),
+            review_request = AgentRequest(
+                task_id=task.task_id,
+                role="reviewer",
+                instructions=self._reviewer_instructions(task, plan, diff, validation),
+                workspace=workspace_path,
+                access=AgentAccess.READ_ONLY,
+                policy=effective_agent_policy,
+                budget=self._agent_budget(task),
+                session_id=task.sessions.get("reviewer", ""),
+                **self._node_request_fields(task, PlanNodeKind.REVIEW),
             )
+            review = self._invoke_agent(task, review_request)
             if not review.succeeded:
                 return self._fail(task, review)
+            # A parse error is a shape problem a model can self-correct on a
+            # second turn; a validate_pass error is a semantic rejection
+            # (missing/failed acceptance) that repair cannot fix. Only the
+            # former triggers a bounded repair; the latter fails as before.
             try:
                 review_result = ReviewResult.from_dict(review.output)
+            except ValueError as error:
+                repaired = self._repair_review_output(
+                    task, review_request, error, review.output
+                )
+                if repaired is None:
+                    return self._fail(
+                        task,
+                        AgentResult(succeeded=False, error=f"审核结果无效：{error}"),
+                    )
+                review_result = repaired[0]
+            try:
                 review_result.validate_pass(plan)
             except ValueError as error:
                 return self._fail(
@@ -1306,6 +1328,18 @@ class AgentWorkflow:
                         node_result = ExecutionResult.from_dict(result.output)
                         break
                     except ValueError as error:
+                        # The model produced output we cannot parse. Try one
+                        # bounded self-repair (re-invoke with the parse error and
+                        # a schema reminder) before declaring the attempt failed;
+                        # a real text-JSON runtime often self-corrects on the
+                        # second turn. On success, adopt the repaired result so
+                        # the node's session/run refs point at the last invoke.
+                        repaired = self._repair_node_output(
+                            task, request, error, result.output
+                        )
+                        if repaired is not None:
+                            node_result, result = repaired
+                            break
                         result = AgentResult(
                             succeeded=False, error=f"节点 {node.node_id} 结果无效：{error}"
                         )
@@ -1433,6 +1467,113 @@ class AgentWorkflow:
             f"节点 {node.node_id} 执行失败：{result.error}",
             resume_phase=AgentTaskStatus.EXECUTING,
         )
+
+    # ------------------------------------------------------------------
+    # Bounded output self-repair (text-JSON runtimes only)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _repair_request(request: AgentRequest, correction: str) -> AgentRequest:
+        """Return a fresh request asking the model to re-emit conforming JSON.
+
+        ``session_id`` is cleared so the repair is a self-contained turn that
+        carries the prior bad output and the parse error in its instructions;
+        this works for any runtime, including ones that cannot resume sessions.
+        Node routing fields (node_id/provider/model/thinking/context_ref) are
+        preserved so a per-node runtime still routes the repair correctly."""
+        return replace(
+            request,
+            instructions=request.instructions + correction,
+            session_id="",
+        )
+
+    @staticmethod
+    def _executor_repair_prompt(error: str, bad_output: dict) -> str:
+        snippet = json.dumps(bad_output, ensure_ascii=False)[:2000]
+        return (
+            "\n\n# 上一条输出无法解析为执行结果，请修正后只重新输出该 JSON 对象\n"
+            f"解析错误：{error}\n"
+            f"上一条输出（片段）：{snippet}\n"
+            "请只输出一个严格符合 ExecutionResult schema 的 JSON 对象：\n"
+            "- completed_steps：字符串数组\n"
+            "- modified_files：字符串数组\n"
+            "- tests：数组，每项为 {\"command\":字符串,\"exit_code\":整数,"
+            "\"stdout\":字符串,\"stderr\":字符串}；未运行命令时为 []\n"
+            "- deviations：字符串数组\n"
+            "- remaining_risks：字符串数组\n"
+            "- next_steps：字符串数组\n"
+            "不要使用 name/status/detail 等其它键名包裹测试结果。"
+        )
+
+    @staticmethod
+    def _reviewer_repair_prompt(error: str, bad_output: dict) -> str:
+        snippet = json.dumps(bad_output, ensure_ascii=False)[:2000]
+        return (
+            "\n\n# 上一条审核输出无法解析，请修正后只重新输出该 JSON 对象\n"
+            f"解析错误：{error}\n"
+            f"上一条输出（片段）：{snippet}\n"
+            "请只输出一个严格符合 ReviewResult schema 的 JSON 对象：\n"
+            "- verdict：\"pass\"、\"revise_code\"、\"replan\" 或 \"blocked\"\n"
+            "- acceptance：数组，每项 {\"criterion\":字符串,\"passed\":布尔}，"
+            "criterion 与计划 acceptance_criteria 逐字一致\n"
+            "- issues：数组，每项 {\"file\":字符串,\"line\":非负整数,"
+            "\"severity\":\"info|warning|blocker\",\"message\":非空字符串,"
+            "\"evidence\":非空字符串,\"suggestion\":字符串}；无问题为 []\n"
+            "- recommended_tests：字符串数组\n"
+            "- summary：字符串\n"
+            "不要使用 acceptance_results、diff_review 等其它键名。"
+        )
+
+    def _repair_node_output(
+        self,
+        task: AgentTask,
+        request: AgentRequest,
+        error: str,
+        bad_output: dict,
+    ) -> tuple[ExecutionResult, AgentResult] | None:
+        """One bounded repair attempt for an unparseable executor output.
+
+        Returns ``(parsed_result, repair_agent_result)`` on success, or ``None``
+        when repair is disabled, the repair invoke failed, or the repaired
+        output still fails to parse (the caller then falls through to the
+        existing failure handling)."""
+        if _MAX_OUTPUT_REPAIR_ATTEMPTS <= 0:
+            return None
+        repair_result = self._invoke_agent(
+            task,
+            self._repair_request(
+                request, self._executor_repair_prompt(error, bad_output)
+            ),
+        )
+        if not repair_result.succeeded:
+            return None
+        try:
+            return ExecutionResult.from_dict(repair_result.output), repair_result
+        except ValueError:
+            return None
+
+    def _repair_review_output(
+        self,
+        task: AgentTask,
+        request: AgentRequest,
+        error: str,
+        bad_output: dict,
+    ) -> tuple[ReviewResult, AgentResult] | None:
+        """One bounded repair attempt for an unparseable reviewer output."""
+        if _MAX_OUTPUT_REPAIR_ATTEMPTS <= 0:
+            return None
+        repair_result = self._invoke_agent(
+            task,
+            self._repair_request(
+                request, self._reviewer_repair_prompt(error, bad_output)
+            ),
+        )
+        if not repair_result.succeeded:
+            return None
+        try:
+            return ReviewResult.from_dict(repair_result.output), repair_result
+        except ValueError:
+            return None
 
     @staticmethod
     def _merge_node_results(results: list[ExecutionResult]) -> ExecutionResult:
