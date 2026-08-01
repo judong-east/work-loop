@@ -12,9 +12,17 @@ from app.agents.contracts import (
     AgentTask,
     AgentTaskStatus,
     ExecutionPlan,
+    ReviewResult,
+    ReviewVerdict,
     ValidationResult,
 )
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
+from app.agents.plan_graph import (
+    ModelBinding,
+    PlanNode,
+    PlanNodeAccess,
+    PlanNodeKind,
+)
 from app.agents.runtime import AgentRuntime, RoleRoutedRuntime
 from app.agents.workflow import AgentWorkflow
 from tests.git_support import create_repository
@@ -958,6 +966,76 @@ class AgentWorkflowTest(unittest.TestCase):
             ).read_text("utf-8")
             self.assertIn("result.txt", final_diff)
             self.assertIn("+done", final_diff)
+
+
+class PromptSchemaHintTest(unittest.TestCase):
+    """Text-JSON runtimes (PiRpcRuntime) parse the model's final message as
+    JSON, so the role prompts must name the exact structured-output fields.
+    ClaudeCodeRuntime enforces these shapes via tool input_schema, so the
+    hints are redundant there and harmless; without them a text-JSON runtime's
+    model invents its own field names and the strict from_dict parsers
+    reject it (verified end-to-end against a real reasoning model)."""
+
+    def _make_workflow_task_plan(self) -> tuple:
+        tmp = tempfile.mkdtemp()
+        root = Path(tmp)
+        runtime = ScriptedFakeRuntime({})
+        workflow, project = project_workflow(root, runtime, PassingValidator())
+        task = workflow.create_task("Schema hint", "Write result.txt", project.project_id)
+        plan = ExecutionPlan.from_dict(execution_plan())
+        return workflow, task, plan
+
+    def test_planner_instructions_name_execution_plan_fields(self) -> None:
+        workflow, task, _ = self._make_workflow_task_plan()
+        instructions = workflow._planner_instructions(task)
+        self.assertIn("ExecutionPlan", instructions)
+        for field in ("requirement_understanding", "steps", "acceptance_criteria", "required_tests"):
+            self.assertIn(field, instructions)
+
+    def test_replanner_instructions_name_execution_plan_fields(self) -> None:
+        workflow, task, plan = self._make_workflow_task_plan()
+        review = ReviewResult(
+            verdict=ReviewVerdict.REPLAN,
+            acceptance=[],
+            issues=[],
+            recommended_tests=[],
+            summary="redo",
+        )
+        instructions = workflow._replanner_instructions(task, plan, review)
+        self.assertIn("ExecutionPlan", instructions)
+        self.assertIn("requirement_understanding", instructions)
+
+    def test_executor_instructions_name_execution_result_and_test_shape(self) -> None:
+        workflow, task, plan = self._make_workflow_task_plan()
+        instructions = workflow._executor_instructions(task, plan, None)
+        self.assertIn("ExecutionResult", instructions)
+        self.assertIn("tests", instructions)
+        self.assertIn("exit_code", instructions)
+
+    def test_graph_node_instructions_name_execution_result_and_test_shape(self) -> None:
+        node = PlanNode(
+            node_id="step-1",
+            title="写入 result.txt",
+            kind=PlanNodeKind.IMPLEMENTATION,
+            depends_on=["planning"],
+            instructions="写入 result.txt",
+            model=ModelBinding(),
+            access=PlanNodeAccess.WORKSPACE_WRITE,
+            inputs=[],
+            outputs=[],
+            on_failure="human",
+        )
+        instructions = AgentWorkflow._node_instructions(node, None)
+        self.assertIn("ExecutionResult", instructions)
+        self.assertIn("exit_code", instructions)
+
+    def test_reviewer_instructions_name_review_result_fields(self) -> None:
+        workflow, task, plan = self._make_workflow_task_plan()
+        validation = ValidationResult(passed=True, checks=[])
+        instructions = workflow._reviewer_instructions(task, plan, "", validation)
+        self.assertIn("ReviewResult", instructions)
+        for field in ("verdict", "acceptance", "issues", "recommended_tests", "summary"):
+            self.assertIn(field, instructions)
 
 
 if __name__ == "__main__":

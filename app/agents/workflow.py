@@ -48,6 +48,71 @@ from app.projects.registry import ProjectRegistry
 from app.tools.workspace import Workspace
 from app.validation.runner import DeterministicValidator
 
+# PiRpcRuntime gets structured output by parsing the model's final text
+# message as JSON (see app/agents/pi_rpc.py), so the executor prompt must
+# explicitly request an ExecutionResult JSON object. ClaudeCodeRuntime
+# enforces the same shape via tool-use input_schema, so this instruction is
+# redundant there and harmless. Without it, a text-JSON runtime's executor
+# emits a natural-language summary and ExecutionResult.from_dict rejects it.
+_EXECUTOR_OUTPUT_INSTRUCTION = (
+    "\n\n# 输出要求\n"
+    "完成上述工作区修改后，只输出一个符合 ExecutionResult Schema 的完整 JSON "
+    "对象，不要 Markdown、代码围栏或解释文字。对象至少包含字段："
+    "completed_steps（字符串数组）、modified_files（字符串数组）、"
+    "tests（数组）、deviations（字符串数组）、remaining_risks（字符串数组）、"
+    "next_steps（字符串数组）。\n"
+    "tests 仅记录你实际通过 bash 运行过的测试/验证命令的结果；没有运行过命令时必须"
+    "为空数组 []，切勿填入描述性条目。每个 tests 元素必须是 "
+    "{\"command\": \"<运行的命令>\", \"exit_code\": <整数退出码>, "
+    "\"stdout\": \"<标准输出>\", \"stderr\": \"<标准错误>\"}，其中 exit_code 必须是"
+    "整数（例如 0 表示成功）。"
+)
+
+# ReviewResult has no lenient fallback (unlike the planner), so a text-JSON
+# runtime such as PiRpcRuntime must be told the exact field names or the model
+# invents its own and ReviewResult.from_dict rejects it. ClaudeCodeRuntime
+# enforces this shape via tool input_schema, so the instruction is redundant
+# there and harmless.
+_REVIEWER_OUTPUT_INSTRUCTION = (
+    "\n\n# 输出要求\n"
+    "只输出一个符合 ReviewResult Schema 的完整 JSON 对象，不要 Markdown、代码"
+    "围栏或解释文字。对象必须且仅包含这些顶层字段：\n"
+    "- verdict：字符串，取值之一 \"pass\"、\"revise_code\"、\"replan\"、\"blocked\"；"
+    "全部验收通过且无阻断问题时用 \"pass\"。\n"
+    "- acceptance：数组，每个元素是 {\"criterion\": <验收标准字符串>, \"passed\": "
+    "true/false}；criterion 必须与计划中的 acceptance_criteria 完全一致（逐字"
+    "相同），每个验收标准都要出现且仅出现一次。\n"
+    "- issues：数组，无问题时为 []；每项为 {\"file\": \"\", \"line\": 0, "
+    "\"severity\": \"info|warning|blocker\", \"message\": \"...\", \"evidence\": "
+    "\"...\", \"suggestion\": \"\"}。\n"
+    "- recommended_tests：字符串数组，可为 []。\n"
+    "- summary：字符串，简要总结。"
+)
+
+# ExecutionPlan.from_dict is strict on requirement_understanding/steps/
+# acceptance_criteria/required_tests, and the lenient fallback only recognizes
+# a few step-key aliases, so a text-JSON runtime such as PiRpcRuntime must be
+# told the exact field names or the model invents its own shape and planning
+# fails nondeterministically. ClaudeCodeRuntime enforces the schema via tool
+# input_schema, so this instruction is redundant there and harmless.
+_PLANNER_OUTPUT_INSTRUCTION = (
+    "\n\n# 输出要求\n"
+    "只输出一个符合 ExecutionPlan Schema 的完整 JSON 对象，不要 Markdown、代码"
+    "围栏或解释文字。对象必须且仅包含这些顶层字段：\n"
+    "- requirement_understanding：字符串，对需求的理解（非空）。\n"
+    "- non_goals：字符串数组，可为 []。\n"
+    "- files_and_symbols：字符串数组，涉及的关键文件/符号，可为 []。\n"
+    "- steps：字符串数组，每个元素是一条可执行的实现步骤描述（纯字符串，不要写成"
+    "对象），至少一条。\n"
+    "- constraints：字符串数组，可为 []。\n"
+    "- acceptance_criteria：字符串数组，验收标准（非空、不重复），应与需求中的验收"
+    "项逐字对应。\n"
+    "- required_tests：字符串数组，需要运行的项目验证命令名（非空），本任务应包含 "
+    "\"check_result\"。\n"
+    "- risks：字符串数组，可为 []。\n"
+    "- open_questions：字符串数组，未决问题，可为 []。"
+)
+
 
 class TaskValidator(Protocol):
     def validate(
@@ -996,24 +1061,24 @@ class AgentWorkflow:
     @staticmethod
     def _node_instructions(node: PlanNode, context: ContextPack | None) -> str:
         base = (node.instructions or node.title).strip() or node.title
-        if context is None:
-            return base
-        lines: list[str] = []
-        if context.facts:
-            lines.append("已完成的关键事实：")
-            lines.extend(f"- {fact}" for fact in context.facts)
-        if context.constraints:
-            lines.append("约束：")
-            lines.extend(f"- {constraint}" for constraint in context.constraints)
-        if context.decisions:
-            lines.append("已确定的决策：")
-            lines.extend(f"- {decision}" for decision in context.decisions)
-        if context.open_questions:
-            lines.append("未决问题：")
-            lines.extend(f"- {question}" for question in context.open_questions)
-        if not lines:
-            return base
-        return base + "\n\n# 上游节点交接的压缩上下文\n" + "\n".join(lines)
+        body = base
+        if context is not None:
+            lines: list[str] = []
+            if context.facts:
+                lines.append("已完成的关键事实：")
+                lines.extend(f"- {fact}" for fact in context.facts)
+            if context.constraints:
+                lines.append("约束：")
+                lines.extend(f"- {constraint}" for constraint in context.constraints)
+            if context.decisions:
+                lines.append("已确定的决策：")
+                lines.extend(f"- {decision}" for decision in context.decisions)
+            if context.open_questions:
+                lines.append("未决问题：")
+                lines.extend(f"- {question}" for question in context.open_questions)
+            if lines:
+                body = base + "\n\n# 上游节点交接的压缩上下文\n" + "\n".join(lines)
+        return body + _EXECUTOR_OUTPUT_INSTRUCTION
 
     def _execute_plan_graph(
         self,
@@ -1821,6 +1886,7 @@ class AgentWorkflow:
             "已有澄清答复必须作为需求约束。只输出符合 ExecutionPlan Schema 的完整 "
             "JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
+            + _PLANNER_OUTPUT_INSTRUCTION
         )
         return self._with_node_instructions(
             instructions,
@@ -1836,7 +1902,7 @@ class AgentWorkflow:
         payload = {"plan": to_plain(plan), "review_feedback": to_plain(review_feedback)}
         instructions = "按照已批准的 ExecutionPlan 修改当前工作区。\n" + json.dumps(
             payload, ensure_ascii=False
-        )
+        ) + _EXECUTOR_OUTPUT_INSTRUCTION
         return self._with_node_instructions(
             instructions,
             self._task_workflow(task).instructions_for(WorkflowNodeKind.EXECUTOR),
@@ -1861,6 +1927,7 @@ class AgentWorkflow:
             "独立审核当前只读工作区，并输出结构化 ReviewResult。只输出符合 "
             "ReviewResult Schema 的完整 JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
+            + _REVIEWER_OUTPUT_INSTRUCTION
         )
         return self._with_node_instructions(
             instructions,
@@ -1884,6 +1951,7 @@ class AgentWorkflow:
             "ExecutionPlan；新计划必须再次由用户批准。只输出符合 ExecutionPlan "
             "Schema 的完整 JSON 对象，不要 Markdown、代码围栏或解释文字。\n"
             + json.dumps(payload, ensure_ascii=False)
+            + _PLANNER_OUTPUT_INSTRUCTION
         )
         return self._with_node_instructions(
             instructions,
