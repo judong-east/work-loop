@@ -662,29 +662,36 @@ class AgentWorkflow:
                     if graph_outcome is not None:
                         return graph_outcome
                 else:
-                    execution = self._invoke_agent(
-                        task,
-                        AgentRequest(
-                            task_id=task.task_id,
-                            role="executor",
-                            instructions=self._executor_instructions(task, plan, review_feedback),
-                            workspace=workspace_path,
-                            access=AgentAccess.WORKSPACE_WRITE,
-                            policy=effective_agent_policy,
-                            budget=self._agent_budget(task),
-                            session_id=task.sessions.get("executor", ""),
-                            **self._node_request_fields(task, PlanNodeKind.IMPLEMENTATION),
-                        ),
+                    executor_request = AgentRequest(
+                        task_id=task.task_id,
+                        role="executor",
+                        instructions=self._executor_instructions(task, plan, review_feedback),
+                        workspace=workspace_path,
+                        access=AgentAccess.WORKSPACE_WRITE,
+                        policy=effective_agent_policy,
+                        budget=self._agent_budget(task),
+                        session_id=task.sessions.get("executor", ""),
+                        **self._node_request_fields(task, PlanNodeKind.IMPLEMENTATION),
                     )
+                    execution = self._invoke_agent(task, executor_request)
                     if not execution.succeeded:
                         return self._fail(task, execution)
                     try:
                         execution_result = ExecutionResult.from_dict(execution.output)
                     except ValueError as error:
-                        return self._fail(
-                            task,
-                            AgentResult(succeeded=False, error=f"执行结果无效：{error}"),
+                        # Same bounded self-repair as the graph node path: an
+                        # unparseable ExecutionResult no longer fails the whole
+                        # task outright. Re-invoke once with the parse error and
+                        # a schema reminder; fall through to failure if still bad.
+                        repaired = self._repair_node_output(
+                            task, executor_request, error, execution.output
                         )
+                        if repaired is None:
+                            return self._fail(
+                                task,
+                                AgentResult(succeeded=False, error=f"执行结果无效：{error}"),
+                            )
+                        execution_result = repaired[0]
                     self.store.write_json(round_dir / "execution.json", execution_result)
                 current = workspace.snapshot()
                 self.store.write_text(round_dir / "changes.diff", workspace.diff(base, current))

@@ -967,6 +967,42 @@ class OutputRepairTest(unittest.TestCase):
             self.assertIn("审核结果无效", result.error)
             self.assertEqual(len([r for r in runtime.requests if r.role == "reviewer"]), 2)
 
+    def test_default_executor_path_invalid_then_valid_self_repairs(self) -> None:
+        # The default (non-graph) executor path gets the same bounded repair:
+        # graph_execution stays off, but an unparseable ExecutionResult no
+        # longer fails the whole task outright.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            os.environ.pop("WORKLOOP_EXECUTION", None)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(
+                            output=invalid_executor_output(),
+                            writes={"result.txt": "done\n"},
+                        ),
+                        FakeStep(output=executor_output(["写入 result.txt"], ["result.txt"])),
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("生成结果", "创建 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertFalse(completed.graph_execution)
+            self.assertEqual(
+                (workflow.workspace_path(task.task_id) / "result.txt").read_text(encoding="utf-8"),
+                "done\n",
+            )
+            executor_reqs = [r for r in runtime.requests if r.role == "executor"]
+            self.assertEqual(len(executor_reqs), 2)
+            self.assertIn("解析错误", executor_reqs[1].instructions)
+
 
 if __name__ == "__main__":
     unittest.main()
