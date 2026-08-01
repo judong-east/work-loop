@@ -115,6 +115,44 @@ and default model into explicit CLI overrides. Codex still runs with
 `--ignore-user-config`, so user MCP servers, hooks, commands, and permission
 settings are not loaded into executor tasks.
 
+## Plan Graph Execution & Per-Node Models
+
+Two opt-in flags extend the execution model. Both default off, so the proven
+single-executor loop runs unchanged when neither is set.
+
+**Graph execution** — `WORKLOOP_EXECUTION=graph` makes plan approval drive the
+task's `PlanGraph` instead of a single executor call. Each `IMPLEMENTATION` and
+`INTEGRATION` node runs in topological order on the shared task worktree:
+
+- a node carries a `ModelBinding` (`provider` / `model` / `thinking`) and an
+  `on_failure` policy (`retry` / `human` / `skip` / `replan`);
+- a node's upstream context is merged through the context ledger as structured
+  facts, decisions, and artifacts — never raw chat history — so fan-in stays
+  compact and resumable;
+- per-node status persists to `AgentTask.node_runs`, so an interrupted task
+  resumes by skipping completed nodes and re-running failed or pending ones;
+- the merged node output feeds the existing validation → review → delivery
+  path unchanged.
+
+**Pi runtime** — `WORKLOOP_RUNTIME=pi_rpc` swaps every role to `PiRpcRuntime`
+(`@earendil-works/pi-coding-agent`, JSONL RPC over stdio), which honors a
+per-request `--model` / `--provider` / `--thinking`. Install and authenticate
+the `pi` binary first. Per-role model overrides come from
+`WORKLOOP_PI_PLANNER_MODEL`, `WORKLOOP_PI_EXECUTOR_MODEL`, and
+`WORKLOOP_PI_REVIEWER_MODEL`.
+
+**Per-node model routing** — with both flags set, each plan node's
+`ModelBinding` flows onto its `AgentRequest`, so one Pi runtime can route per
+node — for example Opus for planning, GPT for the backend, Kimi for the UI.
+Routing is by model, not by harness: every node still runs through the same
+role runtime. Only the Pi runtime honors per-node model fields; the default
+Claude and Codex runtimes ignore them, so the feature is a no-op there.
+
+```powershell
+$env:WORKLOOP_EXECUTION="graph"; $env:WORKLOOP_RUNTIME="pi_rpc"
+python -m app.cli serve --root . --port 8765
+```
+
 ## Legacy Workflow
 
 The former `create-task`, `run-loop`, `resume`, `deliver`, and `memory` CLI
