@@ -253,10 +253,13 @@ class PlanGraph:
         previous = "planning"
         for index, step in enumerate(plan.steps, start=1):
             node_id = f"step-{index}"
+            # The node title is a short label (PlanNode caps it at 160 chars);
+            # the executor receives the full step text via `instructions`.
+            title = (step[:159] + "…") if len(step) > 160 else step
             nodes.append(
                 PlanNode(
                     node_id=node_id,
-                    title=step,
+                    title=title,
                     kind=PlanNodeKind.IMPLEMENTATION,
                     depends_on=[previous],
                     instructions=step,

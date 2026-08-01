@@ -77,6 +77,29 @@ class PlanGraphTest(unittest.TestCase):
                 }
             )
 
+    def test_long_step_title_is_truncated_but_full_instructions_kept(self) -> None:
+        # A verbose model may write a step longer than the 160-char node-title
+        # cap; from_execution_plan must keep the full text as instructions
+        # (what the executor runs) while deriving a short, valid label.
+        long_step = "在 app/agents/workflow.py 中定位 _PLANNER_OUTPUT_INSTRUCTION 常量，" * 6
+        plan = ExecutionPlan(
+            requirement_understanding="append a note",
+            non_goals=[],
+            files_and_symbols=["app/agents/workflow.py"],
+            steps=[long_step],
+            constraints=[],
+            acceptance_criteria=["marker present"],
+            required_tests=["tests"],
+            risks=[],
+            open_questions=[],
+        )
+        graph = PlanGraph.from_execution_plan(plan)
+        impl = graph.node("step-1")
+        self.assertLessEqual(len(impl.title), 160)
+        self.assertTrue(impl.title)  # non-empty
+        self.assertEqual(impl.instructions, long_step)  # full step preserved
+        graph.validate()  # must not raise
+
 
 if __name__ == "__main__":
     unittest.main()
