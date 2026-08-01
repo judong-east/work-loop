@@ -288,10 +288,7 @@ class PiRpcRuntime(AgentRuntime):
         session_id = str(state.get("sessionFile") or state.get("sessionId") or request.session_id)
         state_model = state.get("model") if isinstance(state.get("model"), dict) else {}
         selected_model = str(state_model.get("id") or identity.get("model") or "")
-        usage = dict(stats.get("tokens") or {}) if isinstance(stats, dict) else {}
-        cost = stats.get("cost") if isinstance(stats, dict) else None
-        if isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
-            usage["total_cost_usd"] = float(cost["total"])
+        usage = self._usage_from_stats(stats)
         return AgentResult(
             succeeded=True,
             output=output,
@@ -369,6 +366,24 @@ class PiRpcRuntime(AgentRuntime):
         if not isinstance(value, dict):
             raise ValueError("Pi RPC record must be an object")
         return value
+
+    @staticmethod
+    def _usage_from_stats(stats: Any) -> dict[str, Any]:
+        """Build the AgentResult.usage dict from a get_session_stats response.
+
+        Pi 0.83 returns ``tokens`` as an object and ``cost`` as an aggregated
+        scalar number (``usageTotals.cost``). The dict-with-total branch is kept
+        as a defensive fallback in case a future version nests it.
+        """
+        usage = dict(stats.get("tokens") or {}) if isinstance(stats, dict) else {}
+        cost = stats.get("cost") if isinstance(stats, dict) else None
+        if isinstance(cost, bool):
+            pass  # bool is an int subclass; treat as "no cost reported"
+        elif isinstance(cost, (int, float)):
+            usage["total_cost_usd"] = float(cost)
+        elif isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
+            usage["total_cost_usd"] = float(cost["total"])
+        return usage
 
     def _query(
         self,
