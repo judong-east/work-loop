@@ -569,6 +569,11 @@ class AgentTask:
     # call per implementation node, in topological order) instead of a single
     # executor invocation over the whole plan. Opt-in; default path unchanged.
     graph_execution: bool = False
+    # When True (and graph_execution is also True), each implementation node
+    # runs in its own detached git worktree; its writes are merged back into the
+    # shared task worktree (uncommitted) so validation/review/delivery are
+    # unchanged. Opt-in; default keeps the shared single-worktree behavior.
+    node_worktree: bool = False
     clarifications: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     transitions: list[dict[str, str]] = field(default_factory=list)
@@ -630,6 +635,7 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
             if isinstance(value, dict)
         },
         graph_execution=bool(data.get("graph_execution", False)),
+        node_worktree=bool(data.get("node_worktree", False)),
         clarifications=[
             {str(key): str(value) for key, value in item.items()}
             for item in data.get("clarifications", [])

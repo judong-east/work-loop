@@ -134,6 +134,16 @@ task's `PlanGraph` instead of a single executor call. Each `IMPLEMENTATION` and
 - the merged node output feeds the existing validation → review → delivery
   path unchanged.
 
+**Per-node worktrees** — `WORKLOOP_NODE_WORKTREE=1` (requires graph execution)
+gives each implementation node its own detached git worktree for write
+isolation. Before each attempt the shared task worktree's accumulated writes
+are replicated into the node worktree (including upstream deletions), and on
+success the node's own delta is merged back into the shared task worktree
+uncommitted — so validation, review, and delivery are unchanged. Node worktrees
+are deterministic per `(task_id, node_id)` and resume-safe; a crashed run's
+stale worktree is pruned on the next attempt. Default off keeps the shared
+single-worktree behavior.
+
 **Pi runtime** — `WORKLOOP_RUNTIME=pi_rpc` swaps every role to `PiRpcRuntime`
 (`@earendil-works/pi-coding-agent`, JSONL RPC over stdio), which honors a
 per-request `--model` / `--provider` / `--thinking`. Install and authenticate

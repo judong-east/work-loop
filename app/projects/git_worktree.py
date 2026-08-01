@@ -116,6 +116,52 @@ class GitWorktreeService:
         if self._branch_exists(repository, branch_ref):
             self._git(repository, "branch", "-D", task_branch)
 
+    # ------------------------------------------------------------------
+    # Per-node worktrees (graph execution: isolated write per plan node)
+    # ------------------------------------------------------------------
+    # These are detached HEAD worktrees used only as an isolated working
+    # directory while one plan node runs. They create no branch and bypass the
+    # task-branch identity guards, which only apply to the single task
+    # worktree on ``workloop/<task_id>``.
+
+    def add_node_worktree(self, repository: Path, path: Path, base_commit: str) -> Path:
+        """Add a detached worktree at ``base_commit`` for one node's run.
+
+        Cleans any stale path left by a crashed prior run (registered worktree
+        or leftover directory) before creating a fresh detached worktree. The
+        node worktree lives under the task dir, so its path is deterministic
+        from ``(task_id, node_id)`` and resume-safe.
+        """
+        repo = Path(repository)
+        target = Path(path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._git(repo, "worktree", "prune")
+        registered = self._registered_worktrees(repo)
+        if target in registered:
+            self._git(repo, "worktree", "remove", "--force", str(target))
+        elif target.exists():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        self._git(repo, "worktree", "add", "--detach", str(target), base_commit)
+        return target
+
+    def remove_node_worktree(self, repository: Path, path: Path) -> None:
+        """Remove a per-node detached worktree. Detached worktrees have no
+        branch, so only the working tree is removed; leftover dirs are
+        cleaned up best-effort."""
+        repo = Path(repository)
+        target = Path(path).resolve()
+        registered = self._registered_worktrees(repo)
+        if target in registered:
+            self._git(repo, "worktree", "remove", "--force", str(target))
+        elif target.exists():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
     def _validate_task_branch(self, task_id: str, task_branch: str) -> None:
         expected = f"workloop/{task_id.lower()}"
         if task_branch != expected:

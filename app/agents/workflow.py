@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from dataclasses import replace
@@ -37,7 +38,7 @@ from app.agents.workflow_config import (
     WorkflowNodeKind,
     workflow_from_dict,
 )
-from app.core.contracts import PolicyBoundary, PolicyCheck, to_plain, utc_now
+from app.core.contracts import FileChange, PolicyBoundary, PolicyCheck, to_plain, utc_now
 from app.core.redaction import redact, redact_value
 from app.policy.policy_checker import PolicyChecker
 from app.projects.contracts import Project, ProjectPolicy
@@ -445,6 +446,14 @@ class AgentWorkflow:
         # in topological order, with structured context handoff. Off by default
         # keeps the proven single-executor path untouched.
         task.graph_execution = os.environ.get("WORKLOOP_EXECUTION", "").strip().lower() == "graph"
+        # Per-node isolated worktrees (only meaningful with graph execution):
+        # each implementation node runs in its own detached git worktree, then
+        # its writes are merged back into the shared task worktree uncommitted.
+        task.node_worktree = (
+            task.graph_execution
+            and os.environ.get("WORKLOOP_NODE_WORKTREE", "").strip().lower()
+            in {"1", "true", "yes", "on", "isolate", "node"}
+        )
 
         if task.approved_plan_version != task.plan_version:
             task.plan_iteration = 0
@@ -722,6 +731,7 @@ class AgentWorkflow:
         # A replan produces a fresh linear plan; reset graph mode so the next
         # approval re-evaluates it (approve_plan re-reads WORKLOOP_EXECUTION).
         task.graph_execution = False
+        task.node_worktree = False
         task.node_runs = {}
         response = self._invoke_agent(
             task,
@@ -1068,7 +1078,7 @@ class AgentWorkflow:
             for node in ready:
                 outcome = self._run_plan_node(
                     task, node, plan, policy, effective_agent_policy,
-                    workspace_path, review_feedback,
+                    workspace, workspace_path, base, review_feedback,
                 )
                 if outcome is not None:
                     return outcome
@@ -1099,12 +1109,21 @@ class AgentWorkflow:
         plan: ExecutionPlan,
         policy: ProjectPolicy,
         effective_agent_policy: AgentPolicy,
+        workspace: Workspace,
         workspace_path: Path,
+        base: dict[str, str],
         review_feedback: ReviewResult | None,
     ) -> AgentTask | None:
         """Execute one plan node via the executor runtime. Returns ``None`` on
         success or skip (node state persisted); returns the task on a terminal
-        pause/failure that should stop the round."""
+        pause/failure that should stop the round.
+
+        When ``task.node_worktree`` is set, the node runs in its own detached
+        git worktree. Before each attempt the task worktree's accumulated writes
+        are replicated into the node worktree (so the node sees its upstream),
+        and on success the node's own delta is merged back into the shared task
+        worktree, leaving it uncommitted so validation/review/delivery stay
+        unchanged. The node worktree is always cleaned up in ``finally``."""
         state = task.node_runs.setdefault(
             node.node_id,
             {
@@ -1133,11 +1152,22 @@ class AgentWorkflow:
         context_ref = ""
         if context is not None:
             context_ref = f"artifacts/context/{node.node_id}/{context.version}.json"
+
+        use_node_worktree = task.graph_execution and task.node_worktree
+        node_worktree_path: Path | None = None
+        node_workspace: Workspace | None = None
+        node_before: dict[str, str] | None = None
+        request_workspace = workspace_path
+        if use_node_worktree:
+            node_worktree_path = self._prepare_node_worktree(task, node)
+            node_workspace = Workspace(node_worktree_path)
+            request_workspace = node_worktree_path
+
         request = AgentRequest(
             task_id=task.task_id,
             role="executor",
             instructions=self._node_instructions(node, context),
-            workspace=workspace_path,
+            workspace=request_workspace,
             access=AgentAccess.WORKSPACE_WRITE,
             policy=effective_agent_policy,
             budget=self._agent_budget(task),
@@ -1147,44 +1177,121 @@ class AgentWorkflow:
 
         max_attempts = 2 if node.on_failure == "retry" else 1
         result: AgentResult | None = None
-        for _ in range(max_attempts):
-            state["status"] = "running"
-            state["started_at"] = utc_now()
-            self.store.save(task)
-            result = self._invoke_agent(task, request)
-            if result.succeeded:
-                try:
-                    node_result = ExecutionResult.from_dict(result.output)
-                    break
-                except ValueError as error:
-                    result = AgentResult(
-                        succeeded=False, error=f"节点 {node.node_id} 结果无效：{error}"
-                    )
-            # failed attempt; loop again if attempts remain
-        else:
-            assert result is not None
-            return self._handle_node_failure(task, node, result, plan, policy, state)
+        node_result: ExecutionResult | None = None
+        try:
+            for _ in range(max_attempts):
+                state["status"] = "running"
+                state["started_at"] = utc_now()
+                self.store.save(task)
+                if use_node_worktree:
+                    # Reset the node worktree to the task's current state so each
+                    # attempt starts from a clean upstream baseline.
+                    self._replicate_into_node_worktree(workspace, base, node_workspace)
+                    node_before = node_workspace.snapshot()
+                result = self._invoke_agent(task, request)
+                if result.succeeded:
+                    try:
+                        node_result = ExecutionResult.from_dict(result.output)
+                        break
+                    except ValueError as error:
+                        result = AgentResult(
+                            succeeded=False, error=f"节点 {node.node_id} 结果无效：{error}"
+                        )
+                # failed attempt; loop again if attempts remain
+            else:
+                assert result is not None
+                return self._handle_node_failure(task, node, result, plan, policy, state)
 
-        result_ref = f"artifacts/node-runs/{node.node_id}/{task.iteration}.json"
-        self.store.write_json(self.store.task_dir(task.task_id) / result_ref, node_result)
-        state["status"] = "completed"
-        state["session_id"] = result.session_id
-        state["run_ref"] = task.artifacts.get("last_agent_run", "")
-        state["result_ref"] = result_ref
-        state["finished_at"] = utc_now()
-        state["error"] = ""
-        pack = ContextPack(
-            task_id=task.task_id,
-            node_id=node.node_id,
-            summary=node.title or node.node_id,
-            facts=list(node_result.completed_steps),
-            inputs=list(node.inputs),
-            artifacts=[result_ref],
-            source_sessions=[result.session_id] if result.session_id else [],
+            # Success: merge the node's own writes back into the shared task
+            # worktree (uncommitted), so the post-graph diff/validation/review/
+            # delivery pipeline is unchanged.
+            if use_node_worktree:
+                self._apply_file_changes(
+                    node_workspace,
+                    node_workspace.changes_since(node_before),
+                    workspace,
+                )
+
+            result_ref = f"artifacts/node-runs/{node.node_id}/{task.iteration}.json"
+            self.store.write_json(self.store.task_dir(task.task_id) / result_ref, node_result)
+            state["status"] = "completed"
+            state["session_id"] = result.session_id
+            state["run_ref"] = task.artifacts.get("last_agent_run", "")
+            state["result_ref"] = result_ref
+            state["finished_at"] = utc_now()
+            state["error"] = ""
+            pack = ContextPack(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                summary=node.title or node.node_id,
+                facts=list(node_result.completed_steps),
+                inputs=list(node.inputs),
+                artifacts=[result_ref],
+                source_sessions=[result.session_id] if result.session_id else [],
+            )
+            state["context_ref"] = self.context_ledger.write(pack)
+            self.store.save(task)
+            return None
+        finally:
+            if node_worktree_path is not None:
+                self._remove_node_worktree(task, node_worktree_path)
+
+    # ------------------------------------------------------------------
+    # Per-node worktree helpers (graph execution only)
+    # ------------------------------------------------------------------
+
+    def _prepare_node_worktree(self, task: AgentTask, node: PlanNode) -> Path:
+        """Create a fresh detached worktree for one node at the task base
+        commit. The path is deterministic from ``(task_id, node_id)`` so resume
+        is safe: a stale worktree from a crashed run is pruned first."""
+        path = self.store.task_dir(task.task_id) / "node-worktrees" / node.node_id
+        project = self.get_project(task.project_id)
+        return self.git_worktrees.add_node_worktree(
+            Path(project.repository), path, task.base_commit
         )
-        state["context_ref"] = self.context_ledger.write(pack)
-        self.store.save(task)
-        return None
+
+    def _remove_node_worktree(self, task: AgentTask, path: Path) -> None:
+        """Remove a node worktree, best-effort: a stuck worktree does not
+        corrupt the task result and is pruned on the next ``add_node_worktree``."""
+        try:
+            project = self.get_project(task.project_id)
+            self.git_worktrees.remove_node_worktree(Path(project.repository), path)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _replicate_into_node_worktree(
+        workspace: Workspace,
+        base: dict[str, str],
+        node_workspace: Workspace,
+    ) -> None:
+        """Mirror the shared task worktree into the node worktree, including
+        upstream deletions, by applying ``task.changes_since(base)`` with real
+        bytes (binary-safe)."""
+        AgentWorkflow._apply_file_changes(
+            workspace, workspace.changes_since(base), node_workspace
+        )
+
+    @staticmethod
+    def _apply_file_changes(
+        src: Workspace,
+        changes: list[FileChange],
+        dst: Workspace,
+    ) -> None:
+        """Apply file changes from ``src`` into ``dst`` by copying real bytes
+        (binary-safe) for writes and unlinking for deletes. ``changes`` is used
+        only for path/action detection (from ``changes_since``); content is read
+        from the source filesystem, not the (text-only) change record."""
+        for change in changes:
+            if change.action == "delete":
+                target = dst.root / change.path
+                if target.exists():
+                    target.unlink()
+                continue
+            source = src.root / change.path
+            target = dst.root / change.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
 
     def _handle_node_failure(
         self,

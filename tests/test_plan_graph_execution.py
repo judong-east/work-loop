@@ -82,6 +82,7 @@ class PassingValidator:
 class FakeStep:
     output: dict[str, Any] = field(default_factory=dict)
     writes: dict[str, str] = field(default_factory=dict)
+    deletes: list[str] = field(default_factory=list)
     succeeded: bool = True
     error: str = ""
     session_id: str = ""
@@ -94,10 +95,15 @@ class NodeScriptedFakeRuntime(AgentRuntime):
     def __init__(self, scripts: dict[str, list[FakeStep]]):
         self.scripts = {key: list(steps) for key, steps in scripts.items()}
         self.requests: list[AgentRequest] = []
+        # Files present in request.workspace at the start of each invoke,
+        # keyed by node_id/role — used to assert upstream propagation into a
+        # node's isolated worktree.
+        self.workspace_files_at_start: dict[str, list[str]] = {}
 
     def invoke(self, request: AgentRequest) -> AgentResult:
         self.requests.append(request)
         key = request.node_id or request.role
+        self.workspace_files_at_start.setdefault(key, self._list_files(request.workspace))
         steps = self.scripts.get(key)
         if not steps:
             return AgentResult(
@@ -108,7 +114,7 @@ class NodeScriptedFakeRuntime(AgentRuntime):
                 model="scripted",
             )
         step = steps.pop(0)
-        if step.writes and request.access is not AgentAccess.WORKSPACE_WRITE:
+        if (step.writes or step.deletes) and request.access is not AgentAccess.WORKSPACE_WRITE:
             return AgentResult(
                 succeeded=False,
                 session_id=step.session_id or request.session_id,
@@ -119,6 +125,7 @@ class NodeScriptedFakeRuntime(AgentRuntime):
             )
         if step.succeeded:
             self._apply_writes(request.workspace, step.writes)
+            self._apply_deletes(request.workspace, step.deletes)
         return AgentResult(
             succeeded=step.succeeded,
             output=dict(step.output),
@@ -137,6 +144,29 @@ class NodeScriptedFakeRuntime(AgentRuntime):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
+    def _apply_deletes(self, workspace: Path, deletes: list[str]) -> None:
+        root = workspace.resolve()
+        for relative in deletes:
+            target = (root / relative).resolve()
+            target.relative_to(root)  # path-escape guard
+            if target.exists():
+                target.unlink()
+
+    @staticmethod
+    def _list_files(workspace: Path) -> list[str]:
+        root = workspace.resolve()
+        if not root.is_dir():
+            return []
+        files: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if relative == ".git" or relative.startswith(".git/"):
+                continue
+            files.append(relative)
+        return files
+
     def describe(self, request: AgentRequest) -> dict:
         return {"runtime": "fake", "runtime_version": "1", "model": "scripted", "config": {}}
 
@@ -152,6 +182,26 @@ def graph_execution_env():
             os.environ.pop("WORKLOOP_EXECUTION", None)
         else:
             os.environ["WORKLOOP_EXECUTION"] = prior
+
+
+@contextmanager
+def node_worktree_env():
+    """Enable graph execution AND per-node isolated worktrees."""
+    prior_exec = os.environ.get("WORKLOOP_EXECUTION")
+    prior_node = os.environ.get("WORKLOOP_NODE_WORKTREE")
+    os.environ["WORKLOOP_EXECUTION"] = "graph"
+    os.environ["WORKLOOP_NODE_WORKTREE"] = "1"
+    try:
+        yield
+    finally:
+        for key, prior in (
+            ("WORKLOOP_EXECUTION", prior_exec),
+            ("WORKLOOP_NODE_WORKTREE", prior_node),
+        ):
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
 
 
 def project_workflow(root: Path, runtime: AgentRuntime, validator=PassingValidator()):
@@ -531,6 +581,225 @@ class PlanGraphExecutionTest(unittest.TestCase):
             # not consume the "step-1" script via node_id — it falls back to role.
             # graph_execution stays off and node_runs stays empty.
             self.assertFalse(completed.graph_execution)
+
+
+class NodeWorktreeExecutionTest(unittest.TestCase):
+    """Per-node isolated git worktrees (WORKLOOP_NODE_WORKTREE=1 + graph).
+    Each implementation node runs in its own detached worktree; writes merge
+    back into the shared task worktree uncommitted, so the post-graph
+    validation/review/delivery pipeline is unchanged."""
+
+    def test_nodes_run_in_isolated_worktrees_and_merge_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, node_worktree_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "backend": [
+                        FakeStep(
+                            output=executor_output(["实现后端 API"], ["backend.txt"]),
+                            writes={"backend.txt": "api\n"},
+                        )
+                    ],
+                    "ui": [
+                        FakeStep(
+                            output=executor_output(["实现前端页面"], ["ui.txt"]),
+                            writes={"ui.txt": "page\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("全栈任务", "后端加前端", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="后端加前端",
+                nodes=[
+                    planning_node(),
+                    impl_node("backend", "实现后端 API", depends_on=["planning"]),
+                    impl_node("ui", "实现前端页面", depends_on=["backend"]),
+                    review_node("review", depends_on=["ui"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            # Each node ran in its own worktree, distinct from the shared task
+            # worktree and from each other.
+            backend_req = next(r for r in runtime.requests if r.node_id == "backend")
+            ui_req = next(r for r in runtime.requests if r.node_id == "ui")
+            task_workspace = workflow.workspace_path(task.task_id)
+            self.assertNotEqual(Path(backend_req.workspace), task_workspace)
+            self.assertNotEqual(Path(ui_req.workspace), task_workspace)
+            self.assertNotEqual(backend_req.workspace, ui_req.workspace)
+            self.assertIn("node-worktrees", Path(backend_req.workspace).parts)
+            # The UI node saw the backend's write propagated into its worktree.
+            self.assertIn("backend.txt", runtime.workspace_files_at_start["ui"])
+            # Node worktrees were cleaned up.
+            node_wt_root = workflow.store.task_dir(task.task_id) / "node-worktrees"
+            self.assertFalse((node_wt_root / "backend").exists())
+            self.assertFalse((node_wt_root / "ui").exists())
+            # All writes merged back into the shared task worktree (uncommitted).
+            self.assertEqual(
+                (task_workspace / "backend.txt").read_text(encoding="utf-8"), "api\n"
+            )
+            self.assertEqual(
+                (task_workspace / "ui.txt").read_text(encoding="utf-8"), "page\n"
+            )
+
+    def test_upstream_deletions_propagate_downstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, node_worktree_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "cleaner": [
+                        FakeStep(
+                            output=executor_output(["删除 app.txt"], []),
+                            deletes=["app.txt"],
+                        )
+                    ],
+                    "ui": [
+                        FakeStep(
+                            output=executor_output(["实现前端页面"], ["ui.txt"]),
+                            writes={"ui.txt": "page\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("清理并新建", "删除 app.txt 再写前端", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="清理并新建",
+                nodes=[
+                    planning_node(),
+                    impl_node("cleaner", "删除 app.txt", depends_on=["planning"]),
+                    impl_node("ui", "实现前端页面", depends_on=["cleaner"]),
+                    review_node("review", depends_on=["ui"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            task_workspace = workflow.workspace_path(task.task_id)
+            # The deletion merged back into the shared task worktree.
+            self.assertFalse((task_workspace / "app.txt").exists())
+            self.assertEqual(
+                (task_workspace / "ui.txt").read_text(encoding="utf-8"), "page\n"
+            )
+            # The downstream UI node did NOT see app.txt: the deletion
+            # propagated into its isolated worktree before it ran.
+            self.assertNotIn("app.txt", runtime.workspace_files_at_start["ui"])
+
+    def test_resume_skips_completed_nodes_and_reruns_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, node_worktree_env():
+            root = Path(tmp)
+            runtime_a = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "backend": [
+                        FakeStep(
+                            output=executor_output(["实现后端 API"], ["backend.txt"]),
+                            writes={"backend.txt": "api\n"},
+                        )
+                    ],
+                    "ui": [FakeStep(succeeded=False, error="ui boom")],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow_a, project = project_workflow(root, runtime_a)
+            task = workflow_a.create_task("全栈任务", "后端加前端", project.project_id)
+            workflow_a.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="后端加前端",
+                nodes=[
+                    planning_node(),
+                    impl_node("backend", "实现后端 API", depends_on=["planning"]),
+                    impl_node("ui", "实现前端页面", depends_on=["backend"]),
+                    review_node("review", depends_on=["ui"]),
+                ],
+            )
+            workflow_a.save_plan_graph(task.task_id, graph)
+            paused = workflow_a.approve_plan(task.task_id)
+
+            self.assertEqual(paused.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(paused.node_runs["backend"]["status"], "completed")
+            self.assertEqual(paused.node_runs["ui"]["status"], "failed")
+            # backend's write merged back during the first pass; ui failed (no merge).
+            task_workspace = workflow_a.workspace_path(task.task_id)
+            self.assertEqual(
+                (task_workspace / "backend.txt").read_text(encoding="utf-8"), "api\n"
+            )
+
+            runtime_b = NodeScriptedFakeRuntime(
+                {
+                    "ui": [
+                        FakeStep(
+                            output=executor_output(["实现前端页面"], ["ui.txt"]),
+                            writes={"ui.txt": "page\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow_b = AgentWorkflow(root, runtime=runtime_b, validator=PassingValidator())
+            scheduler = PersistentAgentScheduler(workflow_b)
+            scheduler.resume(task.task_id)
+            scheduler.run_next()
+
+            resumed = workflow_b.get_task(task.task_id)
+            self.assertEqual(resumed.status, AgentTaskStatus.READY_TO_DELIVER)
+            # Only the previously-failed node and the reviewer ran on resume;
+            # the completed backend node was skipped (no worktree recreated).
+            self.assertEqual([r.node_id for r in runtime_b.requests], ["ui", "review"])
+            # Both nodes' writes are present in the shared task worktree.
+            self.assertEqual(
+                (task_workspace / "backend.txt").read_text(encoding="utf-8"), "api\n"
+            )
+            self.assertEqual(
+                (task_workspace / "ui.txt").read_text(encoding="utf-8"), "page\n"
+            )
+
+    def test_graph_without_node_worktree_flag_uses_shared_worktree(self) -> None:
+        # Graph mode ON but WORKLOOP_NODE_WORKTREE unset: nodes run in the
+        # shared task worktree (regression guard for the per-node path).
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            os.environ.pop("WORKLOOP_NODE_WORKTREE", None)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(
+                            output=executor_output(["写入 result.txt"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("生成结果", "创建 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertFalse(completed.node_worktree)
+            task_workspace = workflow.workspace_path(task.task_id)
+            for request in runtime.requests:
+                if request.role == "executor":
+                    self.assertEqual(Path(request.workspace), task_workspace)
+            self.assertFalse(
+                (workflow.store.task_dir(task.task_id) / "node-worktrees").exists()
+            )
 
 
 if __name__ == "__main__":
