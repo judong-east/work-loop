@@ -48,6 +48,51 @@ from app.projects.registry import ProjectRegistry
 from app.tools.workspace import Workspace
 from app.validation.runner import DeterministicValidator
 
+# Persisted run records store the agent session's events for diagnostics.
+# A verbose reasoning-model session (long reasoning + tool I/O such as a
+# validation command's output) can produce an enormous event stream; storing
+# the full list made json.dumps(to_plain(record)) hit MemoryError mid-run
+# (observed during self-dogfooding with a real glm-5.2 session). raw_events is
+# never read back for control flow, so bounding it is safe and keeps the run
+# record writable. Bound both the number of entries and any single string
+# field so a huge tool_result cannot OOM the encoder either.
+_MAX_RUN_EVENTS_KEPT = 400
+_MAX_RUN_EVENT_FIELD_CHARS = 4000
+
+
+def _bound_run_events(events: Any) -> list[Any]:
+    """Return a diagnostic-safe, bounded copy of a run's event list.
+
+    Caps the entry count (keeping the first and last portions with a
+    truncation marker) and truncates any over-long string field inside each
+    event, so serializing the run record cannot exhaust memory on a verbose
+    session. Never used for control flow, so truncation loses nothing the
+    system depends on."""
+    if not isinstance(events, list) or not events:
+        return list(events) if isinstance(events, list) else []
+
+    def truncate(value: Any) -> Any:
+        if isinstance(value, str):
+            return value if len(value) <= _MAX_RUN_EVENT_FIELD_CHARS else (
+                value[:_MAX_RUN_EVENT_FIELD_CHARS] + "…<truncated>"
+            )
+        if isinstance(value, list):
+            return [truncate(item) for item in value[:_MAX_RUN_EVENTS_KEPT]]
+        if isinstance(value, dict):
+            return {key: truncate(val) for key, val in value.items()}
+        return value
+
+    bounded = [truncate(event) for event in events]
+    if len(bounded) <= _MAX_RUN_EVENTS_KEPT:
+        return bounded
+    half = _MAX_RUN_EVENTS_KEPT // 2
+    return [
+        *bounded[:half],
+        {"type": "events_truncated", "dropped": len(bounded) - _MAX_RUN_EVENTS_KEPT},
+        *bounded[-half:],
+    ]
+
+
 # PiRpcRuntime gets structured output by parsing the model's final text
 # message as JSON (see app/agents/pi_rpc.py), so the executor prompt must
 # explicitly request an ExecutionResult JSON object. ClaudeCodeRuntime
@@ -110,7 +155,9 @@ _PLANNER_OUTPUT_INSTRUCTION = (
     "- required_tests：字符串数组，需要运行的项目验证命令名（非空），本任务应包含 "
     "\"check_result\"。\n"
     "- risks：字符串数组，可为 []。\n"
-    "- open_questions：字符串数组，未决问题，可为 []。"
+    "- open_questions：字符串数组，未决问题，可为 []。\n"
+    "验证由系统在执行完成后自动运行，不要把运行验证命令列为 steps 中的实现步骤；"
+    "steps 只应包含实际的编码或文件修改动作。"
 )
 
 
@@ -1715,8 +1762,8 @@ class AgentWorkflow:
                 "finished_at": utc_now(),
                 "output": response.output,
                 "final_message": response.final_message,
-                "events": response.events,
-                "raw_events": response.raw_events,
+                "events": _bound_run_events(response.events),
+                "raw_events": _bound_run_events(response.raw_events),
                 "usage": response.usage,
                 "error_type": response.error_type,
                 "error": response.error,

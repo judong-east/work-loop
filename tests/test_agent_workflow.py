@@ -24,7 +24,12 @@ from app.agents.plan_graph import (
     PlanNodeKind,
 )
 from app.agents.runtime import AgentRuntime, RoleRoutedRuntime
-from app.agents.workflow import AgentWorkflow
+from app.agents.workflow import (
+    AgentWorkflow,
+    _MAX_RUN_EVENT_FIELD_CHARS,
+    _MAX_RUN_EVENTS_KEPT,
+    _bound_run_events,
+)
 from tests.git_support import create_repository
 
 
@@ -1036,6 +1041,49 @@ class PromptSchemaHintTest(unittest.TestCase):
         self.assertIn("ReviewResult", instructions)
         for field in ("verdict", "acceptance", "issues", "recommended_tests", "summary"):
             self.assertIn(field, instructions)
+
+
+class RunEventBoundingTest(unittest.TestCase):
+    """A verbose reasoning-model session can produce an event stream large
+    enough that json.dumps(to_plain(record)) hit MemoryError mid-run
+    (observed during self-dogfooding). raw_events is never read back for
+    control flow, so bounding the persisted copy must prevent OOM without
+    losing anything the system depends on."""
+
+    def test_caps_entry_count_with_truncation_marker(self) -> None:
+        events = [{"type": "x", "i": i} for i in range(_MAX_RUN_EVENTS_KEPT + 100)]
+        bounded = _bound_run_events(events)
+        self.assertEqual(len(bounded), _MAX_RUN_EVENTS_KEPT + 1)
+        self.assertEqual(bounded[_MAX_RUN_EVENTS_KEPT // 2]["type"], "events_truncated")
+        self.assertEqual(bounded[_MAX_RUN_EVENTS_KEPT // 2]["dropped"], 100)
+        # first and last real events are preserved
+        self.assertEqual(bounded[0]["i"], 0)
+        self.assertEqual(bounded[-1]["i"], _MAX_RUN_EVENTS_KEPT + 99)
+
+    def test_truncates_overlong_string_fields(self) -> None:
+        huge = "y" * (_MAX_RUN_EVENT_FIELD_CHARS * 5)
+        bounded = _bound_run_events([{"content": huge, "nested": {"deep": huge}}])
+        self.assertLessEqual(len(bounded[0]["content"]), _MAX_RUN_EVENT_FIELD_CHARS + len("…<truncated>"))
+        self.assertTrue(bounded[0]["content"].endswith("…<truncated>"))
+        self.assertLessEqual(len(bounded[0]["nested"]["deep"]), _MAX_RUN_EVENT_FIELD_CHARS + len("…<truncated>"))
+
+    def test_small_list_is_unchanged_in_content(self) -> None:
+        events = [{"type": "a"}, {"type": "b"}]
+        self.assertEqual(_bound_run_events(events), events)
+
+    def test_non_list_and_empty_become_empty_list(self) -> None:
+        self.assertEqual(_bound_run_events(None), [])
+        self.assertEqual(_bound_run_events([]), [])
+
+    def test_bounded_output_serializes_to_bounded_json(self) -> None:
+        # A list that would otherwise serialize to many MB: 5000 entries each
+        # carrying a large string. Bounded output must stay small and serializable.
+        events = [{"content": "z" * 5000} for _ in range(5000)]
+        bounded = _bound_run_events(events)
+        serialized = json.dumps(bounded, ensure_ascii=False)
+        self.assertLessEqual(len(bounded), _MAX_RUN_EVENTS_KEPT + 1)
+        # ~400 entries x ~4KB cap ~ well under a few MB
+        self.assertLess(len(serialized), 4_000_000)
 
 
 if __name__ == "__main__":
