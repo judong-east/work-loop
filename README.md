@@ -151,6 +151,21 @@ the `pi` binary first. Per-role model overrides come from
 `WORKLOOP_PI_PLANNER_MODEL`, `WORKLOOP_PI_EXECUTOR_MODEL`, and
 `WORKLOOP_PI_REVIEWER_MODEL`.
 
+Pi is launched with a working directory and a tool allow-list only — unlike
+Codex it gets no OS sandbox, so its `bash`/`write`/`edit` tools can reach any
+path and any host, and a project policy's `network = "deny"` cannot be
+enforced. Workloop cannot detect a write outside the task worktree either:
+policy checks and `changes.diff` come from a snapshot of that worktree. A
+write-access request under a network-denying policy is therefore refused with
+`sandbox_unavailable` unless you opt in explicitly:
+
+```powershell
+$env:WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR="1"
+```
+
+Read-only planner and reviewer requests are unaffected. Use `CodexCliRuntime`
+for write nodes when the isolation guarantee matters.
+
 **Per-node model routing** — with both flags set, each plan node's
 `ModelBinding` flows onto its `AgentRequest`, so one Pi runtime can route per
 node — for example Opus for planning, GPT for the backend, Kimi for the UI.

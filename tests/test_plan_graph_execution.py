@@ -70,6 +70,25 @@ def passing_review() -> dict:
     }
 
 
+def revising_review() -> dict:
+    return {
+        "verdict": "revise_code",
+        "acceptance": [{"criterion": "result.txt 内容为 done", "passed": False}],
+        "issues": [
+            {
+                "file": "result.txt",
+                "line": 1,
+                "severity": "warning",
+                "message": "内容不是 done",
+                "suggestion": "改为 done",
+                "evidence": "result.txt 第一行为 todo",
+            }
+        ],
+        "recommended_tests": [],
+        "summary": "需要返修。",
+    }
+
+
 class PassingValidator:
     def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
         return ValidationResult(
@@ -830,6 +849,106 @@ def invalid_review_output() -> dict:
         "recommended_tests": [],
         "summary": "实现和验证均通过。",
     }
+
+
+class GraphRevisionRoundTest(unittest.TestCase):
+    """A ``revise_code`` verdict must actually re-run the graph's write nodes.
+
+    ``_execute_plan_graph`` replays ``node_runs`` so a resumed task skips work it
+    already finished. That replay used to swallow revision rounds too: every
+    node still read "completed", nothing was ready, the round produced no
+    executor call at all, and the task re-reviewed an unchanged worktree until
+    it paused on max_iterations — with per-round artifacts that looked normal."""
+
+    def test_revise_code_reruns_write_nodes_with_reviewer_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "impl": [
+                        FakeStep(
+                            output=executor_output(["首轮实现"], ["result.txt"]),
+                            writes={"result.txt": "todo\n"},
+                        ),
+                        FakeStep(
+                            output=executor_output(["按审核意见返修"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        ),
+                    ],
+                    "review": [
+                        FakeStep(output=revising_review(), session_id="reviewer-session"),
+                        FakeStep(output=passing_review(), session_id="reviewer-session"),
+                    ],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("返修任务", "写 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="写 result.txt",
+                nodes=[
+                    planning_node(),
+                    impl_node("impl", "写入 result.txt", depends_on=["planning"]),
+                    review_node("review", depends_on=["impl"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            # The write node ran once per round, not once in total.
+            impl_requests = [item for item in runtime.requests if item.node_id == "impl"]
+            self.assertEqual(len(impl_requests), 2)
+            # And the second run carried the reviewer's findings, without which
+            # it could only reproduce the rejected result.
+            self.assertIn("上一轮审核要求返修", impl_requests[1].instructions)
+            self.assertIn("内容不是 done", impl_requests[1].instructions)
+            # The revision reached the shared task worktree.
+            workspace = workflow.workspace_path(task.task_id)
+            self.assertEqual(
+                (workspace / "result.txt").read_text(encoding="utf-8"), "done\n"
+            )
+
+    def test_first_round_has_no_review_feedback_block(self) -> None:
+        """The feedback block is only added on a revision round, so a first-round
+        node prompt stays exactly what it was."""
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan())],
+                    "impl": [
+                        FakeStep(
+                            output=executor_output(["实现"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review())],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("一次过任务", "写 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+            workflow.save_plan_graph(
+                task.task_id,
+                PlanGraph(
+                    requirement_summary="写 result.txt",
+                    nodes=[
+                        planning_node(),
+                        impl_node("impl", "写入 result.txt", depends_on=["planning"]),
+                        review_node("review", depends_on=["impl"]),
+                    ],
+                ),
+            )
+
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            impl_requests = [item for item in runtime.requests if item.node_id == "impl"]
+            self.assertEqual(len(impl_requests), 1)
+            self.assertNotIn("上一轮审核要求返修", impl_requests[0].instructions)
 
 
 class OutputRepairTest(unittest.TestCase):

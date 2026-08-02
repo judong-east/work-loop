@@ -32,6 +32,16 @@ from app.models.config import load_routing_config
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
+# The server binds 127.0.0.1, which stops remote clients but not the browser the
+# user already has open: a page on any origin can POST here (a JSON body with the
+# default text/plain content type is a "simple request", so no preflight is sent
+# and the request goes through), and a hostname that resolves to 127.0.0.1 can
+# both send and read responses via DNS rebinding. Every write endpoint is
+# authority-bearing — /deliver merges into the target branch and takes its
+# `confirmed` flag straight from the request body — so cross-site requests have
+# to be rejected before they reach a handler.
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
 
 def _resolve_static_dir() -> Path:
     """Return the static directory, handling both normal and PyInstaller-frozen modes."""
@@ -163,6 +173,15 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def _dispatch(self, routes, needs_body: bool) -> None:
         parsed = urlsplit(self.path)
         self.query_params = parse_qs(parsed.query)
+        rejection = self._same_origin_rejection(self.command not in {"GET", "HEAD"})
+        if rejection:
+            # Drain the body first so Windows does not reset the connection
+            # while the client is still writing.
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length:
+                self.rfile.read(min(length, MAX_BODY_BYTES))
+            self._send_json(403, {"error": rejection})
+            return
         if needs_body and parsed.path.startswith(
             ("/api/tasks", "/api/models", "/api/workflow", "/api/memory")
         ):
@@ -202,6 +221,42 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": f"服务器内部错误：{error}"})
             return
         self._send_json(404, {"error": "接口不存在。"})
+
+    def _same_origin_rejection(self, is_write: bool) -> str:
+        """Return a rejection reason for a cross-site request, or "".
+
+        Two independent checks:
+
+        * ``Host`` must name the loopback interface. A DNS-rebinding attacker
+          reaches 127.0.0.1 through their own hostname, which arrives here in
+          ``Host``; rejecting it keeps them from reading responses.
+        * For state-changing methods, ``Origin`` (which browsers always attach
+          to a cross-site POST, preflighted or not) and ``Sec-Fetch-Site`` must
+          say same-origin.
+
+        Non-browser clients — the CLI, tests, curl — send neither ``Origin`` nor
+        ``Sec-Fetch-Site``, so they are unaffected."""
+        host = self.headers.get("Host", "")
+        if host.startswith("["):  # bracketed IPv6 literal, e.g. [::1]:8765
+            hostname = host[: host.find("]") + 1]
+        else:
+            hostname = host.rsplit(":", 1)[0] if ":" in host else host
+        if hostname and hostname.strip("[]") not in {h.strip("[]") for h in _LOCAL_HOSTS}:
+            return "请求 Host 不是本机回环地址，已拒绝（可能是 DNS rebinding）。"
+        if not is_write:
+            return ""
+        fetch_site = self.headers.get("Sec-Fetch-Site", "")
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            return "跨站请求已拒绝。"
+        origin = self.headers.get("Origin", "")
+        if origin:
+            parsed = urlsplit(origin)
+            port = self.server.server_address[1]
+            allowed = {f"http://{name}:{port}" for name in ("127.0.0.1", "localhost")}
+            allowed.add(f"http://[::1]:{port}")
+            if f"{parsed.scheme}://{parsed.netloc}" not in allowed:
+                return "跨站请求已拒绝：Origin 不是本机控制台。"
+        return ""
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)

@@ -77,7 +77,16 @@ def _bound_run_events(events: Any) -> list[Any]:
                 value[:_MAX_RUN_EVENT_FIELD_CHARS] + "…<truncated>"
             )
         if isinstance(value, list):
-            return [truncate(item) for item in value[:_MAX_RUN_EVENTS_KEPT]]
+            # A nested list (a message's content parts, for example) is bounded
+            # too, but say so instead of dropping the tail silently — a
+            # diagnostic that lies about its own completeness is worse than a
+            # long one.
+            kept = [truncate(item) for item in value[:_MAX_RUN_EVENTS_KEPT]]
+            if len(value) > _MAX_RUN_EVENTS_KEPT:
+                kept.append(
+                    {"type": "items_truncated", "dropped": len(value) - _MAX_RUN_EVENTS_KEPT}
+                )
+            return kept
         if isinstance(value, dict):
             return {key: truncate(val) for key, val in value.items()}
         return value
@@ -161,8 +170,8 @@ _PLANNER_OUTPUT_INSTRUCTION = (
     "- constraints：字符串数组，可为 []。\n"
     "- acceptance_criteria：字符串数组，验收标准（非空、不重复），应与需求中的验收"
     "项逐字对应。\n"
-    "- required_tests：字符串数组，需要运行的项目验证命令名（非空），本任务应包含 "
-    "\"check_result\"。\n"
+    "- required_tests：字符串数组，需要运行的项目验证命令名（非空），每一项都必须"
+    "逐字取自需求中列出的项目验证命令名，不要自造命令名或写成 shell 命令行。\n"
     "- risks：字符串数组，可为 []。\n"
     "- open_questions：字符串数组，未决问题，可为 []。\n"
     "验证由系统在执行完成后自动运行，不要把运行验证命令列为 steps 中的实现步骤；"
@@ -508,7 +517,7 @@ class AgentWorkflow:
             AgentRequest(
                 task_id=task.task_id,
                 role="planner",
-                instructions=self._planner_instructions(task),
+                instructions=self._planner_instructions(task, policy),
                 workspace=self.workspace_path(task.task_id),
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
@@ -849,6 +858,15 @@ class AgentWorkflow:
                 return task
             if verdict is ReviewVerdict.REVISE_CODE:
                 review_feedback = review_result
+                # Graph execution treats a node whose node_runs say "completed"
+                # as done, so an interrupted task resumes without redoing
+                # finished work. A revision round is the opposite case: the
+                # reviewer rejected the result, so every write node has to run
+                # again against the feedback. Without this reset the graph has
+                # nothing ready, the round is a silent no-op, and the task
+                # burns its whole iteration budget re-reviewing an unchanged
+                # worktree until it pauses on max_iterations.
+                self._reset_write_nodes_for_revision(task, plan)
                 phase = AgentTaskStatus.EXECUTING
                 new_round = True
                 continue
@@ -1135,7 +1153,11 @@ class AgentWorkflow:
         )
 
     @staticmethod
-    def _node_instructions(node: PlanNode, context: ContextPack | None) -> str:
+    def _node_instructions(
+        node: PlanNode,
+        context: ContextPack | None,
+        review_feedback: ReviewResult | None = None,
+    ) -> str:
         base = (node.instructions or node.title).strip() or node.title
         body = base
         if context is not None:
@@ -1154,6 +1176,14 @@ class AgentWorkflow:
                 lines.extend(f"- {question}" for question in context.open_questions)
             if lines:
                 body = base + "\n\n# 上游节点交接的压缩上下文\n" + "\n".join(lines)
+        if review_feedback is not None:
+            # A revision round re-runs this node. Without the reviewer's
+            # findings it would only reproduce the result that was rejected,
+            # so the feedback has to reach the node prompt the same way
+            # _executor_instructions delivers it on the single-executor path.
+            body += "\n\n# 上一轮审核要求返修\n" + json.dumps(
+                to_plain(review_feedback), ensure_ascii=False
+            )
         return body + _EXECUTOR_OUTPUT_INSTRUCTION
 
     def _execute_plan_graph(
@@ -1243,6 +1273,32 @@ class AgentWorkflow:
         self.store.write_json(round_dir / "execution.json", self._merge_node_results(per_node_results))
         return None
 
+    def _reset_write_nodes_for_revision(
+        self,
+        task: AgentTask,
+        plan: ExecutionPlan,
+    ) -> None:
+        """Clear per-node run state for write nodes before a revision round.
+
+        ``_execute_plan_graph`` replays ``node_runs`` so a resumed task skips
+        nodes that already finished. That is right for a resume and wrong for a
+        ``revise_code`` round, where the reviewer rejected the produced code and
+        every implementation/integration node must run again. Planning nodes
+        keep their state: the approved plan itself did not change (a rejected
+        plan goes through ``_replan``, which clears ``node_runs`` entirely).
+
+        No-op outside graph execution, where the single executor call already
+        re-runs each round."""
+        if not task.graph_execution or not task.node_runs:
+            return
+        try:
+            graph = PlanGraph.from_dict(task.plan_graph)
+        except (TypeError, ValueError):
+            graph = PlanGraph.from_execution_plan(plan)
+        for node in graph.implementation_nodes():
+            task.node_runs.pop(node.node_id, None)
+        self.store.save(task)
+
     def _run_plan_node(
         self,
         task: AgentTask,
@@ -1307,7 +1363,7 @@ class AgentWorkflow:
         request = AgentRequest(
             task_id=task.task_id,
             role="executor",
-            instructions=self._node_instructions(node, context),
+            instructions=self._node_instructions(node, context, review_feedback),
             workspace=request_workspace,
             access=AgentAccess.WORKSPACE_WRITE,
             policy=effective_agent_policy,
@@ -1394,13 +1450,21 @@ class AgentWorkflow:
     # ------------------------------------------------------------------
 
     def _prepare_node_worktree(self, task: AgentTask, node: PlanNode) -> Path:
-        """Create a fresh detached worktree for one node at the task base
-        commit. The path is deterministic from ``(task_id, node_id)`` so resume
-        is safe: a stale worktree from a crashed run is pruned first."""
+        """Create a fresh detached worktree for one node at the task's current
+        delivery baseline. The path is deterministic from ``(task_id, node_id)``
+        so resume is safe: a stale worktree from a crashed run is pruned first.
+
+        The baseline must be ``delivery_base_commit or base_commit`` — the same
+        expression ``_prepared_from_task`` uses. After an integration rebase the
+        shared task worktree sits on the advanced target commit, so building
+        node worktrees from the original ``base_commit`` would hand the node a
+        tree that the replicated delta cannot reconcile."""
         path = self.store.task_dir(task.task_id) / "node-worktrees" / node.node_id
         project = self.get_project(task.project_id)
         return self.git_worktrees.add_node_worktree(
-            Path(project.repository), path, task.base_commit
+            Path(project.repository),
+            path,
+            task.delivery_base_commit or task.base_commit,
         )
 
     def _remove_node_worktree(self, task: AgentTask, path: Path) -> None:
@@ -2070,12 +2134,23 @@ class AgentWorkflow:
         task.updated_at = latest.updated_at
         task.error = latest.error
 
-    def _planner_instructions(self, task: AgentTask) -> str:
+    def _planner_instructions(
+        self,
+        task: AgentTask,
+        policy: ProjectPolicy | None = None,
+    ) -> str:
         payload = {
             "title": task.title,
             "requirement": task.requirement,
             "clarifications": task.clarifications,
         }
+        # The planner may only select named commands from the project policy
+        # (ProjectPolicy.required_commands rejects anything else), so give it
+        # the real list instead of leaving it to infer names from prose.
+        if policy is not None:
+            payload["available_validation_commands"] = [
+                command.name for command in policy.validation_commands
+            ]
         instructions = (
             "分析任务并生成结构化 ExecutionPlan。每次最多保留一个高影响未决问题；"
             "已有澄清答复必须作为需求约束。只输出符合 ExecutionPlan Schema 的完整 "

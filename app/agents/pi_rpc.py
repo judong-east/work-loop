@@ -26,6 +26,22 @@ from app.core.process_tree import ProcessTreeHandle, process_group_options
 _THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 _SAFE_TOOL = re.compile(r"^[a-z][a-z0-9_-]*$")
 
+# Unlike CodexCliRuntime (--sandbox workspace-write, network_access=false, --cd),
+# Pi is launched with nothing but a working directory and a tool allow-list: its
+# bash/write/edit tools can reach any path on the machine and any host on the
+# network. Workloop cannot detect that either — policy checks and changes.diff
+# are computed from a snapshot of the task worktree, so a write outside it leaves
+# no violation, no diff and no evidence. So a write-access request whose policy
+# denies network is refused unless the operator opts in explicitly, the same way
+# UnsafeDirectCommandSandbox is named and gated for validation.
+_UNSANDBOXED_OPT_IN = "WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR"
+
+
+def _unsandboxed_allowed() -> bool:
+    return os.environ.get(_UNSANDBOXED_OPT_IN, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
 
 @dataclass(frozen=True)
 class PiRpcProfile:
@@ -71,6 +87,19 @@ class PiRpcRuntime(AgentRuntime):
         identity = self.describe(request)
         process: subprocess.Popen | None = None
         tree: ProcessTreeHandle | None = None
+        if (
+            request.access is AgentAccess.WORKSPACE_WRITE
+            and not request.policy.network_allowed
+            and not _unsandboxed_allowed()
+        ):
+            return self._failure(
+                request,
+                "项目策略拒绝网络访问，但 PiRpcRuntime 无法在操作系统层面隔离写入或"
+                f"网络。要在无沙箱条件下执行，请显式设置 {_UNSANDBOXED_OPT_IN}=1，"
+                "或改用 CodexCliRuntime 执行写节点。",
+                "sandbox_unavailable",
+                identity,
+            )
         try:
             command = self._command(request)
             workspace = Path(request.workspace).resolve()
@@ -147,6 +176,11 @@ class PiRpcRuntime(AgentRuntime):
                 "thinking": str(getattr(request, "thinking", "") or self.profile.thinking),
                 "tools": list(self._tools(request)),
                 "session_dir": str(self._session_dir(request)),
+                # Recorded so a run record never implies isolation Pi does not
+                # provide: the worktree is a working directory, not a boundary.
+                "sandbox": "none",
+                "network_enforced": False,
+                "unsandboxed_opt_in": _unsandboxed_allowed(),
             },
         }
 
@@ -229,7 +263,12 @@ class PiRpcRuntime(AgentRuntime):
                 break
 
             try:
-                source, raw = records.get(timeout=min(0.1, total_deadline - now, idle_deadline - now))
+                # Clamp: the deadline checks above use `now`, but time passes
+                # before this call, so a raw difference can go negative and
+                # queue.get would raise ValueError instead of timing out.
+                source, raw = records.get(
+                    timeout=max(0.0, min(0.1, total_deadline - now, idle_deadline - now))
+                )
             except queue.Empty:
                 continue
             if raw is None:
@@ -399,7 +438,9 @@ class PiRpcRuntime(AgentRuntime):
         self._send(process, {"id": request_id, "type": command})
         while time.monotonic() < deadline:
             try:
-                source, raw = records.get(timeout=min(0.1, deadline - time.monotonic()))
+                source, raw = records.get(
+                    timeout=max(0.0, min(0.1, deadline - time.monotonic()))
+                )
             except queue.Empty:
                 continue
             if source != "stdout" or raw is None:

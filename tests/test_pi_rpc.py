@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from app.agents.contracts import AgentAccess, AgentBudget, AgentRequest
+from app.agents.contracts import AgentAccess, AgentBudget, AgentPolicy, AgentRequest
 from app.agents.pi_rpc import PiRpcProfile, PiRpcRuntime
 
 
@@ -67,6 +67,11 @@ class PiRpcRuntimeTest(unittest.TestCase):
                     instructions="return the result",
                     workspace=root,
                     access=AgentAccess.WORKSPACE_WRITE,
+                    # This exercises the RPC protocol, not the sandbox gate. Pi
+                    # cannot enforce a network denial, so a write request under
+                    # the default deny-all policy is refused; say explicitly
+                    # that this request does not ask for that guarantee.
+                    policy=AgentPolicy(network_allowed=True),
                     budget=AgentBudget(total_timeout_seconds=10, idle_timeout_seconds=3),
                 )
             )
@@ -77,6 +82,59 @@ class PiRpcRuntimeTest(unittest.TestCase):
             self.assertEqual(result.usage["total_cost_usd"], 0.01)
             self.assertEqual(result.runtime, "pi-rpc")
             self.assertTrue(any(event.event_type.value == "message_delta" for event in result.events))
+
+    def test_write_access_refused_when_policy_denies_network_without_opt_in(self) -> None:
+        """Pi is launched with a cwd and a tool allow-list — no OS sandbox — so a
+        policy that denies network cannot be honored. Refuse rather than run and
+        report success, which is what made an unenforced denial invisible."""
+        # An unresolvable command on purpose: past the gate this must fail on the
+        # missing binary, never spawn a real agent session from the test suite.
+        runtime = PiRpcRuntime(
+            PiRpcProfile(command=["workloop-absent-pi-binary"], model="fake-model")
+        )
+        request = AgentRequest(
+            task_id="TASK-test",
+            role="executor",
+            instructions="write a file",
+            workspace=Path("."),
+            access=AgentAccess.WORKSPACE_WRITE,
+            policy=AgentPolicy(network_allowed=False),
+            budget=AgentBudget(total_timeout_seconds=5, idle_timeout_seconds=1),
+        )
+        previous = os.environ.pop("WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR", None)
+        try:
+            refused = runtime.invoke(request)
+            self.assertFalse(refused.succeeded)
+            self.assertEqual(refused.error_type, "sandbox_unavailable")
+
+            os.environ["WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR"] = "1"
+            # With the opt-in the gate is out of the way; the call now fails on
+            # the missing binary instead, proving the gate is what blocked it.
+            allowed = runtime.invoke(request)
+            self.assertEqual(allowed.error_type, "environment_missing")
+        finally:
+            os.environ.pop("WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR", None)
+            if previous is not None:
+                os.environ["WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR"] = previous
+
+    def test_read_only_access_is_not_gated_by_the_sandbox_check(self) -> None:
+        """Planner/reviewer requests get no write or bash tool, so the missing
+        sandbox does not change what they can reach: the gate must not fire."""
+        runtime = PiRpcRuntime(
+            PiRpcProfile(command=["workloop-absent-pi-binary"], model="fake-model")
+        )
+        result = runtime.invoke(
+            AgentRequest(
+                task_id="TASK-test",
+                role="reviewer",
+                instructions="review",
+                workspace=Path("."),
+                access=AgentAccess.READ_ONLY,
+                policy=AgentPolicy(network_allowed=False),
+                budget=AgentBudget(total_timeout_seconds=5, idle_timeout_seconds=1),
+            )
+        )
+        self.assertEqual(result.error_type, "environment_missing")
 
     def test_model_can_be_overridden_per_request(self) -> None:
         runtime = PiRpcRuntime(PiRpcProfile(command=["pi"], model="default"))

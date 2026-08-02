@@ -10,6 +10,23 @@ from app.tools.files import iter_text_files
 
 CHANGE_ACTIONS = {"write", "delete"}
 
+# A snapshot holds every file's content in memory (twice: normalized + raw) and
+# is persisted verbatim into artifacts/workspace-base.json, and it is taken
+# several times per round. Validation runs project commands inside the worktree,
+# so a single `uv`/`npm` invocation can drop a multi-hundred-MB tree next to the
+# source. Above this size a file keeps its path and digest — change detection and
+# policy checks still work — but its bytes never enter the snapshot.
+MAX_SNAPSHOT_FILE_BYTES = 1024 * 1024
+
+
+def _digest_file(path: Path) -> str:
+    """Stream a file's sha256 so an oversized file is never fully resident."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 class WorkspaceSnapshot(dict[str, str]):
     def __init__(
@@ -108,6 +125,14 @@ class Workspace:
             if not path.is_file():
                 continue
             try:
+                size = path.stat().st_size
+                if size > MAX_SNAPSHOT_FILE_BYTES:
+                    digest = _digest_file(path)
+                    identity = f"（文件过大，{size} 字节，sha256:{digest}）"
+                    files[relative] = identity
+                    raw_text[relative] = identity
+                    digests[relative] = digest
+                    continue
                 data = path.read_bytes()
                 decoded = data.decode("utf-8")
                 files[relative] = decoded.replace("\r\n", "\n").replace("\r", "\n")
