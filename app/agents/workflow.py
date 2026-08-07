@@ -457,7 +457,13 @@ class AgentWorkflow:
         effective_agent_policy = self._agent_policy(policy, plan.required_tests)
         workspace = Workspace(self.workspace_path(task.task_id))
         base = self._load_workspace_base(task)
-        if phase is AgentTaskStatus.EXECUTING and pause_reason == "max_iterations":
+        pending_revision = (
+            phase is AgentTaskStatus.REVIEWING
+            and bool(task.revision_target_node_id)
+        )
+        if pending_revision or (
+            phase is AgentTaskStatus.EXECUTING and pause_reason == "max_iterations"
+        ):
             feedback = self._load_round_review(task)
             new_round = True
         else:

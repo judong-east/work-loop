@@ -17,6 +17,7 @@ from app.agents.contracts import (
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
 from app.agents.runtime import AgentRuntime
 from app.agents.scheduler import PersistentAgentScheduler, QueueEntryStatus
+from app.agents.store import AgentTaskStore
 from app.agents.workflow import AgentWorkflow
 from app.agents.workflow_config import workflow_from_dict
 from tests.git_support import create_repository
@@ -146,6 +147,23 @@ class CrashOnRoleCallRuntime(AgentRuntime):
 
     def describe(self, request):
         return self.delegate.describe(request)
+
+
+class CrashAfterPersistedRevisionStore(AgentTaskStore):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.crashed = False
+
+    def save(self, task):
+        path = super().save(task)
+        if (
+            not self.crashed
+            and task.status is AgentTaskStatus.REVIEWING
+            and task.revision_target_node_id
+        ):
+            self.crashed = True
+            raise SimulatedCrash("crash after persisting revision target")
+        return path
 
 
 class CrashValidator:
@@ -872,6 +890,132 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 ),
                 "done\n",
             )
+
+    def test_resume_reviewing_revision_starts_new_round_with_scoped_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "first\n"},
+                        )
+                    ],
+                    "reviewer": [FakeAgentStep(output=revision_review())],
+                }
+            )
+            workflow, project_id = create_workflow(root, runtime)
+            workflow.workflows.save(
+                workflow_from_dict(
+                    {
+                        "workflow_id": "recover-persisted-revision",
+                        "label": "Recover persisted revision",
+                        "nodes": [
+                            {"node_id": "plan", "kind": "planner", "label": "Plan"},
+                            {
+                                "node_id": "approve",
+                                "kind": "plan_approval",
+                                "label": "Approve",
+                            },
+                            {
+                                "node_id": "execute-first",
+                                "kind": "executor",
+                                "label": "First execution",
+                            },
+                            {
+                                "node_id": "review-first",
+                                "kind": "reviewer",
+                                "label": "First review",
+                            },
+                            {
+                                "node_id": "execute-second",
+                                "kind": "executor",
+                                "label": "Second execution",
+                            },
+                            {
+                                "node_id": "validate",
+                                "kind": "validation",
+                                "label": "Validate",
+                            },
+                            {
+                                "node_id": "review",
+                                "kind": "reviewer",
+                                "label": "Review",
+                            },
+                            {
+                                "node_id": "deliver",
+                                "kind": "delivery",
+                                "label": "Deliver",
+                            },
+                        ],
+                    }
+                )
+            )
+            task = workflow.create_task(
+                "Persisted revision crash",
+                "Resume the persisted revision round",
+                project_id,
+                workflow_id="recover-persisted-revision",
+            )
+            workflow.store = CrashAfterPersistedRevisionStore(workflow.store.root)
+            scheduler = PersistentAgentScheduler(workflow)
+            scheduler.enqueue_analysis(task.task_id)
+            scheduler.run_next()
+            scheduler.enqueue_execution(task.task_id)
+
+            with self.assertRaises(SimulatedCrash):
+                scheduler.run_next()
+
+            persisted = workflow.get_task(task.task_id)
+            self.assertEqual(persisted.status, AgentTaskStatus.REVIEWING)
+            self.assertEqual(persisted.revision_target_node_id, "execute-first")
+            self.assertEqual(persisted.iteration, 1)
+            self.assertEqual(persisted.plan_iteration, 1)
+
+            resumed_runtime = ScriptedFakeRuntime(
+                {
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "revised\n"},
+                        ),
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "done\n"},
+                        ),
+                    ],
+                    "reviewer": [
+                        FakeAgentStep(output=passing_review()),
+                        FakeAgentStep(output=passing_review()),
+                    ],
+                }
+            )
+            recovered_workflow = AgentWorkflow(
+                workflow.root,
+                resumed_runtime,
+                PassingValidator(),
+            )
+            recovered = PersistentAgentScheduler(recovered_workflow)
+            interrupted = recovered_workflow.get_task(task.task_id)
+            self.assertEqual(interrupted.interrupted_status, "reviewing")
+
+            recovered.resume(task.task_id)
+            completed = recovered.run_next()
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(completed.iteration, 2)
+            self.assertEqual(completed.plan_iteration, 2)
+            self.assertEqual(
+                [request.workflow_node_id for request in resumed_runtime.requests],
+                ["execute-first", "review-first", "execute-second", "review"],
+            )
+            executor_requests = [
+                request for request in resumed_runtime.requests if request.role == "executor"
+            ]
+            self.assertIn("Not done", executor_requests[0].instructions)
+            self.assertNotIn("Not done", executor_requests[1].instructions)
 
     def test_resume_validation_does_not_rerun_executor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
