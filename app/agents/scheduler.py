@@ -573,13 +573,17 @@ class PersistentAgentScheduler:
     def _running_validation_runs(self, task_id: str) -> list[Path]:
         round_root = self.workflow.store.task_dir(task_id) / "artifacts" / "rounds"
         paths = []
-        for path in round_root.glob("*/validation-run.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if data.get("status") == "running":
-                paths.append(path)
+        for pattern in (
+            "*/validation-run.json",
+            "*/workflow-nodes/*/validation-run.json",
+        ):
+            for path in round_root.glob(pattern):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if data.get("status") == "running":
+                    paths.append(path)
         return paths
 
     def _task_ids(self) -> list[str]:

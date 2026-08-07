@@ -763,6 +763,7 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                             writes={"result.txt": "must not be consumed\n"},
                         ),
                     ],
+                    "reviewer": [FakeAgentStep(output=revision_review())],
                 }
             )
             crashing = CrashOnRoleCallRuntime(delegate, "executor", 2)
@@ -783,6 +784,11 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                                 "node_id": "execute-first",
                                 "kind": "executor",
                                 "label": "First execution",
+                            },
+                            {
+                                "node_id": "review-first",
+                                "kind": "reviewer",
+                                "label": "First review",
                             },
                             {
                                 "node_id": "execute-second",
@@ -827,10 +833,17 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                     "executor": [
                         FakeAgentStep(
                             output=execution_output(),
+                            writes={"result.txt": "revised\n"},
+                        ),
+                        FakeAgentStep(
+                            output=execution_output(),
                             writes={"result.txt": "done\n"},
-                        )
+                        ),
                     ],
-                    "reviewer": [FakeAgentStep(output=passing_review())],
+                    "reviewer": [
+                        FakeAgentStep(output=passing_review()),
+                        FakeAgentStep(output=passing_review()),
+                    ],
                 }
             )
             recovered_workflow = AgentWorkflow(
@@ -846,8 +859,13 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
             self.assertEqual(
                 [request.workflow_node_id for request in resumed_runtime.requests],
-                ["execute-second", "review"],
+                ["execute-first", "review-first", "execute-second", "review"],
             )
+            executor_requests = [
+                request for request in resumed_runtime.requests if request.role == "executor"
+            ]
+            self.assertIn("Not done", executor_requests[0].instructions)
+            self.assertNotIn("Not done", executor_requests[1].instructions)
             self.assertEqual(
                 (recovered_workflow.workspace_path(task.task_id) / "result.txt").read_text(
                     encoding="utf-8"
@@ -905,6 +923,17 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 ).read_text("utf-8")
             )
             self.assertEqual(validation_run["status"], "interrupted")
+            node_validation_runs = list(
+                (
+                    recovered_workflow.store.task_dir(task.task_id)
+                    / "artifacts/rounds/1/workflow-nodes"
+                ).glob("*/validation-run.json")
+            )
+            self.assertEqual(len(node_validation_runs), 1)
+            self.assertEqual(
+                json.loads(node_validation_runs[0].read_text("utf-8"))["status"],
+                "interrupted",
+            )
 
             recovered.resume(task.task_id)
             completed = recovered.run_next()

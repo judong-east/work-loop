@@ -48,6 +48,16 @@ def execution_plan() -> dict:
     }
 
 
+def passing_review(summary: str) -> dict:
+    return {
+        "verdict": "pass",
+        "acceptance": [{"criterion": "result.txt 内容为 done", "passed": True}],
+        "issues": [],
+        "recommended_tests": [],
+        "summary": summary,
+    }
+
+
 class PassingValidator:
     def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
         return ValidationResult(
@@ -195,6 +205,17 @@ class AgentWorkflowTest(unittest.TestCase):
                         ),
                         FakeAgentStep(
                             output={
+                                "completed_steps": ["first pass revision"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        ),
+                        FakeAgentStep(
+                            output={
                                 "completed_steps": ["second pass"],
                                 "modified_files": ["result.txt"],
                                 "tests": [],
@@ -208,37 +229,27 @@ class AgentWorkflowTest(unittest.TestCase):
                     "reviewer": [
                         FakeAgentStep(
                             output={
-                                "verdict": "pass",
+                                "verdict": "revise_code",
                                 "acceptance": [
-                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                    {"criterion": "result.txt 内容为 done", "passed": False}
                                 ],
-                                "issues": [],
+                                "issues": [
+                                    {
+                                        "file": "result.txt",
+                                        "line": 1,
+                                        "severity": "warning",
+                                        "message": "FIRST EXECUTOR FEEDBACK",
+                                        "suggestion": "Finish the first pass",
+                                        "evidence": "result.txt contains first",
+                                    }
+                                ],
                                 "recommended_tests": [],
-                                "summary": "Early review passed.",
+                                "summary": "Early review requested a revision.",
                             }
                         ),
-                        FakeAgentStep(
-                            output={
-                                "verdict": "pass",
-                                "acceptance": [
-                                    {"criterion": "result.txt 内容为 done", "passed": True}
-                                ],
-                                "issues": [],
-                                "recommended_tests": [],
-                                "summary": "Post-execution review passed.",
-                            }
-                        ),
-                        FakeAgentStep(
-                            output={
-                                "verdict": "pass",
-                                "acceptance": [
-                                    {"criterion": "result.txt 内容为 done", "passed": True}
-                                ],
-                                "issues": [],
-                                "recommended_tests": [],
-                                "summary": "Final review passed.",
-                            }
-                        ),
+                        FakeAgentStep(output=passing_review("Early review passed.")),
+                        FakeAgentStep(output=passing_review("Post-execution review passed.")),
+                        FakeAgentStep(output=passing_review("Final review passed.")),
                     ],
                 }
             )
@@ -315,6 +326,8 @@ class AgentWorkflowTest(unittest.TestCase):
                     "reviewer",
                     "executor",
                     "reviewer",
+                    "executor",
+                    "reviewer",
                     "reviewer",
                 ],
             )
@@ -322,15 +335,20 @@ class AgentWorkflowTest(unittest.TestCase):
             executor_requests = [request for request in runtime.requests if request.role == "executor"]
             reviewer_requests = [request for request in runtime.requests if request.role == "reviewer"]
             self.assertIn("FIRST EXECUTOR INSTRUCTION", executor_requests[0].instructions)
-            self.assertIn("FINAL EXECUTOR INSTRUCTION", executor_requests[1].instructions)
+            self.assertIn("FIRST EXECUTOR INSTRUCTION", executor_requests[1].instructions)
+            self.assertIn("FIRST EXECUTOR FEEDBACK", executor_requests[1].instructions)
+            self.assertIn("FINAL EXECUTOR INSTRUCTION", executor_requests[2].instructions)
+            self.assertNotIn("FIRST EXECUTOR FEEDBACK", executor_requests[2].instructions)
             self.assertIn("EARLY REVIEW INSTRUCTION", reviewer_requests[0].instructions)
+            self.assertIn("EARLY REVIEW INSTRUCTION", reviewer_requests[1].instructions)
             self.assertIn(
-                "POST EXECUTION REVIEW INSTRUCTION", reviewer_requests[1].instructions
+                "POST EXECUTION REVIEW INSTRUCTION", reviewer_requests[2].instructions
             )
-            self.assertIn("FINAL REVIEW INSTRUCTION", reviewer_requests[2].instructions)
+            self.assertIn("FINAL REVIEW INSTRUCTION", reviewer_requests[3].instructions)
             self.assertIn('"available": false', reviewer_requests[0].instructions)
             self.assertIn('"available": false', reviewer_requests[1].instructions)
-            self.assertIn('"passed": true', reviewer_requests[2].instructions)
+            self.assertIn('"available": false', reviewer_requests[2].instructions)
+            self.assertIn('"passed": true', reviewer_requests[3].instructions)
             self.assertEqual(completed.workflow_cursor, 8)
 
             completed.transition(AgentTaskStatus.INTEGRATION_REQUIRED)
@@ -340,26 +358,12 @@ class AgentWorkflowTest(unittest.TestCase):
                 {
                     "reviewer": [
                         FakeAgentStep(
-                            output={
-                                "verdict": "pass",
-                                "acceptance": [
-                                    {"criterion": "result.txt 内容为 done", "passed": True}
-                                ],
-                                "issues": [],
-                                "recommended_tests": [],
-                                "summary": "Integrated pre-validation review passed.",
-                            }
+                            output=passing_review(
+                                "Integrated pre-validation review passed."
+                            )
                         ),
                         FakeAgentStep(
-                            output={
-                                "verdict": "pass",
-                                "acceptance": [
-                                    {"criterion": "result.txt 内容为 done", "passed": True}
-                                ],
-                                "issues": [],
-                                "recommended_tests": [],
-                                "summary": "Integrated final review passed.",
-                            }
+                            output=passing_review("Integrated final review passed.")
                         ),
                     ]
                 }

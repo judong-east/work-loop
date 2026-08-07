@@ -711,6 +711,11 @@ class AgentWorkflow:
             round_dir = self._round_dir(task)
             node_dir = self._workflow_node_dir(round_dir, task.workflow_cursor, node)
             if node.kind is WorkflowNodeKind.EXECUTOR:
+                node_review_feedback = (
+                    review_feedback
+                    if task.revision_target_node_id == node.node_id
+                    else None
+                )
                 round_dir = self._round_dir(task)
                 before_check = self._check_workspace_policy(workspace, base, policy)
                 self.store.write_json(round_dir / "policy-before.json", before_check)
@@ -731,7 +736,7 @@ class AgentWorkflow:
                         workspace_path=workspace_path,
                         base=base,
                         round_dir=round_dir,
-                        review_feedback=review_feedback,
+                        review_feedback=node_review_feedback,
                         workflow_node=node,
                     )
                     if graph_outcome is not None:
@@ -744,7 +749,7 @@ class AgentWorkflow:
                         task_id=task.task_id,
                         role="executor",
                         instructions=self._executor_instructions(
-                            task, plan, review_feedback, node
+                            task, plan, node_review_feedback, node
                         ),
                         workspace=workspace_path,
                         access=AgentAccess.WORKSPACE_WRITE,
@@ -779,6 +784,9 @@ class AgentWorkflow:
                 diff = workspace.diff(base, current)
                 self.store.write_text(round_dir / "changes.diff", diff)
                 self.store.write_text(node_dir / "changes.diff", diff)
+                if task.revision_target_node_id == node.node_id:
+                    task.revision_target_node_id = ""
+                    review_feedback = None
                 self._advance_workflow_cursor(task)
                 continue
 
@@ -953,6 +961,7 @@ class AgentWorkflow:
                     ):
                         return self._finish_or_return_cancellation(task)
                     return task
+                task.revision_target_node_id = workflow.nodes[executor_index].node_id
                 task.workflow_cursor = executor_index
                 self.store.save(task)
                 new_round = True
@@ -1059,6 +1068,7 @@ class AgentWorkflow:
         task.graph_execution = False
         task.node_worktree = False
         task.graph_workflow_node_id = ""
+        task.revision_target_node_id = ""
         task.node_runs = {}
         workflow = self._task_workflow(task)
         planner_node = workflow.node(WorkflowNodeKind.PLANNER)
