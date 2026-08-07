@@ -150,19 +150,19 @@ class CrashOnRoleCallRuntime(AgentRuntime):
 
 
 class CrashAfterPersistedRevisionStore(AgentTaskStore):
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, crash_on_revision_save: int):
         super().__init__(root)
+        self.crash_on_revision_save = crash_on_revision_save
+        self.revision_saves = 0
         self.crashed = False
 
     def save(self, task):
         path = super().save(task)
-        if (
-            not self.crashed
-            and task.status is AgentTaskStatus.REVIEWING
-            and task.revision_target_node_id
-        ):
-            self.crashed = True
-            raise SimulatedCrash("crash after persisting revision target")
+        if task.status is AgentTaskStatus.REVIEWING and task.revision_target_node_id:
+            self.revision_saves += 1
+            if not self.crashed and self.revision_saves == self.crash_on_revision_save:
+                self.crashed = True
+                raise SimulatedCrash("crash after persisting revision state")
         return path
 
 
@@ -891,7 +891,7 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 "done\n",
             )
 
-    def test_resume_reviewing_revision_starts_new_round_with_scoped_feedback(self) -> None:
+    def _assert_reviewing_revision_recovery(self, crash_on_revision_save: int) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = ScriptedFakeRuntime(
@@ -959,7 +959,10 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 project_id,
                 workflow_id="recover-persisted-revision",
             )
-            workflow.store = CrashAfterPersistedRevisionStore(workflow.store.root)
+            workflow.store = CrashAfterPersistedRevisionStore(
+                workflow.store.root,
+                crash_on_revision_save,
+            )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(task.task_id)
             scheduler.run_next()
@@ -971,8 +974,10 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             persisted = workflow.get_task(task.task_id)
             self.assertEqual(persisted.status, AgentTaskStatus.REVIEWING)
             self.assertEqual(persisted.revision_target_node_id, "execute-first")
-            self.assertEqual(persisted.iteration, 1)
-            self.assertEqual(persisted.plan_iteration, 1)
+            self.assertEqual(persisted.revision_feedback_iteration, 1)
+            persisted_round = 1 if crash_on_revision_save == 1 else 2
+            self.assertEqual(persisted.iteration, persisted_round)
+            self.assertEqual(persisted.plan_iteration, persisted_round)
 
             resumed_runtime = ScriptedFakeRuntime(
                 {
@@ -1007,6 +1012,7 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
             self.assertEqual(completed.iteration, 2)
             self.assertEqual(completed.plan_iteration, 2)
+            self.assertEqual(completed.revision_feedback_iteration, 0)
             self.assertEqual(
                 [request.workflow_node_id for request in resumed_runtime.requests],
                 ["execute-first", "review-first", "execute-second", "review"],
@@ -1016,6 +1022,12 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             ]
             self.assertIn("Not done", executor_requests[0].instructions)
             self.assertNotIn("Not done", executor_requests[1].instructions)
+
+    def test_resume_revision_after_target_is_persisted(self) -> None:
+        self._assert_reviewing_revision_recovery(crash_on_revision_save=1)
+
+    def test_resume_revision_after_new_round_is_persisted(self) -> None:
+        self._assert_reviewing_revision_recovery(crash_on_revision_save=2)
 
     def test_resume_validation_does_not_rerun_executor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

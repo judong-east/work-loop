@@ -461,7 +461,9 @@ class AgentWorkflow:
             phase is AgentTaskStatus.REVIEWING
             and bool(task.revision_target_node_id)
         )
-        if pending_revision or (
+        if pending_revision:
+            feedback, new_round = self._load_pending_revision(task)
+        elif (
             phase is AgentTaskStatus.EXECUTING and pause_reason == "max_iterations"
         ):
             feedback = self._load_round_review(task)
@@ -792,6 +794,7 @@ class AgentWorkflow:
                 self.store.write_text(node_dir / "changes.diff", diff)
                 if task.revision_target_node_id == node.node_id:
                     task.revision_target_node_id = ""
+                    task.revision_feedback_iteration = 0
                     review_feedback = None
                 self._advance_workflow_cursor(task)
                 continue
@@ -968,6 +971,7 @@ class AgentWorkflow:
                         return self._finish_or_return_cancellation(task)
                     return task
                 task.revision_target_node_id = workflow.nodes[executor_index].node_id
+                task.revision_feedback_iteration = task.iteration
                 task.workflow_cursor = executor_index
                 self.store.save(task)
                 new_round = True
@@ -1075,6 +1079,7 @@ class AgentWorkflow:
         task.node_worktree = False
         task.graph_workflow_node_id = ""
         task.revision_target_node_id = ""
+        task.revision_feedback_iteration = 0
         task.node_runs = {}
         workflow = self._task_workflow(task)
         planner_node = workflow.node(WorkflowNodeKind.PLANNER)
@@ -1888,17 +1893,38 @@ class AgentWorkflow:
         path = self.store.task_dir(task.task_id) / task.artifacts["plan"]
         return ExecutionPlan.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
-    def _load_round_review(self, task: AgentTask) -> ReviewResult:
+    def _load_round_review(
+        self,
+        task: AgentTask,
+        iteration: int | None = None,
+    ) -> ReviewResult:
         path = (
             self.store.task_dir(task.task_id)
             / "artifacts"
             / "rounds"
-            / str(task.iteration)
+            / str(task.iteration if iteration is None else iteration)
             / "review.json"
         )
         if not path.is_file():
             raise FileNotFoundError(f"任务 {task.task_id} 缺少可恢复审核工件：{path}")
         return ReviewResult.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    def _load_pending_revision(self, task: AgentTask) -> tuple[ReviewResult, bool]:
+        feedback_iteration = task.revision_feedback_iteration
+        if feedback_iteration > 0:
+            feedback = self._load_round_review(task, feedback_iteration)
+            return feedback, task.iteration == feedback_iteration
+
+        # Compatibility for tasks persisted before revision_feedback_iteration
+        # was introduced. A review in the current round means its revision
+        # round has not opened yet; otherwise the preceding round owns it.
+        try:
+            return self._load_round_review(task), True
+        except FileNotFoundError as current_error:
+            feedback = self._load_previous_revision_feedback(task)
+            if feedback is None:
+                raise current_error
+            return feedback, False
 
     def _load_round_validation(self, task: AgentTask) -> ValidationResult:
         path = self._round_dir(task) / "validation.json"

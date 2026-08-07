@@ -562,6 +562,7 @@ class AgentTask:
     plan_iteration: int = 0
     workflow_cursor: int = 0
     revision_target_node_id: str = ""
+    revision_feedback_iteration: int = 0
     run_count: int = 0
     queue_position: int = 0
     active_operation: str = ""
@@ -630,6 +631,7 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         plan_iteration=int(data.get("plan_iteration", data.get("iteration", 0))),
         workflow_cursor=int(data.get("workflow_cursor", 0)),
         revision_target_node_id=str(data.get("revision_target_node_id", "")),
+        revision_feedback_iteration=int(data.get("revision_feedback_iteration", 0)),
         run_count=int(data.get("run_count", 0)),
         queue_position=int(data.get("queue_position", 0)),
         active_operation=str(data.get("active_operation", "")),
