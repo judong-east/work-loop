@@ -49,7 +49,7 @@ def load_agent_profiles(path: Path) -> dict[str, AgentProfile]:
             )
         profiles[role] = AgentProfile(
             role=role,
-            runtime=runtime,
+            runtime=selected_runtime,
             model=str(raw.get("model", "")).strip(),
             access=access,
         )

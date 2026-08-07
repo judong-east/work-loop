@@ -9,6 +9,41 @@ from app.agents.profiles import load_agent_profiles, migrate_legacy_profiles
 
 
 class AgentProfileMigrationTest(unittest.TestCase):
+    def test_loader_preserves_an_explicit_pi_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent-profiles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "roles": {
+                            "planner": {
+                                "runtime": "pi_rpc",
+                                "model": "planner-model",
+                                "access": "read_only",
+                            },
+                            "executor": {
+                                "runtime": "pi_rpc",
+                                "model": "executor-model",
+                                "access": "workspace_write",
+                            },
+                            "reviewer": {
+                                "runtime": "pi_rpc",
+                                "model": "reviewer-model",
+                                "access": "read_only",
+                            },
+                        }
+                    }
+                ),
+                "utf-8",
+            )
+
+            profiles = load_agent_profiles(path)
+
+            self.assertEqual(
+                {role: profile.runtime for role, profile in profiles.items()},
+                {"planner": "pi_rpc", "executor": "pi_rpc", "reviewer": "pi_rpc"},
+            )
+
     def test_migration_discards_commands_and_freezes_role_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
