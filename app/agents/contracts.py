@@ -135,6 +135,7 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     },
     AgentTaskStatus.INTEGRATING: {
         AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.REVIEWING,
         AgentTaskStatus.INTEGRATION_REQUIRED,
         AgentTaskStatus.BLOCKED,
         AgentTaskStatus.CANCELLING,

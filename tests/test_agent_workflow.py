@@ -225,6 +225,17 @@ class AgentWorkflowTest(unittest.TestCase):
                                 ],
                                 "issues": [],
                                 "recommended_tests": [],
+                                "summary": "Post-execution review passed.",
+                            }
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
                                 "summary": "Final review passed.",
                             }
                         ),
@@ -264,6 +275,12 @@ class AgentWorkflowTest(unittest.TestCase):
                                 "instructions": "FINAL EXECUTOR INSTRUCTION",
                             },
                             {
+                                "node_id": "review-after-execution",
+                                "kind": "reviewer",
+                                "label": "Post-execution review",
+                                "instructions": "POST EXECUTION REVIEW INSTRUCTION",
+                            },
+                            {
                                 "node_id": "validate-final",
                                 "kind": "validation",
                                 "label": "Final validation",
@@ -292,7 +309,14 @@ class AgentWorkflowTest(unittest.TestCase):
             self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
             self.assertEqual(
                 [request.role for request in runtime.requests],
-                ["planner", "executor", "reviewer", "executor", "reviewer"],
+                [
+                    "planner",
+                    "executor",
+                    "reviewer",
+                    "executor",
+                    "reviewer",
+                    "reviewer",
+                ],
             )
             self.assertEqual(len(validator.calls), 2)
             executor_requests = [request for request in runtime.requests if request.role == "executor"]
@@ -300,10 +324,61 @@ class AgentWorkflowTest(unittest.TestCase):
             self.assertIn("FIRST EXECUTOR INSTRUCTION", executor_requests[0].instructions)
             self.assertIn("FINAL EXECUTOR INSTRUCTION", executor_requests[1].instructions)
             self.assertIn("EARLY REVIEW INSTRUCTION", reviewer_requests[0].instructions)
-            self.assertIn("FINAL REVIEW INSTRUCTION", reviewer_requests[1].instructions)
+            self.assertIn(
+                "POST EXECUTION REVIEW INSTRUCTION", reviewer_requests[1].instructions
+            )
+            self.assertIn("FINAL REVIEW INSTRUCTION", reviewer_requests[2].instructions)
             self.assertIn('"available": false', reviewer_requests[0].instructions)
-            self.assertIn('"passed": true', reviewer_requests[1].instructions)
-            self.assertEqual(completed.workflow_cursor, 7)
+            self.assertIn('"available": false', reviewer_requests[1].instructions)
+            self.assertIn('"passed": true', reviewer_requests[2].instructions)
+            self.assertEqual(completed.workflow_cursor, 8)
+
+            completed.transition(AgentTaskStatus.INTEGRATION_REQUIRED)
+            completed.transition(AgentTaskStatus.INTEGRATING)
+            workflow.store.save(completed)
+            revalidation_runtime = ScriptedFakeRuntime(
+                {
+                    "reviewer": [
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "Integrated pre-validation review passed.",
+                            }
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "Integrated final review passed.",
+                            }
+                        ),
+                    ]
+                }
+            )
+            revalidation_validator = RecordingValidator()
+            reloaded = AgentWorkflow(root, revalidation_runtime, revalidation_validator)
+
+            revalidated = reloaded.revalidate_integrated(task.task_id)
+
+            self.assertEqual(revalidated.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(len(revalidation_validator.calls), 1)
+            self.assertEqual(
+                [request.workflow_node_id for request in revalidation_runtime.requests],
+                ["review-after-execution", "review-final"],
+            )
+            self.assertIn(
+                '"available": false', revalidation_runtime.requests[0].instructions
+            )
+            self.assertIn('"passed": true', revalidation_runtime.requests[1].instructions)
 
     def test_canonical_plan_maps_only_explicit_policy_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
