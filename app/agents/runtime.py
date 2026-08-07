@@ -128,3 +128,55 @@ class NodeRoutedRuntime(RoleRoutedRuntime):
 
     def configured_node_ids(self) -> Iterable[str]:
         return self.node_runtimes.keys()
+
+
+class ProfileRoutedRuntime(RoleRoutedRuntime):
+    """Route composed nodes by model profile, with roles only as a legacy fallback."""
+
+    def __init__(
+        self,
+        runtimes: dict[str, AgentRuntime],
+        profile_runtimes: dict[str, AgentRuntime],
+    ):
+        super().__init__(runtimes)
+        if not profile_runtimes:
+            raise ValueError("模型 Profile Runtime 路由不能为空。")
+        self.profile_runtimes = dict(profile_runtimes)
+
+    def invoke(self, request: AgentRequest) -> AgentResult:
+        runtime = self._runtime_for(request)
+        with self._lock:
+            self._pending.pop(request.task_id, None)
+            self._active[request.task_id] = runtime
+        try:
+            return runtime.invoke(request)
+        finally:
+            with self._lock:
+                self._active.pop(request.task_id, None)
+
+    def describe(self, request: AgentRequest) -> dict:
+        runtime = self._runtime_for(request)
+        with self._lock:
+            self._pending[request.task_id] = runtime
+        try:
+            return runtime.describe(request)
+        except Exception:
+            with self._lock:
+                self._pending.pop(request.task_id, None)
+            raise
+
+    def health_check(self) -> dict:
+        result = super().health_check()
+        for profile_id, runtime in self.profile_runtimes.items():
+            result[f"profile:{profile_id}"] = runtime.health_check()
+        return result
+
+    def _runtime_for(self, request: AgentRequest) -> AgentRuntime:
+        if request.model_profile_id:
+            try:
+                return self.profile_runtimes[request.model_profile_id]
+            except KeyError as error:
+                raise ValueError(
+                    f"模型配置 {request.model_profile_id} 没有可用 AgentRuntime。"
+                ) from error
+        return self._runtime(request.role)

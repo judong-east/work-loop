@@ -7,6 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from datetime import datetime
+from unittest import mock
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from app.agents.contracts import (
     ExecutionPlan,
     ValidationResult,
 )
+from app.agents.codex_cli import CodexCliProfile, CodexProviderConfig
 from app.agents.delivery import DeliveryService
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
 from app.agents.scheduler import PersistentAgentScheduler
@@ -143,6 +145,41 @@ class AgentWebApiTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+
+    def test_default_server_preserves_valid_codex_provider_profile(self) -> None:
+        profile = CodexCliProfile(
+            model="catalog-model",
+            provider=CodexProviderConfig(
+                provider_id="relay",
+                name="Relay",
+                base_url="https://relay.example/v1",
+            ),
+            windows_sandbox="unelevated",
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "app.web.server.load_codex_cli_profile", return_value=profile
+        ) as loader:
+            root = Path(tmp)
+            (root / "agent-profiles.json").write_text(
+                json.dumps(
+                    {
+                        "roles": {
+                            "planner": {"runtime": "claude_code", "model": "", "access": "read_only"},
+                            "executor": {"runtime": "codex_cli", "model": "", "access": "workspace_write"},
+                            "reviewer": {"runtime": "claude_code", "model": "", "access": "read_only"},
+                        }
+                    }
+                ),
+                "utf-8",
+            )
+            server = make_server(root, 0, auto_run_agent=False)
+            try:
+                runtime = server.agent_workflow.runtime.profile_runtimes["executor"]
+                self.assertEqual(runtime.profile.provider.provider_id, "relay")
+                self.assertEqual(runtime.profile.windows_sandbox, "unelevated")
+                loader.assert_called_once_with("")
+            finally:
+                server.server_close()
 
     def request(self, method: str, path: str, body: dict | None = None):
         data = json.dumps(body or {}).encode("utf-8") if method == "POST" else None

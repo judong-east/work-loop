@@ -26,17 +26,29 @@ class PlanNodeAccess(str, Enum):
 
 @dataclass(frozen=True)
 class ModelBinding:
+    profile_id: str = ""
+    runtime: str = ""
     provider: str = ""
     model: str = ""
     thinking: str = "medium"
+    estimated_cost_usd: float = 0.0
+    selection_reason: str = ""
 
     def validate(self) -> None:
+        if self.profile_id and not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.profile_id):
+            raise ValueError("model.profile_id is invalid")
+        if self.runtime and self.runtime not in {"claude_code", "codex_cli", "pi_rpc"}:
+            raise ValueError("model.runtime is invalid")
         if self.provider and not re.fullmatch(r"[A-Za-z0-9_.-]+", self.provider):
             raise ValueError("model.provider is invalid")
         if self.thinking not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
             raise ValueError("model.thinking is invalid")
         if len(self.model) > 200:
             raise ValueError("model.model is too long")
+        if self.estimated_cost_usd < 0:
+            raise ValueError("model.estimated_cost_usd cannot be negative")
+        if len(self.selection_reason) > 1000:
+            raise ValueError("model.selection_reason is too long")
 
     @classmethod
     def from_dict(cls, data: Any) -> "ModelBinding":
@@ -45,18 +57,26 @@ class ModelBinding:
         if not isinstance(data, dict):
             raise ValueError("node.model must be an object")
         binding = cls(
+            profile_id=str(data.get("profile_id", "")).strip(),
+            runtime=str(data.get("runtime", "")).strip(),
             provider=str(data.get("provider", "")).strip(),
             model=str(data.get("model", "")).strip(),
             thinking=str(data.get("thinking", "medium")).strip() or "medium",
+            estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
+            selection_reason=str(data.get("selection_reason", "")).strip(),
         )
         binding.validate()
         return binding
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
+            "profile_id": self.profile_id,
+            "runtime": self.runtime,
             "provider": self.provider,
             "model": self.model,
             "thinking": self.thinking,
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "selection_reason": self.selection_reason,
         }
 
 
@@ -104,6 +124,7 @@ class PlanNode:
     node_id: str
     title: str
     kind: PlanNodeKind
+    capability: str = "implementation"
     depends_on: list[str] = field(default_factory=list)
     instructions: str = ""
     model: ModelBinding = field(default_factory=ModelBinding)
@@ -121,6 +142,8 @@ class PlanNode:
             raise ValueError("plan node title must be non-empty and <= 160 characters")
         if len(self.instructions) > 8000:
             raise ValueError("plan node instructions are too long")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.capability):
+            raise ValueError("plan node capability is invalid")
         if self.on_failure not in {"retry", "human", "skip", "replan"}:
             raise ValueError("plan node on_failure is invalid")
         self.model.validate()
@@ -128,7 +151,7 @@ class PlanNode:
         if self.kind in {PlanNodeKind.IMPLEMENTATION, PlanNodeKind.INTEGRATION}:
             if self.access is not PlanNodeAccess.WORKSPACE_WRITE:
                 raise ValueError(f"write node must use workspace_write: {self.node_id}")
-        elif self.access is not PlanNodeAccess.READ_ONLY:
+        elif self.kind is not PlanNodeKind.CUSTOM and self.access is not PlanNodeAccess.READ_ONLY:
             raise ValueError(f"read-only node cannot request workspace write: {self.node_id}")
 
     @classmethod
@@ -144,6 +167,7 @@ class PlanNode:
             node_id=str(data.get("node_id", data.get("id", ""))).strip(),
             title=str(data.get("title", data.get("label", ""))).strip(),
             kind=kind,
+            capability=str(data.get("capability", "implementation")).strip().lower(),
             depends_on=[str(item) for item in data.get("depends_on", [])],
             instructions=str(data.get("instructions", "")),
             model=ModelBinding.from_dict(data.get("model")),
@@ -162,6 +186,7 @@ class PlanNode:
             "node_id": self.node_id,
             "title": self.title,
             "kind": self.kind.value,
+            "capability": self.capability,
             "depends_on": list(self.depends_on),
             "instructions": self.instructions,
             "model": self.model.to_dict(),
@@ -178,6 +203,8 @@ class PlanNode:
 class PlanGraph:
     requirement_summary: str
     nodes: list[PlanNode]
+    planning_model: ModelBinding = field(default_factory=ModelBinding)
+    review_model: ModelBinding = field(default_factory=ModelBinding)
     graph_id: str = field(default_factory=lambda: new_id("GRAPH"))
     version: int = 1
     status: str = "draft"
@@ -199,6 +226,12 @@ class PlanGraph:
             missing = [item for item in node.depends_on if item not in by_id]
             if missing:
                 raise ValueError(f"node {node.node_id} depends on missing nodes: {missing}")
+            if node.enabled:
+                disabled = [item for item in node.depends_on if not by_id[item].enabled]
+                if disabled:
+                    raise ValueError(
+                        f"enabled node {node.node_id} depends on disabled nodes: {disabled}"
+                    )
 
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -216,6 +249,8 @@ class PlanGraph:
 
         for node_id in by_id:
             visit(node_id)
+        self.planning_model.validate()
+        self.review_model.validate()
 
     @classmethod
     def from_dict(cls, data: Any) -> "PlanGraph":
@@ -227,6 +262,8 @@ class PlanGraph:
         graph = cls(
             requirement_summary=str(data.get("requirement_summary", "")),
             nodes=[PlanNode.from_dict(item) for item in raw_nodes],
+            planning_model=ModelBinding.from_dict(data.get("planning_model")),
+            review_model=ModelBinding.from_dict(data.get("review_model")),
             graph_id=str(data.get("graph_id", new_id("GRAPH"))),
             version=int(data.get("version", 1)),
             status=str(data.get("status", "draft")),
@@ -240,17 +277,8 @@ class PlanGraph:
 
     @classmethod
     def from_execution_plan(cls, plan: ExecutionPlan) -> "PlanGraph":
-        nodes: list[PlanNode] = [
-            PlanNode(
-                node_id="planning",
-                title="Approved execution plan",
-                kind=PlanNodeKind.PLANNING,
-                instructions=plan.requirement_understanding,
-                access=PlanNodeAccess.READ_ONLY,
-                outputs=["execution-plan"],
-            )
-        ]
-        previous = "planning"
+        nodes: list[PlanNode] = []
+        previous = ""
         for index, step in enumerate(plan.steps, start=1):
             node_id = f"step-{index}"
             # The node title is a short label (PlanNode caps it at 160 chars);
@@ -261,7 +289,7 @@ class PlanGraph:
                     node_id=node_id,
                     title=title,
                     kind=PlanNodeKind.IMPLEMENTATION,
-                    depends_on=[previous],
+                    depends_on=[previous] if previous else [],
                     instructions=step,
                     access=PlanNodeAccess.WORKSPACE_WRITE,
                     inputs=["execution-plan"],
@@ -269,18 +297,6 @@ class PlanGraph:
                 )
             )
             previous = node_id
-        nodes.append(
-            PlanNode(
-                node_id="review",
-                title="Review completed implementation",
-                kind=PlanNodeKind.REVIEW,
-                depends_on=[previous],
-                instructions="Review the implementation against the acceptance criteria.",
-                access=PlanNodeAccess.READ_ONLY,
-                inputs=["execution-plan", "workspace-diff"],
-                outputs=["review-result"],
-            )
-        )
         graph = cls(requirement_summary=plan.requirement_understanding, nodes=nodes)
         graph.validate()
         return graph
@@ -312,6 +328,27 @@ class PlanGraph:
             and node.kind in {PlanNodeKind.IMPLEMENTATION, PlanNodeKind.INTEGRATION}
         ]
 
+    def write_nodes(self) -> list[PlanNode]:
+        """Enabled model nodes whose declared access can mutate the workspace."""
+        return [
+            node
+            for node in self.execution_nodes()
+            if node.access is PlanNodeAccess.WORKSPACE_WRITE
+        ]
+
+    def execution_nodes(self) -> list[PlanNode]:
+        """Enabled model nodes that the graph interpreter actually invokes."""
+        return [
+            node
+            for node in self.nodes
+            if node.enabled
+            and node.kind in {
+                PlanNodeKind.IMPLEMENTATION,
+                PlanNodeKind.INTEGRATION,
+                PlanNodeKind.CUSTOM,
+            }
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "graph_id": self.graph_id,
@@ -319,6 +356,8 @@ class PlanGraph:
             "status": self.status,
             "requirement_summary": self.requirement_summary,
             "nodes": [node.to_dict() for node in self.nodes],
+            "planning_model": self.planning_model.to_dict(),
+            "review_model": self.review_model.to_dict(),
             "created_at": self.created_at,
             "approved_at": self.approved_at,
         }

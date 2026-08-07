@@ -13,6 +13,7 @@ from app.agents.claude_code import ClaudeCodeProfile, ClaudeCodeRuntime
 from app.agents.codex_cli import CodexCliProfile, CodexCliRuntime
 from app.agents.claude_protocol import (
     ClaudeProtocolState,
+    execution_result_schema,
     execution_plan_schema,
     review_result_schema,
 )
@@ -53,12 +54,14 @@ if args[:2] == ["auth", "status"]:
 prompt = sys.stdin.read()
 schema = json.loads(args[args.index("--json-schema") + 1])
 is_planner = "requirement_understanding" in schema["properties"]
+is_worker = "completed_steps" in schema["properties"]
 existing = []
 if log_path.exists():
     existing = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-role_runs = [item for item in existing if item.get("role") == ("planner" if is_planner else "reviewer")]
-session_id = "11111111-1111-4111-8111-111111111111" if is_planner else "22222222-2222-4222-8222-222222222222"
-record = {"args": args, "stdin": prompt, "role": "planner" if is_planner else "reviewer"}
+role = "planner" if is_planner else "worker" if is_worker else "reviewer"
+role_runs = [item for item in existing if item.get("role") == role]
+session_id = "11111111-1111-4111-8111-111111111111" if is_planner else "33333333-3333-4333-8333-333333333333" if is_worker else "22222222-2222-4222-8222-222222222222"
+record = {"args": args, "stdin": prompt, "role": role}
 with log_path.open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(record) + "\n")
 
@@ -73,6 +76,15 @@ if is_planner:
         "required_tests": ["fake-check"],
         "risks": [],
         "open_questions": [],
+    }
+elif is_worker:
+    output = {
+        "completed_steps": ["Inspected constraints"],
+        "modified_files": [],
+        "tests": [],
+        "deviations": [],
+        "remaining_risks": [],
+        "next_steps": [],
     }
 elif not role_runs:
     output = {
@@ -232,6 +244,25 @@ class ClaudeCodeRuntimeTest(unittest.TestCase):
                 self.assertEqual(result.events[-1].event_type, terminal)
                 self.assertTrue(result.session_id)
                 self.assertTrue(result.output)
+
+    def test_read_only_worker_uses_execution_result_contract_and_artifact_dir(self) -> None:
+        artifact_root = self.root / "task-artifacts"
+        artifact_root.mkdir()
+        request = self.request(role="worker")
+        request.artifact_root = artifact_root
+
+        result = self.runtime.invoke(request)
+
+        self.assertTrue(result.succeeded, result.error)
+        self.assertEqual(result.output["completed_steps"], ["Inspected constraints"])
+        invocation = self.invocations()[-1]
+        add_dir = invocation["args"].index("--add-dir")
+        self.assertEqual(invocation["args"][add_dir + 1], str(artifact_root))
+        schema_index = invocation["args"].index("--json-schema")
+        self.assertEqual(
+            json.loads(invocation["args"][schema_index + 1]),
+            execution_result_schema(),
+        )
 
     def test_protocol_accepts_strict_json_result_when_relay_omits_structured_output(self) -> None:
         state = ClaudeProtocolState("planner")

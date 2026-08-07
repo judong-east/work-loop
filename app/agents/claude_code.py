@@ -25,7 +25,7 @@ from app.core.redaction import redact, redact_value
 
 
 _READ_ONLY_TOOLS = ("Read", "Glob", "Grep")
-_SUPPORTED_ROLES = {"planner", "reviewer"}
+_SUPPORTED_ROLES = {"planner", "reviewer", "worker"}
 _AUTH_ENV_KEYS = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -381,6 +381,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             command.extend(["--resume", request.session_id])
         command.extend(
             [
+                *(
+                    ["--add-dir", str(request.artifact_root)]
+                    if request.artifact_root is not None
+                    else []
+                ),
                 "--print",
                 "--input-format",
                 "text",
@@ -426,7 +431,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         if request.role not in _SUPPORTED_ROLES or request.access is not AgentAccess.READ_ONLY:
             return AgentResult(
                 succeeded=False,
-                error="ClaudeCodeRuntime 只接受只读 planner 或 reviewer 请求。",
+                error="ClaudeCodeRuntime 只接受只读 planner、reviewer 或 worker 请求。",
                 error_type="policy_blocked",
                 **identity,
             )

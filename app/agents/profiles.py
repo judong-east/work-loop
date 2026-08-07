@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.agents.composition import ModelCatalog, ModelOption
+from app.agents.contracts import AgentAccess
 from app.core.atomic_files import write_json_atomic
 from app.models.config import load_routing_config
 
@@ -54,6 +56,48 @@ def load_agent_profiles(path: Path) -> dict[str, AgentProfile]:
             access=access,
         )
     return profiles
+
+
+def load_model_catalog(path: Path) -> ModelCatalog:
+    """Load schema-v2 model capabilities or adapt a schema-v1 role file."""
+    config_path = Path(path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    if isinstance(data.get("models"), list):
+        return ModelCatalog.from_dict(data)
+    roles = load_agent_profiles(config_path)
+    return catalog_from_role_profiles(roles)
+
+
+def catalog_from_role_profiles(profiles: dict[str, AgentProfile]) -> ModelCatalog:
+    capabilities = {
+        "planner": ["planning", "architecture", "general"],
+        "executor": [
+            "implementation",
+            "frontend",
+            "backend",
+            "security",
+            "testing",
+            "migration",
+            "documentation",
+        ],
+        "reviewer": ["review", "security", "general"],
+    }
+    return ModelCatalog(
+        [
+            ModelOption(
+                profile_id=role,
+                label=role.title(),
+                runtime=profile.runtime,
+                model=profile.model,
+                access=AgentAccess(profile.access),
+                capabilities=capabilities[role],
+                quality=3,
+                input_cost_per_million=0.0,
+                output_cost_per_million=0.0,
+            )
+            for role, profile in profiles.items()
+        ]
+    )
 
 
 def migrate_legacy_profiles(source: Path, destination: Path) -> dict:

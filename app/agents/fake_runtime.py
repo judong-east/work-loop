@@ -16,6 +16,7 @@ class FakeAgentStep:
     succeeded: bool = True
     error: str = ""
     session_id: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class ScriptedFakeRuntime(AgentRuntime):
@@ -52,6 +53,7 @@ class ScriptedFakeRuntime(AgentRuntime):
             runtime="fake",
             runtime_version="1",
             model="scripted",
+            usage=dict(step.usage),
         )
 
     def _apply_writes(self, workspace: Path, writes: dict[str, str | bytes | None]) -> None:

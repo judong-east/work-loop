@@ -176,9 +176,15 @@ class TaskBudget:
     call_timeout_seconds: float = 1800
     idle_timeout_seconds: float = 120
     max_cost_usd: float | None = None
+    max_total_tokens: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
     max_iterations: int = 3
     consumed_active_seconds: float = 0.0
     consumed_cost_usd: float = 0.0
+    consumed_input_tokens: int = 0
+    consumed_output_tokens: int = 0
+    consumed_cached_input_tokens: int = 0
 
     def validate(self) -> None:
         if (
@@ -189,10 +195,20 @@ class TaskBudget:
             raise ValueError("任务时间预算必须是正数。")
         if self.max_cost_usd is not None and self.max_cost_usd <= 0:
             raise ValueError("任务费用预算必须是正数。")
+        for name in ("max_total_tokens", "max_input_tokens", "max_output_tokens"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError("任务 Token 预算必须是正数。")
         if self.max_iterations <= 0:
             raise ValueError("任务最大返修轮次必须大于 0。")
         if self.consumed_active_seconds < 0 or self.consumed_cost_usd < 0:
             raise ValueError("任务已消耗预算不能为负数。")
+        if min(
+            self.consumed_input_tokens,
+            self.consumed_output_tokens,
+            self.consumed_cached_input_tokens,
+        ) < 0:
+            raise ValueError("任务已消耗 Token 不能为负数。")
 
 
 class AgentEventType(str, Enum):
@@ -489,13 +505,17 @@ class AgentRequest:
     policy: AgentPolicy = field(default_factory=AgentPolicy)
     budget: AgentBudget = field(default_factory=AgentBudget)
     session_id: str = ""
-    # Optional node-level overrides. Existing runtimes may ignore these fields.
+    # The selected catalog profile is the routing identity. provider/model are
+    # persisted execution overrides, not a substitute for runtime selection.
+    model_profile_id: str = ""
+    session_key: str = ""
     node_id: str = ""
     provider: str = ""
     model: str = ""
     thinking: str = ""
     tools: list[str] = field(default_factory=list)
     context_ref: str = ""
+    artifact_root: Path | None = None
     workflow_node_id: str = ""
 
 
@@ -577,15 +597,14 @@ class AgentTask:
     #              "round": int, "session_id": str, "context_ref": str,
     #              "run_ref": str, "started_at": str, "finished_at": str, "error": str}}
     node_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # When True, the EXECUTING phase is driven by the PlanGraph (one executor
-    # call per implementation node, in topological order) instead of a single
-    # executor invocation over the whole plan. Opt-in; default path unchanged.
+    # New tasks execute their generated PlanGraph. False is retained only for
+    # tasks persisted by releases that used one executor call for the full plan.
     graph_execution: bool = False
     graph_workflow_node_id: str = ""
     # When True (and graph_execution is also True), each implementation node
     # runs in its own detached git worktree; its writes are merged back into the
     # shared task worktree (uncommitted) so validation/review/delivery are
-    # unchanged. Opt-in; default keeps the shared single-worktree behavior.
+    # unchanged. This remains optional; shared task worktrees are the default.
     node_worktree: bool = False
     clarifications: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -682,9 +701,27 @@ def task_budget_from_dict(data: Any) -> TaskBudget:
             if source.get("max_cost_usd") is not None
             else None
         ),
+        max_total_tokens=(
+            int(source["max_total_tokens"])
+            if source.get("max_total_tokens") is not None
+            else None
+        ),
+        max_input_tokens=(
+            int(source["max_input_tokens"])
+            if source.get("max_input_tokens") is not None
+            else None
+        ),
+        max_output_tokens=(
+            int(source["max_output_tokens"])
+            if source.get("max_output_tokens") is not None
+            else None
+        ),
         max_iterations=int(source.get("max_iterations", 3)),
         consumed_active_seconds=float(source.get("consumed_active_seconds", 0.0)),
         consumed_cost_usd=float(source.get("consumed_cost_usd", 0.0)),
+        consumed_input_tokens=int(source.get("consumed_input_tokens", 0)),
+        consumed_output_tokens=int(source.get("consumed_output_tokens", 0)),
+        consumed_cached_input_tokens=int(source.get("consumed_cached_input_tokens", 0)),
     )
     budget.validate()
     return budget

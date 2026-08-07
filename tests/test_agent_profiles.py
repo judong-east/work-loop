@@ -5,10 +5,34 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.agents.profiles import load_agent_profiles, migrate_legacy_profiles
+from app.agents.profiles import (
+    catalog_from_role_profiles,
+    load_agent_profiles,
+    migrate_legacy_profiles,
+)
 
 
 class AgentProfileMigrationTest(unittest.TestCase):
+    def test_empty_legacy_model_remains_runtime_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent-profiles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "roles": {
+                            "planner": {"runtime": "claude_code", "model": "", "access": "read_only"},
+                            "executor": {"runtime": "codex_cli", "model": "", "access": "workspace_write"},
+                            "reviewer": {"runtime": "claude_code", "model": "", "access": "read_only"},
+                        }
+                    }
+                ),
+                "utf-8",
+            )
+
+            catalog = catalog_from_role_profiles(load_agent_profiles(path))
+
+            self.assertEqual(catalog.get("executor").model, "")
+
     def test_loader_preserves_an_explicit_pi_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "agent-profiles.json"

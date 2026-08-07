@@ -146,8 +146,29 @@ class PersistentAgentScheduler:
                 and budget.max_cost_usd <= task.budget.consumed_cost_usd
             ):
                 raise ValueError("新的费用预算必须大于已消耗费用。")
+            consumed_total_tokens = (
+                task.budget.consumed_input_tokens + task.budget.consumed_output_tokens
+            )
+            if (
+                budget.max_total_tokens is not None
+                and budget.max_total_tokens <= consumed_total_tokens
+            ):
+                raise ValueError("新的总 Token 预算必须大于已消耗 Token。")
+            if (
+                budget.max_input_tokens is not None
+                and budget.max_input_tokens <= task.budget.consumed_input_tokens
+            ):
+                raise ValueError("新的输入 Token 预算必须大于已消耗输入 Token。")
+            if (
+                budget.max_output_tokens is not None
+                and budget.max_output_tokens <= task.budget.consumed_output_tokens
+            ):
+                raise ValueError("新的输出 Token 预算必须大于已消耗输出 Token。")
             budget.consumed_active_seconds = task.budget.consumed_active_seconds
             budget.consumed_cost_usd = task.budget.consumed_cost_usd
+            budget.consumed_input_tokens = task.budget.consumed_input_tokens
+            budget.consumed_output_tokens = task.budget.consumed_output_tokens
+            budget.consumed_cached_input_tokens = task.budget.consumed_cached_input_tokens
             task.budget = budget
             self.workflow.store.save(task)
             return task

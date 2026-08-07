@@ -14,13 +14,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from app.cli import build_backends
 from app.agents.claude_code import ClaudeCodeProfile, ClaudeCodeRuntime
-from app.agents.codex_cli import CodexCliRuntime, load_codex_cli_profile
-from app.agents.contracts import AgentTaskStatus, TaskBudget
+from app.agents.codex_cli import CodexCliProfile, CodexCliRuntime, load_codex_cli_profile
+from app.agents.composition import ExecutionComposer, ModelCatalog, ModelOption
+from app.agents.contracts import AgentAccess, AgentTaskStatus, TaskBudget
 from app.agents.delivery import DeliveryService
-from app.agents.profiles import load_agent_profiles, migrate_legacy_profiles
+from app.agents.profiles import load_model_catalog, migrate_legacy_profiles
 from app.agents.pi_rpc import PiRpcProfile, PiRpcRuntime
 from app.agents.plan_graph import PlanGraph
-from app.agents.runtime import RoleRoutedRuntime
+from app.agents.runtime import ProfileRoutedRuntime
 from app.agents.scheduler import PersistentAgentScheduler
 from app.agents.status_groups import task_status_group, task_status_priority
 from app.agents.workflow import AgentWorkflow
@@ -29,6 +30,7 @@ from app.core.contracts import TaskStatus, to_plain, utc_now
 from app.core.workflow import WorkloopKernel
 from app.models.backends.cli_backend import cancel_task_processes, clear_task_cancel
 from app.models.config import load_routing_config
+from app.memory.experience_store import ExperienceStore
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
@@ -741,6 +743,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             task_dir,
             task.artifacts.get("plan_graph", ""),
         )
+        composer = self._agent_workflow().composer
+        payload["model_catalog"] = (
+            composer.catalog.to_dict()["models"] if composer is not None else []
+        )
         rounds = []
         rounds_root = task_dir / "artifacts" / "rounds"
         for path in sorted(
@@ -1086,6 +1092,21 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
                     if raw_budget.get("max_cost_usd") is not None
                     else None
                 ),
+                max_total_tokens=(
+                    int(raw_budget["max_total_tokens"])
+                    if raw_budget.get("max_total_tokens") is not None
+                    else None
+                ),
+                max_input_tokens=(
+                    int(raw_budget["max_input_tokens"])
+                    if raw_budget.get("max_input_tokens") is not None
+                    else None
+                ),
+                max_output_tokens=(
+                    int(raw_budget["max_output_tokens"])
+                    if raw_budget.get("max_output_tokens") is not None
+                    else None
+                ),
                 max_iterations=int(raw_budget.get("max_iterations", 3)),
             )
             budget.validate()
@@ -1171,6 +1192,21 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
                 float(body["max_cost_usd"])
                 if body.get("max_cost_usd") is not None
                 else current.max_cost_usd
+            ),
+            max_total_tokens=(
+                int(body["max_total_tokens"])
+                if body.get("max_total_tokens") is not None
+                else current.max_total_tokens
+            ),
+            max_input_tokens=(
+                int(body["max_input_tokens"])
+                if body.get("max_input_tokens") is not None
+                else current.max_input_tokens
+            ),
+            max_output_tokens=(
+                int(body["max_output_tokens"])
+                if body.get("max_output_tokens") is not None
+                else current.max_output_tokens
             ),
             max_iterations=int(body.get("max_iterations", current.max_iterations)),
         )
@@ -1310,25 +1346,26 @@ class WorkloopServer(ThreadingHTTPServer):
         self.registry = RunRegistry()
         if agent_workflow is None:
             profile_path = self.workloop_root / "agent-profiles.json"
-            configured = load_agent_profiles(profile_path) if profile_path.is_file() else {}
-            planner_model = (
-                configured["planner"].model
-                if configured
-                else os.environ.get("WORKLOOP_CLAUDE_MODEL", "sonnet")
+            catalog = (
+                load_model_catalog(profile_path)
+                if profile_path.is_file()
+                else self._default_model_catalog()
             )
-            executor_model = (
-                configured["executor"].model
-                if configured
-                else os.environ.get("WORKLOOP_CODEX_MODEL", "")
+            composer = ExecutionComposer(
+                catalog,
+                optimization_goal=(
+                    os.environ.get("WORKLOOP_OPTIMIZATION", "balanced").strip().lower()
+                    or "balanced"
+                ),
             )
-            reviewer_model = configured["reviewer"].model if configured else planner_model
 
-            def pi_runtime(model: str) -> PiRpcRuntime:
+            def pi_runtime(option: ModelOption) -> PiRpcRuntime:
                 return PiRpcRuntime(
                     PiRpcProfile(
                         command=[os.environ.get("WORKLOOP_PI_COMMAND", "pi")],
-                        model=model or os.environ.get("WORKLOOP_PI_MODEL", ""),
-                        provider=os.environ.get("WORKLOOP_PI_PROVIDER", ""),
+                        model=option.model,
+                        provider=option.provider or os.environ.get("WORKLOOP_PI_PROVIDER", ""),
+                        thinking=option.thinking,
                         config_dir=(
                             Path(os.environ["WORKLOOP_PI_CONFIG_DIR"])
                             if os.environ.get("WORKLOOP_PI_CONFIG_DIR")
@@ -1337,36 +1374,46 @@ class WorkloopServer(ThreadingHTTPServer):
                     )
                 )
 
-            use_pi = os.environ.get("WORKLOOP_RUNTIME", "").strip().lower() == "pi_rpc"
-            planner_pi = use_pi or (
-                bool(configured) and configured["planner"].runtime == "pi_rpc"
-            )
-            executor_pi = use_pi or (
-                bool(configured) and configured["executor"].runtime == "pi_rpc"
-            )
-            reviewer_pi = use_pi or (
-                bool(configured) and configured["reviewer"].runtime == "pi_rpc"
-            )
-            runtime = RoleRoutedRuntime(
+            def build_runtime(option: ModelOption):
+                if option.runtime == "pi_rpc":
+                    return pi_runtime(option)
+                if option.runtime == "claude_code":
+                    return ClaudeCodeRuntime(
+                        ClaudeCodeProfile(model=option.model or "sonnet")
+                    )
+                try:
+                    profile = load_codex_cli_profile(option.model)
+                except ValueError:
+                    # A malformed or unsafe user provider must not prevent the
+                    # local service from starting. The explicit catalog model
+                    # remains usable with Codex-managed defaults.
+                    profile = CodexCliProfile(model=option.model or "gpt-5.2-codex")
+                return CodexCliRuntime(profile)
+
+            profile_runtimes = {
+                option.profile_id: build_runtime(option)
+                for option in catalog.list_all()
+            }
+            role_bindings = {
+                "planner": composer.select_binding("planning", AgentAccess.READ_ONLY, "planning"),
+                "executor": composer.select_binding(
+                    "implementation", AgentAccess.WORKSPACE_WRITE, "implementation"
+                ),
+                "reviewer": composer.select_binding("review", AgentAccess.READ_ONLY, "review"),
+            }
+            runtime = ProfileRoutedRuntime(
                 {
-                    "planner": (
-                        pi_runtime(os.environ.get("WORKLOOP_PI_PLANNER_MODEL", planner_model))
-                        if planner_pi
-                        else ClaudeCodeRuntime(ClaudeCodeProfile(model=planner_model))
-                    ),
-                    "executor": (
-                        pi_runtime(os.environ.get("WORKLOOP_PI_EXECUTOR_MODEL", executor_model))
-                        if executor_pi
-                        else CodexCliRuntime(load_codex_cli_profile(executor_model))
-                    ),
-                    "reviewer": (
-                        pi_runtime(os.environ.get("WORKLOOP_PI_REVIEWER_MODEL", reviewer_model))
-                        if reviewer_pi
-                        else ClaudeCodeRuntime(ClaudeCodeProfile(model=reviewer_model))
-                    ),
-                }
+                    role: profile_runtimes[binding.profile_id]
+                    for role, binding in role_bindings.items()
+                },
+                profile_runtimes,
             )
-            agent_workflow = AgentWorkflow(self.workloop_root / "agent-runtime", runtime)
+            agent_workflow = AgentWorkflow(
+                self.workloop_root / "agent-runtime",
+                runtime,
+                composer=composer,
+                experience_store=ExperienceStore(self.workloop_root / "memory"),
+            )
         self.agent_workflow = agent_workflow
         self.agent_scheduler = agent_scheduler or PersistentAgentScheduler(agent_workflow)
         self.agent_delivery = agent_delivery or DeliveryService(agent_workflow)
@@ -1375,6 +1422,51 @@ class WorkloopServer(ThreadingHTTPServer):
         self._agent_worker_lock = threading.Lock()
         self._agent_worker_running = False
         self.agent_profiles = self._agent_profile_payload()
+
+    @staticmethod
+    def _default_model_catalog() -> ModelCatalog:
+        planner_model = os.environ.get("WORKLOOP_CLAUDE_MODEL", "sonnet")
+        executor_model = os.environ.get("WORKLOOP_CODEX_MODEL", "") or "gpt-5.2-codex"
+        return ModelCatalog(
+            [
+                ModelOption(
+                    profile_id="planner",
+                    label="Planner",
+                    runtime="claude_code",
+                    model=planner_model,
+                    access=AgentAccess.READ_ONLY,
+                    capabilities=["planning", "architecture", "general"],
+                    quality=4,
+                    input_cost_per_million=0.0,
+                    output_cost_per_million=0.0,
+                ),
+                ModelOption(
+                    profile_id="executor",
+                    label="Executor",
+                    runtime="codex_cli",
+                    model=executor_model,
+                    access=AgentAccess.WORKSPACE_WRITE,
+                    capabilities=[
+                        "implementation", "frontend", "backend", "security",
+                        "testing", "migration", "documentation",
+                    ],
+                    quality=4,
+                    input_cost_per_million=0.0,
+                    output_cost_per_million=0.0,
+                ),
+                ModelOption(
+                    profile_id="reviewer",
+                    label="Reviewer",
+                    runtime="claude_code",
+                    model=planner_model,
+                    access=AgentAccess.READ_ONLY,
+                    capabilities=["review", "security", "general"],
+                    quality=4,
+                    input_cost_per_million=0.0,
+                    output_cost_per_million=0.0,
+                ),
+            ]
+        )
 
     def _agent_profile_payload(self) -> dict:
         runtime = self.agent_workflow.runtime

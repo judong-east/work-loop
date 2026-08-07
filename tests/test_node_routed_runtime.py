@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.agents.contracts import AgentAccess, AgentRequest, AgentResult
-from app.agents.runtime import NodeRoutedRuntime
+from app.agents.runtime import NodeRoutedRuntime, ProfileRoutedRuntime
 
 
 class LabelRuntime:
@@ -127,6 +127,22 @@ class NodeRoutedRuntimeTest(unittest.TestCase):
     def test_rejects_empty_role_runtimes(self) -> None:
         with self.assertRaises(ValueError):
             NodeRoutedRuntime({}, {"ui": LabelRuntime("pi-kimi")})
+
+    def test_model_profile_routes_independently_of_role_or_node_id(self) -> None:
+        fallback = LabelRuntime("fallback")
+        premium = LabelRuntime("premium")
+        routed = ProfileRoutedRuntime(
+            {"planner": fallback, "executor": fallback, "reviewer": fallback},
+            {"security-premium": premium},
+        )
+        selected = request(role="executor", node_id="authentication")
+        selected.model_profile_id = "security-premium"
+
+        result = routed.invoke(selected)
+
+        self.assertEqual(result.runtime, "premium")
+        self.assertEqual(len(premium.invoked), 1)
+        self.assertEqual(fallback.invoked, [])
 
 
 if __name__ == "__main__":

@@ -9,12 +9,14 @@ from app.agents.contracts import (
     AgentEventType,
     AgentResult,
     ExecutionPlan,
+    ExecutionResult,
     ReviewResult,
 )
 
 
 PLANNER_ROLE = "planner"
 REVIEWER_ROLE = "reviewer"
+WORKER_ROLE = "worker"
 
 
 def execution_plan_schema() -> dict[str, Any]:
@@ -103,11 +105,51 @@ def review_result_schema() -> dict[str, Any]:
     }
 
 
+def execution_result_schema() -> dict[str, Any]:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "completed_steps",
+            "modified_files",
+            "tests",
+            "deviations",
+            "remaining_risks",
+            "next_steps",
+        ],
+        "properties": {
+            "completed_steps": string_array,
+            "modified_files": string_array,
+            "tests": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["command", "exit_code", "stdout", "stderr"],
+                    "properties": {
+                        "command": {"type": "string"},
+                        "exit_code": {"type": "integer"},
+                        "stdout": {"type": "string"},
+                        "stderr": {"type": "string"},
+                    },
+                },
+            },
+            "deviations": string_array,
+            "remaining_risks": string_array,
+            "next_steps": string_array,
+        },
+    }
+
+
 def schema_for_role(role: str) -> dict[str, Any]:
     if role == PLANNER_ROLE:
         return execution_plan_schema()
     if role == REVIEWER_ROLE:
         return review_result_schema()
+    if role == WORKER_ROLE:
+        return execution_result_schema()
     raise ValueError(f"Claude Code 不支持角色 {role}。")
 
 
@@ -140,6 +182,10 @@ def validate_structured_output(role: str, output: Any) -> dict[str, Any]:
                         f"ReviewResult.issues[{index}]",
                     )
         ReviewResult.from_dict(output)
+    elif role == WORKER_ROLE:
+        expected = set(execution_result_schema()["required"])
+        _require_exact_keys(output, expected, "ExecutionResult")
+        ExecutionResult.from_dict(output)
     else:
         raise ValueError(f"Claude Code 不支持角色 {role}。")
     return dict(output)

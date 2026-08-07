@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from app.core.atomic_files import write_json_atomic
 from app.core.contracts import new_id, utc_now
+
+
+MAX_CONTEXT_CHARS = 12_000
+MAX_CONTEXT_PROMPT_CHARS = 10_000
+_FIELD_BUDGETS = {
+    "facts": 2200,
+    "decisions": 1800,
+    "constraints": 2200,
+    "inputs": 1600,
+    "artifacts": 1600,
+    "open_questions": 800,
+    "source_sessions": 600,
+}
+_FIELD_ITEM_CHARS = {
+    "artifacts": 400,
+    "source_sessions": 200,
+}
 
 
 @dataclass(frozen=True)
@@ -83,6 +100,7 @@ class ContextLedger:
     def write(self, pack: ContextPack) -> str:
         if not pack.task_id or not pack.node_id:
             raise ValueError("context pack task_id and node_id are required")
+        pack = self._bounded(pack)
         reference = f"artifacts/context/{pack.node_id}/{pack.version}.json"
         write_json_atomic(self.tasks_root / pack.task_id / reference, pack.to_dict())
         return reference
@@ -111,18 +129,85 @@ class ContextLedger:
         def unique(values: list[str]) -> list[str]:
             return list(dict.fromkeys(item for item in values if item))
 
-        merged = ContextPack(
-            task_id=task_id,
-            node_id=node_id,
-            summary=summary.strip(),
-            facts=unique([item for pack in packs for item in pack.facts]),
-            decisions=unique([item for pack in packs for item in pack.decisions]),
-            constraints=unique([item for pack in packs for item in pack.constraints]),
-            inputs=unique((inputs or []) + [item for pack in packs for item in pack.inputs]),
-            artifacts=unique([item for pack in packs for item in pack.artifacts]),
-            open_questions=unique([item for pack in packs for item in pack.open_questions]),
-            source_sessions=unique([item for pack in packs for item in pack.source_sessions]),
-            version=max((pack.version for pack in packs), default=0) + 1,
+        merged = self._bounded(
+            ContextPack(
+                task_id=task_id,
+                node_id=node_id,
+                summary=summary.strip(),
+                facts=unique([item for pack in packs for item in pack.facts]),
+                decisions=unique([item for pack in packs for item in pack.decisions]),
+                constraints=unique([item for pack in packs for item in pack.constraints]),
+                inputs=unique(
+                    (inputs or []) + [item for pack in packs for item in pack.inputs]
+                ),
+                artifacts=unique([item for pack in packs for item in pack.artifacts]),
+                open_questions=unique(
+                    [item for pack in packs for item in pack.open_questions]
+                ),
+                source_sessions=unique(
+                    [item for pack in packs for item in pack.source_sessions]
+                ),
+                version=max((pack.version for pack in packs), default=0) + 1,
+            )
         )
         self.write(merged)
         return merged
+
+    @staticmethod
+    def _bounded(pack: ContextPack) -> ContextPack:
+        """Return a deterministic handoff pack with strict per-field and total limits."""
+        summary = pack.summary.strip()[:1200]
+        remaining = MAX_CONTEXT_CHARS - len(summary)
+        values: dict[str, list[str]] = {}
+        for field_name, field_budget in _FIELD_BUDGETS.items():
+            available = min(field_budget, remaining)
+            item_limit = _FIELD_ITEM_CHARS.get(field_name, 700)
+            selected: list[str] = []
+            seen: set[str] = set()
+            used = 0
+            for raw in getattr(pack, field_name):
+                item = raw.strip()[:item_limit]
+                if not item or item in seen:
+                    continue
+                extra = len(item) + (1 if selected else 0)
+                if used + extra > available:
+                    continue
+                selected.append(item)
+                seen.add(item)
+                used += extra
+            values[field_name] = selected
+            remaining -= used
+        bounded = ContextPack(
+            task_id=pack.task_id,
+            node_id=pack.node_id,
+            summary=summary or pack.node_id,
+            version=pack.version,
+            pack_id=pack.pack_id,
+            created_at=pack.created_at,
+            **values,
+        )
+        removal_order = (
+            "source_sessions",
+            "open_questions",
+            "inputs",
+            "decisions",
+            "facts",
+            "constraints",
+            "artifacts",
+        )
+        while len(json.dumps(bounded.to_dict(), ensure_ascii=False, indent=2)) > MAX_CONTEXT_CHARS:
+            for field_name in removal_order:
+                items = getattr(bounded, field_name)
+                if items:
+                    bounded = replace(bounded, **{field_name: items[:-1]})
+                    break
+            else:
+                overflow = (
+                    len(json.dumps(bounded.to_dict(), ensure_ascii=False, indent=2))
+                    - MAX_CONTEXT_CHARS
+                )
+                bounded = replace(
+                    bounded,
+                    summary=bounded.summary[: max(1, len(bounded.summary) - overflow - 1)],
+                )
+        return bounded

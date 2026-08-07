@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.agents.contracts import (
     AgentAccess,
@@ -27,8 +27,19 @@ from app.agents.contracts import (
     TaskBudget,
     ValidationResult,
 )
-from app.agents.context_ledger import ContextLedger, ContextPack
-from app.agents.plan_graph import PlanGraph, PlanNode, PlanNodeKind
+from app.agents.context_ledger import (
+    MAX_CONTEXT_PROMPT_CHARS,
+    ContextLedger,
+    ContextPack,
+)
+from app.agents.composition import ExecutionComposer
+from app.agents.plan_graph import (
+    ModelBinding,
+    PlanGraph,
+    PlanNode,
+    PlanNodeAccess,
+    PlanNodeKind,
+)
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
 from app.agents.workflow_config import (
@@ -41,6 +52,7 @@ from app.agents.workflow_config import (
 )
 from app.core.contracts import FileChange, PolicyBoundary, PolicyCheck, to_plain, utc_now
 from app.core.redaction import redact, redact_value
+from app.memory.experience_store import ExperienceStore
 from app.policy.policy_checker import PolicyChecker
 from app.projects.contracts import Project, ProjectPolicy
 from app.projects.git_worktree import GitWorktreeService, PreparedWorktree
@@ -200,6 +212,8 @@ class AgentWorkflow:
         validator: TaskValidator | None = None,
         max_iterations: int = 3,
         git_worktrees: GitWorktreeService | None = None,
+        composer: ExecutionComposer | None = None,
+        experience_store: ExperienceStore | None = None,
     ):
         if max_iterations <= 0:
             raise ValueError("max_iterations 必须大于 0。")
@@ -212,6 +226,8 @@ class AgentWorkflow:
         self.policy_loader = ProjectPolicyLoader()
         self.policy_checker = PolicyChecker()
         self.runtime = runtime
+        self.composer = composer
+        self.experience_store = experience_store
         self.validator = validator or DeterministicValidator()
         self.max_iterations = max_iterations
         self._task_state_lock = threading.RLock()
@@ -266,6 +282,7 @@ class AgentWorkflow:
             workflow_id=workflow.workflow_id,
             workflow=to_plain(workflow),
             budget=effective_budget,
+            graph_execution=True,
         )
         project = self.projects.get(project_id)
         prepared = self.git_worktrees.plan(
@@ -298,28 +315,28 @@ class AgentWorkflow:
         if task.plan_graph:
             return PlanGraph.from_dict(task.plan_graph)
         plan = self.get_plan(task_id)
-        graph = PlanGraph.from_execution_plan(plan)
+        graph = self.composer.compose(plan) if self.composer is not None else PlanGraph.from_execution_plan(plan)
         task.plan_graph = graph.to_dict()
         self.store.save(task)
         return graph
 
     def save_plan_graph(self, task_id: str, graph: PlanGraph) -> AgentTask:
         graph.validate()
-        task = self.store.load(task_id)
-        if task.status not in {
-            AgentTaskStatus.ANALYZING,
-            AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
-            AgentTaskStatus.QUEUED_FOR_EXECUTION,
-        }:
-            raise ValueError(
-                f"plan graph can only be changed before execution; current status is {task.status.value}"
-            )
-        graph_ref = f"artifacts/plan-graphs/{graph.version}.json"
-        self.store.write_json(self.store.task_dir(task_id) / graph_ref, graph.to_dict())
-        task.plan_graph = graph.to_dict()
-        task.artifacts["plan_graph"] = graph_ref
-        self.store.save(task)
-        return task
+        if self.composer is not None:
+            graph = self.composer.normalize(graph)
+        with self._task_state_lock:
+            task = self.store.load(task_id)
+            if task.status is not AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL:
+                raise ValueError(
+                    "plan graph can only be changed while waiting for plan approval; "
+                    f"current status is {task.status.value}"
+                )
+            graph_ref = f"artifacts/plan-graphs/{graph.version}.json"
+            self.store.write_json(self.store.task_dir(task_id) / graph_ref, graph.to_dict())
+            task.plan_graph = graph.to_dict()
+            task.artifacts["plan_graph"] = graph_ref
+            self.store.save(task)
+            return task
 
     def get_workflow(self, task_id: str) -> WorkflowDefinition:
         return self._task_workflow(self.store.load(task_id))
@@ -424,14 +441,8 @@ class AgentWorkflow:
             raise ValueError(
                 f"任务 {task_id} 的中断阶段无效：{task.interrupted_status!r}。"
             ) from error
-        role_by_phase = {
-            AgentTaskStatus.ANALYZING: "planner",
-            AgentTaskStatus.EXECUTING: "executor",
-            AgentTaskStatus.REVIEWING: "reviewer",
-            AgentTaskStatus.REPLANNING: "planner",
-        }
-        if rerun and (role := role_by_phase.get(phase)):
-            task.sessions.pop(role, None)
+        if rerun:
+            self._clear_phase_sessions(task, phase)
             self.store.save(task)
         pause_reason = task.pause_reason
         task.pause_reason = ""
@@ -487,6 +498,32 @@ class AgentWorkflow:
             review_feedback=feedback,
         )
 
+    @staticmethod
+    def _clear_phase_sessions(task: AgentTask, phase: AgentTaskStatus) -> None:
+        """Discard only the model sessions owned by the phase being rerun."""
+        keys: set[str] = set()
+        aliases: set[str] = set()
+        if phase in {AgentTaskStatus.ANALYZING, AgentTaskStatus.REPLANNING}:
+            keys.add("node:planning")
+            aliases.add("planner")
+        elif phase is AgentTaskStatus.REVIEWING:
+            keys.add("node:review")
+            aliases.add("reviewer")
+        elif phase is AgentTaskStatus.EXECUTING:
+            aliases.add("executor")
+            try:
+                graph = PlanGraph.from_dict(task.plan_graph)
+            except (TypeError, ValueError):
+                graph = None
+            if graph is not None:
+                for node in graph.execution_nodes():
+                    keys.add(f"node:{node.node_id}")
+                    state = task.node_runs.get(node.node_id)
+                    if isinstance(state, dict):
+                        state["session_id"] = ""
+        for key in keys | aliases:
+            task.sessions.pop(key, None)
+
     def revalidate_integrated(self, task_id: str) -> AgentTask:
         task = self.store.load(task_id)
         self._require_status(task, AgentTaskStatus.INTEGRATING)
@@ -530,6 +567,7 @@ class AgentWorkflow:
 
         workflow = self._task_workflow(task)
         planner_node = workflow.node(WorkflowNodeKind.PLANNER)
+        planning_binding = self._planning_binding(task)
         response = self._invoke_agent(
             task,
             AgentRequest(
@@ -539,9 +577,8 @@ class AgentWorkflow:
                 workspace=self.workspace_path(task.task_id),
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
-                session_id=task.sessions.get("planner", ""),
                 workflow_node_id=planner_node.node_id,
-                **self._node_request_fields(task, PlanNodeKind.PLANNING),
+                **self._planning_request_fields(task, planning_binding),
             ),
         )
         if not response.succeeded:
@@ -562,7 +599,7 @@ class AgentWorkflow:
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
         task.artifacts["plan"] = plan_ref
-        self._save_generated_plan_graph(task, plan)
+        self._save_generated_plan_graph(task, plan, planning_binding)
         if not self._transition_unless_cancelled(
             task, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL
         ):
@@ -591,11 +628,19 @@ class AgentWorkflow:
         policy = self.policy_loader.load(self.workspace_path(task.task_id), project.config_path)
         policy.required_commands(plan.required_tests)
         effective_agent_policy = self._agent_policy(policy, plan.required_tests)
+        if task.plan_graph:
+            graph = PlanGraph.from_dict(task.plan_graph)
+            if self.composer is not None:
+                graph = self.composer.normalize(graph)
+            graph = replace(graph, status="approved", approved_at=utc_now())
+            graph_ref = f"artifacts/plan-graphs/{graph.version}.json"
+            self.store.write_json(
+                self.store.task_dir(task.task_id) / graph_ref,
+                graph.to_dict(),
+            )
+            task.plan_graph = graph.to_dict()
+            task.artifacts["plan_graph"] = graph_ref
 
-        # Opt-in to graph-driven execution: one executor call per plan node,
-        # in topological order, with structured context handoff. Off by default
-        # keeps the proven single-executor path untouched.
-        task.graph_execution = os.environ.get("WORKLOOP_EXECUTION", "").strip().lower() == "graph"
         # Per-node isolated worktrees (only meaningful with graph execution):
         # each implementation node runs in its own detached git worktree, then
         # its writes are merged back into the shared task worktree uncommitted.
@@ -763,9 +808,10 @@ class AgentWorkflow:
                         access=AgentAccess.WORKSPACE_WRITE,
                         policy=effective_agent_policy,
                         budget=self._agent_budget(task),
-                        session_id=task.sessions.get("executor", ""),
                         workflow_node_id=node.node_id,
-                        **self._node_request_fields(task, PlanNodeKind.IMPLEMENTATION),
+                        **self._node_request_fields(
+                            task, PlanNodeKind.IMPLEMENTATION, "executor"
+                        ),
                     )
                     execution = self._invoke_agent(task, executor_request)
                     if not execution.succeeded:
@@ -911,9 +957,9 @@ class AgentWorkflow:
                 access=AgentAccess.READ_ONLY,
                 policy=effective_agent_policy,
                 budget=self._agent_budget(task),
-                session_id=task.sessions.get("reviewer", ""),
+                artifact_root=self.store.task_dir(task.task_id),
                 workflow_node_id=node.node_id,
-                **self._node_request_fields(task, PlanNodeKind.REVIEW),
+                **self._node_request_fields(task, PlanNodeKind.REVIEW, "reviewer"),
             )
             review = self._invoke_agent(task, review_request)
             if not review.succeeded:
@@ -1073,9 +1119,6 @@ class AgentWorkflow:
     ) -> AgentTask:
         if not self._transition_unless_cancelled(task, AgentTaskStatus.REPLANNING):
             return self._finish_or_return_cancellation(task)
-        # A replan produces a fresh linear plan; reset graph mode so the next
-        # approval re-evaluates it (approve_plan re-reads WORKLOOP_EXECUTION).
-        task.graph_execution = False
         task.node_worktree = False
         task.graph_workflow_node_id = ""
         task.revision_target_node_id = ""
@@ -1083,6 +1126,7 @@ class AgentWorkflow:
         task.node_runs = {}
         workflow = self._task_workflow(task)
         planner_node = workflow.node(WorkflowNodeKind.PLANNER)
+        planning_binding = self._planning_binding(task)
         response = self._invoke_agent(
             task,
             AgentRequest(
@@ -1093,9 +1137,8 @@ class AgentWorkflow:
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
                 budget=self._agent_budget(task),
-                session_id=task.sessions.get("planner", ""),
                 workflow_node_id=planner_node.node_id,
-                **self._node_request_fields(task, PlanNodeKind.PLANNING),
+                **self._planning_request_fields(task, planning_binding),
             ),
         )
         if not response.succeeded:
@@ -1117,7 +1160,7 @@ class AgentWorkflow:
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
         task.artifacts["plan"] = plan_ref
-        self._save_generated_plan_graph(task, plan)
+        self._save_generated_plan_graph(task, plan, planning_binding)
         task.error = ""
         if not self._transition_unless_cancelled(
             task,
@@ -1236,11 +1279,18 @@ class AgentWorkflow:
                 f"Claude 原生计划映射无效：{native_error}"
             ) from native_error
 
-    def _save_generated_plan_graph(self, task: AgentTask, plan: ExecutionPlan) -> None:
-        graph = PlanGraph.from_execution_plan(plan)
+    def _save_generated_plan_graph(
+        self,
+        task: AgentTask,
+        plan: ExecutionPlan,
+        planning_binding: ModelBinding | None = None,
+    ) -> None:
+        graph = self.composer.compose(plan) if self.composer is not None else PlanGraph.from_execution_plan(plan)
         graph = PlanGraph(
             requirement_summary=graph.requirement_summary,
             nodes=graph.nodes,
+            planning_model=planning_binding or graph.planning_model,
+            review_model=graph.review_model,
             graph_id=graph.graph_id,
             version=task.plan_version,
             status=graph.status,
@@ -1261,42 +1311,104 @@ class AgentWorkflow:
             inputs=[task.requirement],
             artifacts=[plan_ref, graph_ref],
             open_questions=list(plan.open_questions),
-            source_sessions=[task.sessions.get("planner", "")],
+            source_sessions=[task.sessions.get("node:planning", task.sessions.get("planner", ""))],
         )
         task.artifacts["context_plan"] = self.context_ledger.write(pack)
         self.store.save(task)
 
-    @staticmethod
-    def _node_request_fields(task: AgentTask, kind: PlanNodeKind) -> dict[str, str]:
-        if not task.plan_graph:
+    def _planning_binding(self, task: AgentTask) -> ModelBinding:
+        if task.plan_graph:
+            try:
+                binding = PlanGraph.from_dict(task.plan_graph).planning_model
+            except (TypeError, ValueError):
+                binding = ModelBinding()
+            if binding.profile_id:
+                return binding
+        if self.composer is not None:
+            return self.composer.select_binding(
+                "planning", AgentAccess.READ_ONLY, task.requirement
+            )
+        return ModelBinding()
+
+    def _planning_request_fields(
+        self,
+        task: AgentTask,
+        binding: ModelBinding | None = None,
+    ) -> dict[str, str]:
+        binding = binding or self._planning_binding(task)
+        if binding.profile_id:
+            key = "node:planning"
             return {
-                "node_id": "",
+                "model_profile_id": binding.profile_id,
+                "session_key": key,
+                "session_id": task.sessions.get(key, task.sessions.get("planner", "")),
+                "node_id": "planning",
+                "provider": binding.provider,
+                "model": binding.model,
+                "thinking": binding.thinking,
+                "context_ref": task.artifacts.get("context_plan", ""),
+            }
+        key = "node:planning"
+        return {
+            "model_profile_id": "",
+            "session_key": key,
+            "session_id": task.sessions.get(key, task.sessions.get("planner", "")),
+            "node_id": "",
+            "provider": "",
+            "model": "",
+            "thinking": "",
+            "context_ref": task.artifacts.get("context_plan", ""),
+        }
+
+    @staticmethod
+    def _node_request_fields(
+        task: AgentTask,
+        kind: PlanNodeKind,
+        role: str,
+    ) -> dict[str, str]:
+        def fallback() -> dict[str, str]:
+            phase_key = "node:review" if role == "reviewer" else role
+            return {
+                "model_profile_id": "",
+                "session_key": phase_key,
+                "session_id": task.sessions.get(phase_key, task.sessions.get(role, "")),
+                "node_id": "review" if role == "reviewer" else "",
                 "provider": "",
                 "model": "",
                 "thinking": "",
                 "context_ref": task.artifacts.get("context_plan", ""),
             }
+
+        if not task.plan_graph:
+            return fallback()
         try:
             graph = PlanGraph.from_dict(task.plan_graph)
         except (TypeError, ValueError):
+            return fallback()
+        if kind is PlanNodeKind.REVIEW and graph.review_model.profile_id:
+            binding = graph.review_model
+            session_key = "node:review"
             return {
-                "node_id": "",
-                "provider": "",
-                "model": "",
-                "thinking": "",
+                "model_profile_id": binding.profile_id,
+                "session_key": session_key,
+                "session_id": task.sessions.get(
+                    session_key, task.sessions.get("reviewer", "")
+                ),
+                "node_id": "review",
+                "provider": binding.provider,
+                "model": binding.model,
+                "thinking": binding.thinking,
                 "context_ref": task.artifacts.get("context_plan", ""),
             }
         candidates = [node for node in graph.nodes if node.kind is kind and node.enabled]
         if not candidates:
-            return {
-                "node_id": "",
-                "provider": "",
-                "model": "",
-                "thinking": "",
-                "context_ref": task.artifacts.get("context_plan", ""),
-            }
+            return fallback()
         node = next((item for item in candidates if item.model.model or item.model.provider), candidates[0])
+        session_key = f"node:{node.node_id}"
         return {
+            "model_profile_id": node.model.profile_id,
+            "session_key": session_key,
+            "session_id": task.sessions.get(session_key, task.sessions.get(role, "")),
             "node_id": node.node_id,
             "provider": node.model.provider,
             "model": node.model.model,
@@ -1311,6 +1423,8 @@ class AgentWorkflow:
     @staticmethod
     def _node_fields(node: PlanNode, context_ref: str) -> dict[str, str]:
         return {
+            "model_profile_id": node.model.profile_id,
+            "session_key": f"node:{node.node_id}",
             "node_id": node.node_id,
             "provider": node.model.provider,
             "model": node.model.model,
@@ -1324,6 +1438,7 @@ class AgentWorkflow:
         there is no upstream context to inject — the node then runs standalone.
         """
         packs: list[ContextPack] = []
+        plan_summary = ""
         for dependency in node.depends_on:
             reference = str(task.node_runs.get(dependency, {}).get("context_ref", ""))
             if reference:
@@ -1335,13 +1450,14 @@ class AgentWorkflow:
             plan_pack = self.context_ledger.read_ref(task.task_id, plan_reference)
             if plan_pack is not None:
                 packs.append(plan_pack)
+                plan_summary = plan_pack.summary
         if not packs:
             return None
         return self.context_ledger.merge(
             task_id=task.task_id,
             node_id=node.node_id,
             packs=packs,
-            summary=node.title or node.node_id,
+            summary=plan_summary or node.title or node.node_id,
             inputs=list(node.inputs),
         )
 
@@ -1351,11 +1467,24 @@ class AgentWorkflow:
         context: ContextPack | None,
         review_feedback: ReviewResult | None = None,
         workflow_instructions: str = "",
+        artifact_root: Path | None = None,
     ) -> str:
         base = (node.instructions or node.title).strip() or node.title
         body = base
         if context is not None:
             lines: list[str] = []
+            if context.summary:
+                lines.append(f"任务目标：{context.summary[:1000]}")
+            if context.inputs:
+                lines.append("任务输入：")
+                lines.extend(f"- {item[:1000]}" for item in context.inputs[-3:])
+            if context.artifacts:
+                lines.append("相关工件（按引用读取，不在上下文中复制内容）：")
+                for artifact in context.artifacts[:20]:
+                    path = Path(artifact)
+                    if artifact_root is not None and not path.is_absolute():
+                        path = artifact_root / path
+                    lines.append(f"- {str(path.resolve())[:1000]}")
             if context.facts:
                 lines.append("已完成的关键事实：")
                 lines.extend(f"- {fact}" for fact in context.facts)
@@ -1367,9 +1496,10 @@ class AgentWorkflow:
                 lines.extend(f"- {decision}" for decision in context.decisions)
             if context.open_questions:
                 lines.append("未决问题：")
-                lines.extend(f"- {question}" for question in context.open_questions)
+                lines.extend(f"- {question[:700]}" for question in context.open_questions[:8])
             if lines:
-                body = base + "\n\n# 上游节点交接的压缩上下文\n" + "\n".join(lines)
+                handoff = "\n".join(lines)[:MAX_CONTEXT_PROMPT_CHARS]
+                body = base + "\n\n# 上游节点交接的压缩上下文\n" + handoff
         if review_feedback is not None:
             # A revision round re-runs this node. Without the reviewer's
             # findings it would only reproduce the result that was rejected,
@@ -1400,11 +1530,19 @@ class AgentWorkflow:
         handoff between nodes. Returns ``None`` when the graph finished cleanly
         (the combined ``ExecutionResult`` is written to ``round_dir``); returns
         the task on a terminal outcome (paused/failed/blocked)."""
-        try:
-            graph = PlanGraph.from_dict(task.plan_graph)
-        except (TypeError, ValueError):
+        if task.plan_graph:
+            try:
+                graph = PlanGraph.from_dict(task.plan_graph)
+            except (TypeError, ValueError) as error:
+                return self._pause(
+                    task,
+                    "invalid_plan_graph",
+                    f"任务执行图无效：{error}",
+                    resume_phase=AgentTaskStatus.EXECUTING,
+                )
+        else:
             graph = PlanGraph.from_execution_plan(plan)
-        if not graph.implementation_nodes():
+        if not graph.execution_nodes():
             self.store.write_json(round_dir / "execution.json", ExecutionResult())
             return None
 
@@ -1437,9 +1575,8 @@ class AgentWorkflow:
 
         while True:
             ready = [
-                node
-                for node in graph.ready(completed, failed)
-                if node.kind in {PlanNodeKind.IMPLEMENTATION, PlanNodeKind.INTEGRATION}
+                node for node in graph.ready(completed, failed)
+                if node in graph.execution_nodes()
             ]
             if not ready:
                 break
@@ -1453,10 +1590,23 @@ class AgentWorkflow:
                 completed.add(node.node_id)
                 self.store.save(task)
 
+        unfinished = [
+            node.node_id
+            for node in graph.execution_nodes()
+            if node.node_id not in completed
+        ]
+        if unfinished:
+            return self._pause(
+                task,
+                "plan_graph_blocked",
+                "执行图存在无法调度的启用节点：" + ", ".join(unfinished),
+                resume_phase=AgentTaskStatus.EXECUTING,
+            )
+
         # Assemble the combined result from every completed implementation node,
         # including nodes finished on a prior run that we just replayed (resume).
         per_node_results: list[ExecutionResult] = []
-        for node in graph.implementation_nodes():
+        for node in graph.execution_nodes():
             if node.node_id not in completed:
                 continue
             result_ref = str(task.node_runs.get(node.node_id, {}).get("result_ref", ""))
@@ -1475,14 +1625,12 @@ class AgentWorkflow:
         task: AgentTask,
         plan: ExecutionPlan,
     ) -> None:
-        """Clear per-node run state for write nodes before a revision round.
+        """Clear write-node state and every transitive dependent before revision.
 
-        ``_execute_plan_graph`` replays ``node_runs`` so a resumed task skips
-        nodes that already finished. That is right for a resume and wrong for a
-        ``revise_code`` round, where the reviewer rejected the produced code and
-        every implementation/integration node must run again. Planning nodes
-        keep their state: the approved plan itself did not change (a rejected
-        plan goes through ``_replan``, which clears ``node_runs`` entirely).
+        ``_execute_plan_graph`` replays completed ``node_runs``. A revision must
+        rerun write nodes and recompute their downstream analysis while retaining
+        each node's own session, so no dependent consumes stale ContextPacks.
+        Planning state remains unchanged; a rejected plan clears all node runs.
 
         No-op outside graph execution, where the single executor call already
         re-runs each round."""
@@ -1492,8 +1640,31 @@ class AgentWorkflow:
             graph = PlanGraph.from_dict(task.plan_graph)
         except (TypeError, ValueError):
             graph = PlanGraph.from_execution_plan(plan)
-        for node in graph.implementation_nodes():
-            task.node_runs.pop(node.node_id, None)
+        invalidated = {node.node_id for node in graph.write_nodes()}
+        changed = True
+        while changed:
+            changed = False
+            for node in graph.execution_nodes():
+                if node.node_id not in invalidated and any(
+                    dependency in invalidated for dependency in node.depends_on
+                ):
+                    invalidated.add(node.node_id)
+                    changed = True
+        for node in graph.execution_nodes():
+            if node.node_id not in invalidated:
+                continue
+            previous = task.node_runs.get(node.node_id, {})
+            task.node_runs[node.node_id] = {
+                "status": "pending",
+                "round": task.iteration,
+                "session_id": str(previous.get("session_id", "")),
+                "context_ref": "",
+                "run_ref": "",
+                "result_ref": "",
+                "started_at": "",
+                "finished_at": "",
+                "error": "",
+            }
         self.store.save(task)
 
     def _run_plan_node(
@@ -1548,7 +1719,8 @@ class AgentWorkflow:
         if context is not None:
             context_ref = f"artifacts/context/{node.node_id}/{context.version}.json"
 
-        use_node_worktree = task.graph_execution and task.node_worktree
+        writes_workspace = node.access is PlanNodeAccess.WORKSPACE_WRITE
+        use_node_worktree = task.graph_execution and task.node_worktree and writes_workspace
         node_worktree_path: Path | None = None
         node_workspace: Workspace | None = None
         node_before: dict[str, str] | None = None
@@ -1558,20 +1730,31 @@ class AgentWorkflow:
             node_workspace = Workspace(node_worktree_path)
             request_workspace = node_worktree_path
 
+        resumed_session = str(
+            state.get("session_id", "")
+            or task.sessions.get(f"node:{node.node_id}", "")
+        )
+        state["session_id"] = resumed_session
         request = AgentRequest(
             task_id=task.task_id,
-            role="executor",
+            role="executor" if writes_workspace else "worker",
             instructions=self._node_instructions(
                 node,
                 context,
                 review_feedback,
                 workflow_node.instructions,
+                self.store.task_dir(task.task_id),
             ),
             workspace=request_workspace,
-            access=AgentAccess.WORKSPACE_WRITE,
+            access=(
+                AgentAccess.WORKSPACE_WRITE
+                if writes_workspace
+                else AgentAccess.READ_ONLY
+            ),
             policy=effective_agent_policy,
             budget=self._agent_budget(task),
-            session_id=str(state.get("session_id", "")),
+            artifact_root=self.store.task_dir(task.task_id),
+            session_id=resumed_session,
             workflow_node_id=workflow_node.node_id,
             **self._node_fields(node, context_ref),
         )
@@ -1590,6 +1773,10 @@ class AgentWorkflow:
                     self._replicate_into_node_worktree(workspace, base, node_workspace)
                     node_before = node_workspace.snapshot()
                 result = self._invoke_agent(task, request)
+                if result.session_id:
+                    state["session_id"] = result.session_id
+                    request = replace(request, session_id=result.session_id)
+                    self.store.save(task)
                 if result.succeeded:
                     try:
                         node_result = ExecutionResult.from_dict(result.output)
@@ -1727,6 +1914,8 @@ class AgentWorkflow:
         state: dict,
     ) -> AgentTask | None:
         state["status"] = "failed"
+        if result.session_id:
+            state["session_id"] = result.session_id
         state["error"] = result.error
         state["finished_at"] = utc_now()
         self.store.save(task)
@@ -2009,6 +2198,22 @@ class AgentWorkflow:
             and task.budget.consumed_cost_usd >= task.budget.max_cost_usd
         ):
             return "budget_exhausted"
+        if (
+            task.budget.max_total_tokens is not None
+            and task.budget.consumed_input_tokens + task.budget.consumed_output_tokens
+            >= task.budget.max_total_tokens
+        ):
+            return "token_budget_exhausted"
+        if (
+            task.budget.max_input_tokens is not None
+            and task.budget.consumed_input_tokens >= task.budget.max_input_tokens
+        ):
+            return "input_token_budget_exhausted"
+        if (
+            task.budget.max_output_tokens is not None
+            and task.budget.consumed_output_tokens >= task.budget.max_output_tokens
+        ):
+            return "output_token_budget_exhausted"
         return ""
 
     @staticmethod
@@ -2020,6 +2225,22 @@ class AgentWorkflow:
             and task.budget.consumed_cost_usd > task.budget.max_cost_usd
         ):
             return "budget_exhausted"
+        if (
+            task.budget.max_total_tokens is not None
+            and task.budget.consumed_input_tokens + task.budget.consumed_output_tokens
+            > task.budget.max_total_tokens
+        ):
+            return "token_budget_exhausted"
+        if (
+            task.budget.max_input_tokens is not None
+            and task.budget.consumed_input_tokens > task.budget.max_input_tokens
+        ):
+            return "input_token_budget_exhausted"
+        if (
+            task.budget.max_output_tokens is not None
+            and task.budget.consumed_output_tokens > task.budget.max_output_tokens
+        ):
+            return "output_token_budget_exhausted"
         return ""
 
     def _load_project_policy(self, task: AgentTask) -> ProjectPolicy:
@@ -2113,6 +2334,8 @@ class AgentWorkflow:
             "model": identity.get("model", ""),
             "runtime_config": identity.get("config", {}),
             "session_id": request.session_id,
+            "session_key": request.session_key or request.role,
+            "model_profile_id": request.model_profile_id,
             "instructions": request.instructions,
             "started_at": started_at,
             "finished_at": "",
@@ -2162,9 +2385,27 @@ class AgentWorkflow:
         response = self._validate_role_session(task, request, response)
 
         task.budget.consumed_active_seconds += time.monotonic() - started
+        input_tokens, output_tokens, cached_tokens, uncached_input_tokens = (
+            self._usage_tokens(response.usage)
+        )
+        task.budget.consumed_input_tokens += input_tokens
+        task.budget.consumed_output_tokens += output_tokens
+        task.budget.consumed_cached_input_tokens += cached_tokens
         cost = response.usage.get("total_cost_usd")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             task.budget.consumed_cost_usd += float(cost)
+        elif request.model_profile_id and self.composer is not None:
+            option = self.composer.catalog.get(request.model_profile_id)
+            cached_rate = (
+                option.cached_input_cost_per_million
+                if option.cached_input_cost_per_million is not None
+                else option.input_cost_per_million
+            )
+            task.budget.consumed_cost_usd += (
+                uncached_input_tokens * option.input_cost_per_million
+                + cached_tokens * cached_rate
+                + output_tokens * option.output_cost_per_million
+            ) / 1_000_000
         budget_error = self._task_budget_overrun(task)
         if response.succeeded and budget_error:
             response = self._reject_role_session(
@@ -2214,6 +2455,10 @@ class AgentWorkflow:
                 redact_value(to_plain(record), request.policy.redact_patterns),
             )
             if response.session_id:
+                session_key = request.session_key or request.role
+                task.sessions[session_key] = response.session_id
+                # Compatibility aliases remain observable but are never read by
+                # composed requests, which resume only their own node key.
                 task.sessions[request.role] = response.session_id
             if task.status is not AgentTaskStatus.CANCELLED:
                 self.store.save(task)
@@ -2255,6 +2500,30 @@ class AgentWorkflow:
         return response
 
     @staticmethod
+    def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
+        def first(*keys: str) -> int:
+            for key in keys:
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return max(0, int(value))
+            return 0
+
+        raw_input = first("input_tokens", "prompt_tokens", "input")
+        output = first("output_tokens", "completion_tokens", "output")
+        cached = first(
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cached_tokens",
+            "cache_read",
+        )
+        cache_is_included = any(
+            key in usage for key in ("cached_input_tokens", "cached_tokens")
+        )
+        uncached = max(0, raw_input - cached) if cache_is_included else raw_input
+        total_input = raw_input if cache_is_included else raw_input + cached
+        return total_input, output, cached, uncached
+
+    @staticmethod
     def _reject_role_session(
         response: AgentResult,
         role: str,
@@ -2290,6 +2559,9 @@ class AgentWorkflow:
                 cancelled = latest
             elif response.error_type in {
                 "budget_exhausted",
+                "token_budget_exhausted",
+                "input_token_budget_exhausted",
+                "output_token_budget_exhausted",
                 "call_timeout",
                 "idle_timeout",
                 "permission_required",
@@ -2374,6 +2646,9 @@ class AgentWorkflow:
             "requirement": task.requirement,
             "clarifications": task.clarifications,
         }
+        experiences = self._relevant_experiences(task)
+        if experiences:
+            payload["approved_experience"] = experiences
         # The planner may only select named commands from the project policy
         # (ProjectPolicy.required_commands rejects anything else), so give it
         # the real list instead of leaving it to infer names from prose.
@@ -2396,6 +2671,37 @@ class AgentWorkflow:
                 else self._task_workflow(task).instructions_for(WorkflowNodeKind.PLANNER)
             ),
         )
+
+    def _relevant_experiences(self, task: AgentTask) -> list[dict[str, str]]:
+        if self.experience_store is None:
+            return []
+
+        def terms(text: str) -> set[str]:
+            lowered = text.lower()
+            result = set(re.findall(r"[a-z0-9_]{2,}", lowered))
+            for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", lowered):
+                result.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
+            return result
+
+        query = terms(f"{task.title} {task.requirement}")
+        ranked: list[tuple[int, str, str, str]] = []
+        for record in self.experience_store.approved():
+            overlap = len(query & terms(record.text))
+            if overlap <= 0:
+                continue
+            ranked.append((overlap, record.updated_at, record.kind, record.text))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected: list[dict[str, str]] = []
+        total_chars = 0
+        for _, _, kind, text in ranked[:5]:
+            bounded = text[:600]
+            if total_chars + len(bounded) > 2400:
+                bounded = bounded[: max(0, 2400 - total_chars)]
+            if not bounded:
+                break
+            selected.append({"kind": kind, "text": bounded})
+            total_chars += len(bounded)
+        return selected
 
     def _executor_instructions(
         self,
@@ -2425,10 +2731,29 @@ class AgentWorkflow:
         validation: ValidationResult | None,
         workflow_node: WorkflowNode | None = None,
     ) -> str:
+        changed_files = list(
+            dict.fromkeys(
+                match.group(1)
+                for match in re.finditer(r"^\+\+\+ b/(.+)$", diff, re.MULTILINE)
+                if match.group(1) != "/dev/null"
+            )
+        )
         payload = {
             "requirement": task.requirement,
-            "plan": to_plain(plan),
-            "diff": diff,
+            "acceptance_criteria": list(plan.acceptance_criteria),
+            "constraints": list(plan.constraints),
+            "required_tests": list(plan.required_tests),
+            "change_evidence": {
+                "changed_files": changed_files,
+                "diff_lines": len(diff.splitlines()),
+                "diff_artifact": str(
+                    (
+                        self.store.task_dir(task.task_id)
+                        / f"artifacts/rounds/{task.iteration}/changes.diff"
+                    ).resolve()
+                ),
+                "instruction": "Inspect the read-only workspace and diff artifact when details are needed.",
+            },
             "validation": (
                 {**to_plain(validation)}
                 if validation is not None

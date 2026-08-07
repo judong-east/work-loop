@@ -278,6 +278,150 @@ def planning_node() -> PlanNode:
 
 
 class PlanGraphExecutionTest(unittest.TestCase):
+    def test_revision_invalidates_write_nodes_and_their_transitive_dependents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {"planner": [FakeStep(output=execution_plan(), session_id="planner-session")]}
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("返修依赖链", "修改后重新检查", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="修改后重新检查",
+                nodes=[
+                    impl_node("write-a", "写 A", depends_on=[]),
+                    PlanNode(
+                        node_id="inspect",
+                        title="检查 A",
+                        kind=PlanNodeKind.CUSTOM,
+                        capability="research",
+                        depends_on=["write-a"],
+                        access=PlanNodeAccess.READ_ONLY,
+                    ),
+                    impl_node("write-b", "写 B", depends_on=["inspect"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+            persisted = workflow.get_task(task.task_id)
+            persisted.node_runs = {
+                node.node_id: {
+                    "status": "completed",
+                    "session_id": f"session-{node.node_id}",
+                    "context_ref": f"context-{node.node_id}",
+                    "result_ref": f"result-{node.node_id}",
+                }
+                for node in graph.nodes
+            }
+            workflow.store.save(persisted)
+
+            workflow._reset_write_nodes_for_revision(persisted, workflow.get_plan(task.task_id))
+
+            self.assertEqual(
+                {node_id: run["status"] for node_id, run in persisted.node_runs.items()},
+                {"write-a": "pending", "inspect": "pending", "write-b": "pending"},
+            )
+            self.assertEqual(persisted.node_runs["inspect"]["session_id"], "session-inspect")
+
+    def test_retry_continues_the_same_node_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "step-1": [
+                        FakeStep(succeeded=False, error="retry", session_id="node-session"),
+                        FakeStep(
+                            output=executor_output(["写入 result.txt"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                            session_id="node-session",
+                        ),
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="review-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("节点重试", "创建 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+            workflow.save_plan_graph(
+                task.task_id,
+                PlanGraph(
+                    requirement_summary="创建 result.txt",
+                    nodes=[
+                        impl_node(
+                            "step-1",
+                            "写入 result.txt",
+                            depends_on=[],
+                            on_failure="retry",
+                        )
+                    ],
+                ),
+            )
+
+            completed = workflow.approve_plan(task.task_id)
+
+            requests = [request for request in runtime.requests if request.node_id == "step-1"]
+            self.assertEqual([request.session_id for request in requests], ["", "node-session"])
+            self.assertEqual(completed.node_runs["step-1"]["session_id"], "node-session")
+
+    def test_read_only_custom_node_is_executed_and_handed_to_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+            root = Path(tmp)
+            runtime = NodeScriptedFakeRuntime(
+                {
+                    "planner": [FakeStep(output=execution_plan(), session_id="planner-session")],
+                    "research": [FakeStep(output=executor_output(["发现约束 A"], []))],
+                    "step-1": [
+                        FakeStep(
+                            output=executor_output(["写入 result.txt"], ["result.txt"]),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "review": [FakeStep(output=passing_review(), session_id="reviewer-session")],
+                }
+            )
+            workflow, project = project_workflow(root, runtime)
+            task = workflow.create_task("研究后实现", "创建 result.txt", project.project_id)
+            workflow.analyze(task.task_id)
+            graph = PlanGraph(
+                requirement_summary="研究后实现",
+                nodes=[
+                    planning_node(),
+                    PlanNode(
+                        node_id="research",
+                        title="检查约束",
+                        kind=PlanNodeKind.CUSTOM,
+                        capability="research",
+                        depends_on=["planning"],
+                        access=PlanNodeAccess.READ_ONLY,
+                    ),
+                    impl_node("step-1", "写入 result.txt", depends_on=["research"]),
+                    review_node("review", depends_on=["step-1"]),
+                ],
+            )
+            workflow.save_plan_graph(task.task_id, graph)
+
+            completed = workflow.approve_plan(task.task_id)
+
+            calls = {request.node_id: request for request in runtime.requests}
+            self.assertEqual(calls["research"].access, AgentAccess.READ_ONLY)
+            self.assertEqual(calls["step-1"].access, AgentAccess.WORKSPACE_WRITE)
+            self.assertIn("发现约束 A", calls["step-1"].instructions)
+            self.assertIn(str(root / "tasks"), calls["step-1"].instructions)
+            self.assertEqual(completed.node_runs["research"]["status"], "completed")
+            execution = json.loads(
+                (
+                    root
+                    / "tasks"
+                    / task.task_id
+                    / "artifacts/rounds/1/execution.json"
+                ).read_text("utf-8")
+            )
+            self.assertEqual(
+                execution["completed_steps"],
+                ["发现约束 A", "写入 result.txt"],
+            )
+
     def test_linear_graph_executes_per_node_and_delivers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
             root = Path(tmp)
@@ -571,9 +715,9 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertEqual(backend_req.node_id, "backend")
             self.assertEqual(ui_req.node_id, "ui")
 
-    def test_default_path_is_single_executor_without_graph_env(self) -> None:
-        # With WORKLOOP_EXECUTION unset, the proven single-executor path runs
-        # and the per-node graph driver is dormant (regression guard).
+    def test_new_tasks_execute_generated_graph_without_graph_env(self) -> None:
+        # Graph execution is the product behavior for new tasks; runtime
+        # composition must not depend on a hidden process environment switch.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             os.environ.pop("WORKLOOP_EXECUTION", None)
@@ -596,10 +740,8 @@ class PlanGraphExecutionTest(unittest.TestCase):
             completed = workflow.approve_plan(task.task_id)
 
             self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
-            # The default path keys the executor by role, not node, so it does
-            # not consume the "step-1" script via node_id — it falls back to role.
-            # graph_execution stays off and node_runs stays empty.
-            self.assertFalse(completed.graph_execution)
+            self.assertTrue(completed.graph_execution)
+            self.assertEqual(completed.node_runs["step-1"]["status"], "completed")
 
 
 class NodeWorktreeExecutionTest(unittest.TestCase):
@@ -1086,10 +1228,9 @@ class OutputRepairTest(unittest.TestCase):
             self.assertIn("审核结果无效", result.error)
             self.assertEqual(len([r for r in runtime.requests if r.role == "reviewer"]), 2)
 
-    def test_default_executor_path_invalid_then_valid_self_repairs(self) -> None:
-        # The default (non-graph) executor path gets the same bounded repair:
-        # graph_execution stays off, but an unparseable ExecutionResult no
-        # longer fails the whole task outright.
+    def test_generated_graph_invalid_then_valid_self_repairs_without_env(self) -> None:
+        # Generated-graph execution keeps bounded output repair and does not
+        # require an environment switch.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             os.environ.pop("WORKLOOP_EXECUTION", None)
@@ -1113,7 +1254,7 @@ class OutputRepairTest(unittest.TestCase):
             completed = workflow.approve_plan(task.task_id)
 
             self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
-            self.assertFalse(completed.graph_execution)
+            self.assertTrue(completed.graph_execution)
             self.assertEqual(
                 (workflow.workspace_path(task.task_id) / "result.txt").read_text(encoding="utf-8"),
                 "done\n",
