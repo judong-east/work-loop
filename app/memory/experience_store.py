@@ -17,6 +17,10 @@ def _normalized_key(text: str) -> str:
     return "".join(text.split()).lower()
 
 
+def _clean_text(text: str) -> str:
+    return " ".join(text.split())[:MAX_TEXT_CHARS]
+
+
 class ExperienceStore:
     def __init__(self, root: Path):
         self.root = root
@@ -47,7 +51,7 @@ class ExperienceStore:
         """登记一条候选经验；内容与已有记录（含已驳回）重复时不再登记，返回 None。"""
         if kind not in EXPERIENCE_KINDS:
             raise ValueError(f"未知经验类型 {kind}。")
-        cleaned = text.strip()[:MAX_TEXT_CHARS]
+        cleaned = _clean_text(text)
         if not cleaned:
             return None
         key = _normalized_key(cleaned)
@@ -61,9 +65,12 @@ class ExperienceStore:
 
     def add_manual(self, text: str) -> ExperienceRecord:
         """人工录入的经验视为已批准（作者即评审人）。"""
-        cleaned = text.strip()[:MAX_TEXT_CHARS]
+        cleaned = _clean_text(text)
         if not cleaned:
             raise ValueError("经验内容不能为空。")
+        key = _normalized_key(cleaned)
+        if any(_normalized_key(record.text) == key for record in self.list_all()):
+            raise ValueError("相同经验已存在。")
         record = ExperienceRecord(text=cleaned, kind="manual", status="approved")
         self._append(record)
         return record
