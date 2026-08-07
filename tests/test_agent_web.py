@@ -446,8 +446,9 @@ class AgentWebApiTest(unittest.TestCase):
         status, page = self.request_text("/")
 
         self.assertEqual(status, 200)
-        self.assertIn('@media (max-width: 820px)', page)
-        self.assertIn('@media (max-width: 520px)', page)
+        self.assertIn('@media (max-width: 900px)', page)
+        self.assertIn('@media (max-width: 768px)', page)
+        self.assertIn('Number.isInteger(detail.workflow_cursor)', page)
         self.assertIn('id="metrics" role="status" aria-live="polite"', page)
         self.assertIn('api("/api/agent/metrics")', page)
         self.assertIn('class="skip-link" href="#workspace"', page)

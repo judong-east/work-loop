@@ -30,6 +30,7 @@ from app.agents.workflow import (
     _MAX_RUN_EVENTS_KEPT,
     _bound_run_events,
 )
+from app.agents.workflow_config import workflow_from_dict
 from tests.git_support import create_repository
 
 
@@ -53,6 +54,15 @@ class PassingValidator:
             passed=True,
             checks=[{"command": "fake-check", "exit_code": 0, "stdout": "ok", "stderr": ""}],
         )
+
+
+class RecordingValidator(PassingValidator):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def validate(self, task_id: str, workspace: Path, plan: ExecutionPlan, policy) -> ValidationResult:
+        self.calls.append(task_id)
+        return super().validate(task_id, workspace, plan, policy)
 
 
 class RaisingValidator:
@@ -165,6 +175,136 @@ def project_workflow(root: Path, runtime: AgentRuntime, validator):
 
 
 class AgentWorkflowTest(unittest.TestCase):
+    def test_custom_workflow_executes_reordered_and_repeated_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=execution_plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["first pass"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "first\n"},
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["second pass"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        ),
+                    ],
+                    "reviewer": [
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "Early review passed.",
+                            }
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "verdict": "pass",
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
+                                "issues": [],
+                                "recommended_tests": [],
+                                "summary": "Final review passed.",
+                            }
+                        ),
+                    ],
+                }
+            )
+            validator = RecordingValidator()
+            workflow, project = project_workflow(root, runtime, validator)
+            workflow.workflows.save(
+                workflow_from_dict(
+                    {
+                        "workflow_id": "composed",
+                        "label": "Composed",
+                        "nodes": [
+                            {"node_id": "plan", "kind": "planner", "label": "Plan"},
+                            {
+                                "node_id": "validate-pre",
+                                "kind": "validation",
+                                "label": "Preflight",
+                            },
+                            {
+                                "node_id": "execute-first",
+                                "kind": "executor",
+                                "label": "First pass",
+                                "instructions": "FIRST EXECUTOR INSTRUCTION",
+                            },
+                            {
+                                "node_id": "review-early",
+                                "kind": "reviewer",
+                                "label": "Early review",
+                                "instructions": "EARLY REVIEW INSTRUCTION",
+                            },
+                            {
+                                "node_id": "execute-final",
+                                "kind": "executor",
+                                "label": "Final pass",
+                                "instructions": "FINAL EXECUTOR INSTRUCTION",
+                            },
+                            {
+                                "node_id": "validate-final",
+                                "kind": "validation",
+                                "label": "Final validation",
+                            },
+                            {
+                                "node_id": "review-final",
+                                "kind": "reviewer",
+                                "label": "Final review",
+                                "instructions": "FINAL REVIEW INSTRUCTION",
+                            },
+                            {"node_id": "deliver", "kind": "delivery", "label": "Deliver"},
+                        ],
+                    }
+                )
+            )
+            task = workflow.create_task(
+                "Composed execution",
+                "Create result.txt",
+                project.project_id,
+                workflow_id="composed",
+            )
+
+            workflow.analyze(task.task_id)
+            completed = workflow.approve_plan(task.task_id)
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(
+                [request.role for request in runtime.requests],
+                ["planner", "executor", "reviewer", "executor", "reviewer"],
+            )
+            self.assertEqual(len(validator.calls), 2)
+            executor_requests = [request for request in runtime.requests if request.role == "executor"]
+            reviewer_requests = [request for request in runtime.requests if request.role == "reviewer"]
+            self.assertIn("FIRST EXECUTOR INSTRUCTION", executor_requests[0].instructions)
+            self.assertIn("FINAL EXECUTOR INSTRUCTION", executor_requests[1].instructions)
+            self.assertIn("EARLY REVIEW INSTRUCTION", reviewer_requests[0].instructions)
+            self.assertIn("FINAL REVIEW INSTRUCTION", reviewer_requests[1].instructions)
+            self.assertIn('"available": false', reviewer_requests[0].instructions)
+            self.assertIn('"passed": true', reviewer_requests[1].instructions)
+            self.assertEqual(completed.workflow_cursor, 7)
+
     def test_canonical_plan_maps_only_explicit_policy_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -40,15 +40,50 @@ class WorkflowDefinitionTest(unittest.TestCase):
             "Codex 执行",
         )
 
-    def test_rejects_unsafe_or_out_of_order_nodes(self) -> None:
+    def test_accepts_reordered_and_repeated_middle_nodes(self) -> None:
+        data = custom_workflow()
+        data["nodes"] = [
+            data["nodes"][0],
+            {
+                "node_id": "preflight",
+                "kind": "validation",
+                "label": "Preflight",
+                "instructions": "Record the baseline evidence.",
+            },
+            data["nodes"][1],
+            {"node_id": "review-early", "kind": "reviewer", "label": "Early review"},
+            {"node_id": "execute-final", "kind": "executor", "label": "Final execute"},
+            data["nodes"][2],
+            data["nodes"][3],
+            data["nodes"][4],
+        ]
+
+        workflow = workflow_from_dict(data)
+
+        self.assertEqual(
+            [node.kind.value for node in workflow.nodes],
+            [
+                "planner",
+                "validation",
+                "executor",
+                "reviewer",
+                "executor",
+                "validation",
+                "reviewer",
+                "delivery",
+            ],
+        )
+        self.assertEqual(workflow.nodes[1].instructions, "Record the baseline evidence.")
+
+    def test_rejects_a_workflow_without_fresh_delivery_evidence(self) -> None:
         data = custom_workflow()
         data["nodes"][1], data["nodes"][2] = data["nodes"][2], data["nodes"][1]
-        with self.assertRaisesRegex(ValueError, "节点顺序"):
+        with self.assertRaisesRegex(ValueError, "最后一个 executor.*validation"):
             workflow_from_dict(data)
 
         data = custom_workflow()
-        data["nodes"][2]["instructions"] = "run arbitrary command"
-        with self.assertRaisesRegex(ValueError, "只有 Agent 节点"):
+        data["nodes"][2], data["nodes"][3] = data["nodes"][3], data["nodes"][2]
+        with self.assertRaisesRegex(ValueError, "最后一个 validation.*reviewer"):
             workflow_from_dict(data)
 
     def test_catalog_persists_custom_workflow_without_overriding_builtins(self) -> None:

@@ -101,6 +101,12 @@ class PassingValidator:
         )
 
 
+class SlowPassingValidator(PassingValidator):
+    def validate(self, task_id, workspace, plan: ExecutionPlan, policy):
+        time.sleep(0.1)
+        return super().validate(task_id, workspace, plan, policy)
+
+
 class SimulatedCrash(BaseException):
     pass
 
@@ -118,6 +124,24 @@ class CrashOnRoleRuntime(AgentRuntime):
     def invoke(self, request):
         if request.role == self.role:
             raise SimulatedCrash(f"crash during {self.role}")
+        return self.delegate.invoke(request)
+
+    def describe(self, request):
+        return self.delegate.describe(request)
+
+
+class CrashOnRoleCallRuntime(AgentRuntime):
+    def __init__(self, delegate: AgentRuntime, role: str, call: int):
+        self.delegate = delegate
+        self.role = role
+        self.call = call
+        self.role_calls = 0
+
+    def invoke(self, request):
+        if request.role == self.role:
+            self.role_calls += 1
+            if self.role_calls == self.call:
+                raise SimulatedCrash(f"crash during {self.role} call {self.call}")
         return self.delegate.invoke(request)
 
     def describe(self, request):
@@ -723,6 +747,114 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 ["executor", "reviewer"],
             )
 
+    def test_resume_repeated_executor_continues_from_the_interrupted_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            delegate = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "first\n"},
+                        ),
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "must not be consumed\n"},
+                        ),
+                    ],
+                }
+            )
+            crashing = CrashOnRoleCallRuntime(delegate, "executor", 2)
+            workflow, project_id = create_workflow(root, crashing)
+            workflow.workflows.save(
+                workflow_from_dict(
+                    {
+                        "workflow_id": "repeated-execution",
+                        "label": "Repeated execution",
+                        "nodes": [
+                            {"node_id": "plan", "kind": "planner", "label": "Plan"},
+                            {
+                                "node_id": "approve",
+                                "kind": "plan_approval",
+                                "label": "Approve",
+                            },
+                            {
+                                "node_id": "execute-first",
+                                "kind": "executor",
+                                "label": "First execution",
+                            },
+                            {
+                                "node_id": "execute-second",
+                                "kind": "executor",
+                                "label": "Second execution",
+                            },
+                            {
+                                "node_id": "validate",
+                                "kind": "validation",
+                                "label": "Validate",
+                            },
+                            {
+                                "node_id": "review",
+                                "kind": "reviewer",
+                                "label": "Review",
+                            },
+                            {
+                                "node_id": "deliver",
+                                "kind": "delivery",
+                                "label": "Deliver",
+                            },
+                        ],
+                    }
+                )
+            )
+            task = workflow.create_task(
+                "Repeated executor crash",
+                "Resume the interrupted executor only",
+                project_id,
+                workflow_id="repeated-execution",
+            )
+            scheduler = PersistentAgentScheduler(workflow)
+            scheduler.enqueue_analysis(task.task_id)
+            scheduler.run_next()
+            scheduler.enqueue_execution(task.task_id)
+
+            with self.assertRaises(SimulatedCrash):
+                scheduler.run_next()
+
+            resumed_runtime = ScriptedFakeRuntime(
+                {
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                    "reviewer": [FakeAgentStep(output=passing_review())],
+                }
+            )
+            recovered_workflow = AgentWorkflow(
+                workflow.root,
+                resumed_runtime,
+                PassingValidator(),
+            )
+            recovered = PersistentAgentScheduler(recovered_workflow)
+
+            recovered.resume(task.task_id)
+            completed = recovered.run_next()
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(
+                [request.workflow_node_id for request in resumed_runtime.requests],
+                ["execute-second", "review"],
+            )
+            self.assertEqual(
+                (recovered_workflow.workspace_path(task.task_id) / "result.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "done\n",
+            )
+
     def test_resume_validation_does_not_rerun_executor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -781,6 +913,78 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             self.assertEqual(
                 [request.role for request in resumed_runtime.requests],
                 ["reviewer"],
+            )
+
+    def test_resume_after_validation_budget_pause_starts_at_the_next_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = ScriptedFakeRuntime(
+                {
+                    "planner": [FakeAgentStep(output=plan())],
+                    "executor": [
+                        FakeAgentStep(
+                            output=execution_output(),
+                            writes={"result.txt": "done\n"},
+                        )
+                    ],
+                }
+            )
+            repository = create_repository(root)
+            workflow = AgentWorkflow(
+                root / "workloop-data",
+                runtime,
+                SlowPassingValidator(),
+            )
+            project = workflow.register_project("Budget pause", repository, "main")
+            task = workflow.create_task(
+                "Validation budget pause",
+                "Resume after completed validation",
+                project.project_id,
+                budget=TaskBudget(
+                    total_timeout_seconds=0.05,
+                    call_timeout_seconds=1,
+                    idle_timeout_seconds=1,
+                ),
+            )
+            scheduler = PersistentAgentScheduler(workflow)
+            scheduler.enqueue_analysis(task.task_id)
+            scheduler.run_next()
+            scheduler.enqueue_execution(task.task_id)
+
+            paused = scheduler.run_next()
+
+            self.assertEqual(paused.status, AgentTaskStatus.PAUSED)
+            self.assertEqual(paused.interrupted_status, "reviewing")
+
+            class ValidatorMustNotRun:
+                def validate(self, task_id, workspace, plan, policy):
+                    raise AssertionError("completed validation must not rerun")
+
+            resumed_runtime = ScriptedFakeRuntime(
+                {"reviewer": [FakeAgentStep(output=passing_review())]}
+            )
+            recovered_workflow = AgentWorkflow(
+                workflow.root,
+                resumed_runtime,
+                ValidatorMustNotRun(),
+            )
+            recovered = PersistentAgentScheduler(recovered_workflow)
+            recovered.update_budget(
+                task.task_id,
+                TaskBudget(
+                    total_timeout_seconds=1,
+                    call_timeout_seconds=1,
+                    idle_timeout_seconds=1,
+                ),
+            )
+            recovered.resume(task.task_id)
+
+            completed = recovered.run_next()
+
+            self.assertEqual(completed.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(
+                [request.workflow_node_id for request in resumed_runtime.requests],
+                ["review"],
             )
 
     def test_resume_review_does_not_rerun_execution_or_validation(self) -> None:

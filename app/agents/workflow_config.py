@@ -183,6 +183,26 @@ def workflow_from_dict(data: Any, *, builtin: bool = False) -> WorkflowDefinitio
         count = kinds.count(kind)
         if count > 1 and kind not in MULTI_INSTANCE_KINDS:
             raise ValueError(f"节点类型 {kind.value} 只能出现一次。")
+
+    # Delivery evidence must describe the final writable state. This is a
+    # partial-order safety constraint, not a fixed pipeline: nodes may otherwise
+    # be reordered and repeated freely in the middle section.
+    last_executor = max(
+        index for index, kind in enumerate(kinds) if kind is WorkflowNodeKind.EXECUTOR
+    )
+    validation_after_write = [
+        index
+        for index, kind in enumerate(kinds)
+        if kind is WorkflowNodeKind.VALIDATION and index > last_executor
+    ]
+    if not validation_after_write:
+        raise ValueError("最后一个 executor 之后必须至少有一个 validation 节点。")
+    last_validation = max(validation_after_write)
+    if not any(
+        kind is WorkflowNodeKind.REVIEWER and index > last_validation
+        for index, kind in enumerate(kinds)
+    ):
+        raise ValueError("最后一个 validation 之后必须至少有一个 reviewer 节点。")
     return WorkflowDefinition(
         workflow_id=workflow_id,
         label=label,

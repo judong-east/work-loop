@@ -59,10 +59,14 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
         AgentTaskStatus.QUEUED_FOR_ANALYSIS,
         AgentTaskStatus.QUEUED_FOR_EXECUTION,
         AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.REVIEWING,
         AgentTaskStatus.CANCELLING,
     },
     AgentTaskStatus.QUEUED_FOR_EXECUTION: {
         AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.REVIEWING,
         AgentTaskStatus.INTERRUPTED,
         AgentTaskStatus.CANCELLING,
     },
@@ -79,6 +83,7 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     },
     AgentTaskStatus.EXECUTING: {
         AgentTaskStatus.VALIDATING,
+        AgentTaskStatus.REVIEWING,
         AgentTaskStatus.BLOCKED,
         AgentTaskStatus.INTERRUPTED,
         AgentTaskStatus.PAUSED,
@@ -86,6 +91,7 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
         AgentTaskStatus.FAILED,
     },
     AgentTaskStatus.VALIDATING: {
+        AgentTaskStatus.EXECUTING,
         AgentTaskStatus.REVIEWING,
         AgentTaskStatus.BLOCKED,
         AgentTaskStatus.INTERRUPTED,
@@ -95,6 +101,7 @@ ALLOWED_AGENT_TASK_TRANSITIONS: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
     },
     AgentTaskStatus.REVIEWING: {
         AgentTaskStatus.EXECUTING,
+        AgentTaskStatus.VALIDATING,
         AgentTaskStatus.REPLANNING,
         AgentTaskStatus.READY_TO_DELIVER,
         AgentTaskStatus.BLOCKED,
@@ -488,6 +495,7 @@ class AgentRequest:
     thinking: str = ""
     tools: list[str] = field(default_factory=list)
     context_ref: str = ""
+    workflow_node_id: str = ""
 
 
 @dataclass
@@ -551,6 +559,7 @@ class AgentTask:
     approved_plan_version: int = 0
     iteration: int = 0
     plan_iteration: int = 0
+    workflow_cursor: int = 0
     run_count: int = 0
     queue_position: int = 0
     active_operation: str = ""
@@ -569,6 +578,7 @@ class AgentTask:
     # call per implementation node, in topological order) instead of a single
     # executor invocation over the whole plan. Opt-in; default path unchanged.
     graph_execution: bool = False
+    graph_workflow_node_id: str = ""
     # When True (and graph_execution is also True), each implementation node
     # runs in its own detached git worktree; its writes are merged back into the
     # shared task worktree (uncommitted) so validation/review/delivery are
@@ -616,6 +626,7 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         approved_plan_version=int(data.get("approved_plan_version", 0)),
         iteration=int(data.get("iteration", 0)),
         plan_iteration=int(data.get("plan_iteration", data.get("iteration", 0))),
+        workflow_cursor=int(data.get("workflow_cursor", 0)),
         run_count=int(data.get("run_count", 0)),
         queue_position=int(data.get("queue_position", 0)),
         active_operation=str(data.get("active_operation", "")),
@@ -635,6 +646,7 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
             if isinstance(value, dict)
         },
         graph_execution=bool(data.get("graph_execution", False)),
+        graph_workflow_node_id=str(data.get("graph_workflow_node_id", "")),
         node_worktree=bool(data.get("node_worktree", False)),
         clarifications=[
             {str(key): str(value) for key, value in item.items()}

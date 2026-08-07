@@ -17,9 +17,9 @@ request -> Claude plan -> human approval -> Codex execute
 The built-in `autopilot` workflow removes only the plan approval gate: a plan
 without open questions proceeds directly to Codex. Git delivery always requires
 explicit human confirmation. Custom workflows may add role-specific
-instructions and may include or omit the plan approval node, while the host
-keeps node order, access, validation, review outcomes, and delivery authority
-fixed.
+instructions, may include or omit the plan approval node, and may reorder or
+repeat executor, validation, and reviewer nodes. The host keeps role access,
+validation commands, review outcomes, and delivery authority fixed.
 
 ## Requirements
 
@@ -79,11 +79,19 @@ The task console supports:
 ## Workflows
 
 Use the **工作流** control in the console to create a personal workflow. Every
-workflow contains one planner, executor, validation, reviewer, and delivery
-node, plus an optional plan approval node. Agent nodes can add instructions,
-but cannot change their access: planner and reviewer remain read-only, the
-executor remains restricted to its task worktree, validation remains limited to
-project-policy commands, and delivery remains human-confirmed.
+workflow starts with one planner, ends with one delivery node, and may place or
+repeat executor, validation, and reviewer nodes in between. An optional plan
+approval node follows the planner. To ensure delivery evidence describes the
+final writable state, at least one validation must follow the last executor and
+at least one reviewer must follow that validation. These are partial-order
+constraints, not a fixed middle pipeline.
+
+Agent nodes can add instructions, but cannot change their access: planner and
+reviewer remain read-only, the executor remains restricted to its task
+worktree, validation remains limited to project-policy commands, and delivery
+remains human-confirmed. Workflow progress is persisted by node position, so
+repeated nodes resume at the interrupted occurrence instead of the first node
+of the same kind.
 
 The selected definition is copied into each task state. Later edits to the
 catalog therefore do not change an in-flight task or its recovery behavior.

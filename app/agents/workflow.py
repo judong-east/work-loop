@@ -35,6 +35,7 @@ from app.agents.workflow_config import (
     BUILTIN_WORKFLOWS,
     WorkflowCatalog,
     WorkflowDefinition,
+    WorkflowNode,
     WorkflowNodeKind,
     workflow_from_dict,
 )
@@ -484,6 +485,13 @@ class AgentWorkflow:
         plan = self._load_plan(task)
         policy = self._load_project_policy(task)
         policy.required_commands(plan.required_tests)
+        workflow = self._task_workflow(task)
+        last_executor = max(
+            index
+            for index, node in enumerate(workflow.nodes)
+            if node.kind is WorkflowNodeKind.EXECUTOR
+        )
+        task.workflow_cursor = last_executor + 1
         task.iteration += 1
         self.store.save(task)
         return self._run_approved_plan(
@@ -512,16 +520,19 @@ class AgentWorkflow:
         if not self._transition_unless_cancelled(task, AgentTaskStatus.ANALYZING):
             return self._finish_or_return_cancellation(task)
 
+        workflow = self._task_workflow(task)
+        planner_node = workflow.node(WorkflowNodeKind.PLANNER)
         response = self._invoke_agent(
             task,
             AgentRequest(
                 task_id=task.task_id,
                 role="planner",
-                instructions=self._planner_instructions(task, policy),
+                instructions=self._planner_instructions(task, policy, planner_node),
                 workspace=self.workspace_path(task.task_id),
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
                 session_id=task.sessions.get("planner", ""),
+                workflow_node_id=planner_node.node_id,
                 **self._node_request_fields(task, PlanNodeKind.PLANNING),
             ),
         )
@@ -538,6 +549,7 @@ class AgentWorkflow:
         except ValueError as error:
             return self._fail(task, AgentResult(succeeded=False, error=f"规划结果无效：{error}"))
         task.plan_version += 1
+        task.workflow_cursor = 1
         task.sessions["planner"] = response.session_id
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
@@ -588,6 +600,14 @@ class AgentWorkflow:
         if task.approved_plan_version != task.plan_version:
             task.plan_iteration = 0
         task.approved_plan_version = task.plan_version
+        workflow = self._task_workflow(task)
+        if task.workflow_cursor <= 0:
+            task.workflow_cursor = 1
+        if (
+            task.workflow_cursor < len(workflow.nodes)
+            and workflow.nodes[task.workflow_cursor].kind is WorkflowNodeKind.PLAN_APPROVAL
+        ):
+            task.workflow_cursor += 1
         workspace_path = self.workspace_path(task.task_id)
         workspace = Workspace(workspace_path)
         if task.artifacts.get("workspace_base"):
@@ -632,31 +652,76 @@ class AgentWorkflow:
         review_feedback: ReviewResult | None,
     ) -> AgentTask:
         workspace_path = self.workspace_path(task.task_id)
+        workflow = self._task_workflow(task)
+        if task.workflow_cursor <= 0:
+            task.workflow_cursor = self._workflow_cursor_for_phase(workflow, phase)
+            self.store.save(task)
+
         while True:
-            if phase is AgentTaskStatus.EXECUTING:
-                if new_round:
-                    if task.plan_iteration >= task.budget.max_iterations:
-                        return self._pause(
-                            task,
-                            "max_iterations",
-                            f"代码返修达到最大轮次 {task.budget.max_iterations}。",
-                            resume_phase=AgentTaskStatus.EXECUTING,
-                        )
-                    task.iteration += 1
-                    task.plan_iteration += 1
-                if (
-                    task.status is not AgentTaskStatus.EXECUTING
-                    and not self._transition_unless_cancelled(
-                        task, AgentTaskStatus.EXECUTING
-                    )
+            if task.workflow_cursor >= len(workflow.nodes):
+                return self._fail(
+                    task,
+                    AgentResult(succeeded=False, error="工作流游标越过了 delivery 节点。"),
+                )
+            node = workflow.nodes[task.workflow_cursor]
+            if node.kind is WorkflowNodeKind.PLAN_APPROVAL:
+                task.workflow_cursor += 1
+                self.store.save(task)
+                continue
+            if node.kind is WorkflowNodeKind.DELIVERY:
+                task.error = ""
+                task.pause_reason = ""
+                if not self._transition_unless_cancelled(
+                    task,
+                    AgentTaskStatus.READY_TO_DELIVER,
+                    reason=f"workflow_node_completed:{node.node_id}",
                 ):
                     return self._finish_or_return_cancellation(task)
+                return task
+            if node.kind is WorkflowNodeKind.PLANNER:
+                return self._fail(
+                    task,
+                    AgentResult(succeeded=False, error="已批准工作流不能再次进入 planner 节点。"),
+                )
+
+            phase = self._workflow_status(node)
+            if new_round:
+                if task.plan_iteration >= task.budget.max_iterations:
+                    return self._pause(
+                        task,
+                        "max_iterations",
+                        f"代码返修达到最大轮次 {task.budget.max_iterations}。",
+                        resume_phase=phase,
+                    )
+                task.iteration += 1
+                task.plan_iteration += 1
+                new_round = False
+                self.store.save(task)
+
+            if (
+                task.status is not phase
+                and not self._transition_unless_cancelled(
+                    task,
+                    phase,
+                    reason=f"workflow_node_started:{node.node_id}",
+                )
+            ):
+                return self._finish_or_return_cancellation(task)
+
+            round_dir = self._round_dir(task)
+            node_dir = self._workflow_node_dir(round_dir, task.workflow_cursor, node)
+            if node.kind is WorkflowNodeKind.EXECUTOR:
                 round_dir = self._round_dir(task)
                 before_check = self._check_workspace_policy(workspace, base, policy)
                 self.store.write_json(round_dir / "policy-before.json", before_check)
+                self.store.write_json(node_dir / "policy-before.json", before_check)
                 if not before_check.passed:
                     return self._block_policy(task, before_check)
                 if task.graph_execution:
+                    if task.graph_workflow_node_id != node.node_id:
+                        self._reset_write_nodes_for_revision(task, plan)
+                        task.graph_workflow_node_id = node.node_id
+                        self.store.save(task)
                     graph_outcome = self._execute_plan_graph(
                         task=task,
                         plan=plan,
@@ -667,19 +732,26 @@ class AgentWorkflow:
                         base=base,
                         round_dir=round_dir,
                         review_feedback=review_feedback,
+                        workflow_node=node,
                     )
                     if graph_outcome is not None:
                         return graph_outcome
+                    execution_result = ExecutionResult.from_dict(
+                        json.loads((round_dir / "execution.json").read_text(encoding="utf-8"))
+                    )
                 else:
                     executor_request = AgentRequest(
                         task_id=task.task_id,
                         role="executor",
-                        instructions=self._executor_instructions(task, plan, review_feedback),
+                        instructions=self._executor_instructions(
+                            task, plan, review_feedback, node
+                        ),
                         workspace=workspace_path,
                         access=AgentAccess.WORKSPACE_WRITE,
                         policy=effective_agent_policy,
                         budget=self._agent_budget(task),
                         session_id=task.sessions.get("executor", ""),
+                        workflow_node_id=node.node_id,
                         **self._node_request_fields(task, PlanNodeKind.IMPLEMENTATION),
                     )
                     execution = self._invoke_agent(task, executor_request)
@@ -702,22 +774,18 @@ class AgentWorkflow:
                             )
                         execution_result = repaired[0]
                     self.store.write_json(round_dir / "execution.json", execution_result)
+                self.store.write_json(node_dir / "execution.json", execution_result)
                 current = workspace.snapshot()
-                self.store.write_text(round_dir / "changes.diff", workspace.diff(base, current))
-                phase = AgentTaskStatus.VALIDATING
-                new_round = False
+                diff = workspace.diff(base, current)
+                self.store.write_text(round_dir / "changes.diff", diff)
+                self.store.write_text(node_dir / "changes.diff", diff)
+                self._advance_workflow_cursor(task)
+                continue
 
-            round_dir = self._round_dir(task)
-            if phase is AgentTaskStatus.VALIDATING:
-                if (
-                    task.status is not AgentTaskStatus.VALIDATING
-                    and not self._transition_unless_cancelled(
-                        task, AgentTaskStatus.VALIDATING
-                    )
-                ):
-                    return self._finish_or_return_cancellation(task)
+            if node.kind is WorkflowNodeKind.VALIDATION:
                 after_check = self._check_workspace_policy(workspace, base, policy)
                 self.store.write_json(round_dir / "policy-after.json", after_check)
+                self.store.write_json(node_dir / "policy-after.json", after_check)
                 if not after_check.passed:
                     return self._block_policy(task, after_check)
                 budget_error = self._task_budget_error(task)
@@ -731,11 +799,14 @@ class AgentWorkflow:
                     "round": task.iteration,
                     "status": "running",
                     "budget": to_plain(task.budget),
+                    "workflow_node_id": node.node_id,
+                    "workflow_node_instructions": node.instructions,
                     "started_at": utc_now(),
                     "finished_at": "",
                     "error": "",
                 }
                 self.store.write_json(validation_run_path, validation_run)
+                self.store.write_json(node_dir / "validation-run.json", validation_run)
                 try:
                     validation = self.validator.validate(
                         task.task_id,
@@ -752,6 +823,7 @@ class AgentWorkflow:
                         }
                     )
                     self.store.write_json(validation_run_path, validation_run)
+                    self.store.write_json(node_dir / "validation-run.json", validation_run)
                     return self._fail(
                         task,
                         AgentResult(succeeded=False, error=f"验证器异常：{error}"),
@@ -771,14 +843,18 @@ class AgentWorkflow:
                 )
                 self.store.write_json(validation_run_path, validation_run)
                 self.store.write_json(round_dir / "validation.json", validation)
+                self.store.write_json(node_dir / "validation-run.json", validation_run)
+                self.store.write_json(node_dir / "validation.json", validation)
                 validation_check = self._check_workspace_policy(workspace, base, policy)
                 self.store.write_json(
                     round_dir / "policy-validation.json",
                     validation_check,
                 )
+                self.store.write_json(node_dir / "policy-validation.json", validation_check)
                 current = workspace.snapshot()
                 diff = workspace.diff(base, current)
                 self.store.write_text(round_dir / "changes.diff", diff)
+                self.store.write_text(node_dir / "changes.diff", diff)
                 if not validation_check.passed:
                     return self._block_policy(task, validation_check)
                 if not validation.passed:
@@ -788,35 +864,38 @@ class AgentWorkflow:
                         validation.error or "必需验证未通过。",
                         resume_phase=AgentTaskStatus.VALIDATING,
                     )
+                self._advance_workflow_cursor(task)
                 budget_error = self._task_budget_overrun(task)
                 if budget_error:
+                    resume_phase = self._workflow_status(
+                        workflow.nodes[task.workflow_cursor]
+                    )
                     return self._pause(
                         task,
                         budget_error,
-                        resume_phase=AgentTaskStatus.REVIEWING,
+                        resume_phase=resume_phase,
                     )
-                phase = AgentTaskStatus.REVIEWING
-            else:
-                validation = self._load_round_validation(task)
-                current = workspace.snapshot()
-                diff = workspace.diff(base, current)
+                continue
 
-            if (
-                task.status is not AgentTaskStatus.REVIEWING
-                and not self._transition_unless_cancelled(
-                    task, AgentTaskStatus.REVIEWING
-                )
-            ):
-                return self._finish_or_return_cancellation(task)
+            validation = self._optional_round_validation(
+                round_dir,
+                workflow,
+                task.workflow_cursor,
+            )
+            current = workspace.snapshot()
+            diff = workspace.diff(base, current)
             review_request = AgentRequest(
                 task_id=task.task_id,
                 role="reviewer",
-                instructions=self._reviewer_instructions(task, plan, diff, validation),
+                instructions=self._reviewer_instructions(
+                    task, plan, diff, validation, node
+                ),
                 workspace=workspace_path,
                 access=AgentAccess.READ_ONLY,
                 policy=effective_agent_policy,
                 budget=self._agent_budget(task),
                 session_id=task.sessions.get("reviewer", ""),
+                workflow_node_id=node.node_id,
                 **self._node_request_fields(task, PlanNodeKind.REVIEW),
             )
             review = self._invoke_agent(task, review_request)
@@ -846,16 +925,12 @@ class AgentWorkflow:
                     AgentResult(succeeded=False, error=f"审核结果无效：{error}"),
                 )
             self.store.write_json(round_dir / "review.json", review_result)
+            self.store.write_json(node_dir / "review.json", review_result)
 
             verdict = review_result.verdict
             if verdict is ReviewVerdict.PASS:
-                task.error = ""
-                task.pause_reason = ""
-                if not self._transition_unless_cancelled(
-                    task, AgentTaskStatus.READY_TO_DELIVER
-                ):
-                    return self._finish_or_return_cancellation(task)
-                return task
+                self._advance_workflow_cursor(task)
+                continue
             if verdict is ReviewVerdict.REVISE_CODE:
                 review_feedback = review_result
                 # Graph execution treats a node whose node_runs say "completed"
@@ -867,7 +942,19 @@ class AgentWorkflow:
                 # burns its whole iteration budget re-reviewing an unchanged
                 # worktree until it pauses on max_iterations.
                 self._reset_write_nodes_for_revision(task, plan)
-                phase = AgentTaskStatus.EXECUTING
+                task.graph_workflow_node_id = ""
+                executor_index = self._preceding_executor_index(
+                    workflow, task.workflow_cursor
+                )
+                if executor_index is None:
+                    task.error = "审核要求返修，但该 reviewer 之前没有 executor 节点。"
+                    if not self._transition_unless_cancelled(
+                        task, AgentTaskStatus.BLOCKED
+                    ):
+                        return self._finish_or_return_cancellation(task)
+                    return task
+                task.workflow_cursor = executor_index
+                self.store.save(task)
                 new_round = True
                 continue
             if verdict is ReviewVerdict.REPLAN:
@@ -877,6 +964,86 @@ class AgentWorkflow:
             if not self._transition_unless_cancelled(task, AgentTaskStatus.BLOCKED):
                 return self._finish_or_return_cancellation(task)
             return task
+
+    @staticmethod
+    def _workflow_status(node: WorkflowNode) -> AgentTaskStatus:
+        statuses = {
+            WorkflowNodeKind.EXECUTOR: AgentTaskStatus.EXECUTING,
+            WorkflowNodeKind.VALIDATION: AgentTaskStatus.VALIDATING,
+            WorkflowNodeKind.REVIEWER: AgentTaskStatus.REVIEWING,
+        }
+        try:
+            return statuses[node.kind]
+        except KeyError as error:
+            raise ValueError(f"节点 {node.node_id} 不是可运行的中间节点。") from error
+
+    @staticmethod
+    def _workflow_cursor_for_phase(
+        workflow: WorkflowDefinition,
+        phase: AgentTaskStatus,
+    ) -> int:
+        kind_by_status = {
+            AgentTaskStatus.EXECUTING: WorkflowNodeKind.EXECUTOR,
+            AgentTaskStatus.VALIDATING: WorkflowNodeKind.VALIDATION,
+            AgentTaskStatus.REVIEWING: WorkflowNodeKind.REVIEWER,
+        }
+        expected = kind_by_status.get(phase)
+        if expected is not None:
+            for index, node in enumerate(workflow.nodes):
+                if node.kind is expected:
+                    return index
+        cursor = 1
+        if workflow.nodes[cursor].kind is WorkflowNodeKind.PLAN_APPROVAL:
+            cursor += 1
+        return cursor
+
+    @staticmethod
+    def _workflow_node_dir(round_dir: Path, cursor: int, node: WorkflowNode) -> Path:
+        return round_dir / "workflow-nodes" / f"{cursor + 1}-{node.node_id}"
+
+    def _advance_workflow_cursor(self, task: AgentTask) -> None:
+        task.workflow_cursor += 1
+        self.store.save(task)
+
+    @staticmethod
+    def _preceding_executor_index(
+        workflow: WorkflowDefinition,
+        cursor: int,
+    ) -> int | None:
+        for index in range(cursor - 1, -1, -1):
+            if workflow.nodes[index].kind is WorkflowNodeKind.EXECUTOR:
+                return index
+        return None
+
+    @staticmethod
+    def _optional_round_validation(
+        round_dir: Path,
+        workflow: WorkflowDefinition,
+        cursor: int,
+    ) -> ValidationResult | None:
+        preceding_nodes = workflow.nodes[:cursor]
+        last_executor = max(
+            (
+                index
+                for index, node in enumerate(preceding_nodes)
+                if node.kind is WorkflowNodeKind.EXECUTOR
+            ),
+            default=-1,
+        )
+        last_validation = max(
+            (
+                index
+                for index, node in enumerate(preceding_nodes)
+                if node.kind is WorkflowNodeKind.VALIDATION
+            ),
+            default=-1,
+        )
+        if last_validation < last_executor:
+            return None
+        path = round_dir / "validation.json"
+        if not path.is_file():
+            return None
+        return ValidationResult.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def _replan(
         self,
@@ -891,7 +1058,10 @@ class AgentWorkflow:
         # approval re-evaluates it (approve_plan re-reads WORKLOOP_EXECUTION).
         task.graph_execution = False
         task.node_worktree = False
+        task.graph_workflow_node_id = ""
         task.node_runs = {}
+        workflow = self._task_workflow(task)
+        planner_node = workflow.node(WorkflowNodeKind.PLANNER)
         response = self._invoke_agent(
             task,
             AgentRequest(
@@ -903,6 +1073,7 @@ class AgentWorkflow:
                 policy=self._agent_policy(policy, []),
                 budget=self._agent_budget(task),
                 session_id=task.sessions.get("planner", ""),
+                workflow_node_id=planner_node.node_id,
                 **self._node_request_fields(task, PlanNodeKind.PLANNING),
             ),
         )
@@ -921,6 +1092,7 @@ class AgentWorkflow:
                 AgentResult(succeeded=False, error=f"重新规划结果无效：{error}"),
             )
         task.plan_version += 1
+        task.workflow_cursor = 1
         plan_ref = f"artifacts/plans/{task.plan_version}.json"
         self.store.write_json(self.store.task_dir(task.task_id) / plan_ref, plan)
         task.artifacts["plan"] = plan_ref
@@ -1157,6 +1329,7 @@ class AgentWorkflow:
         node: PlanNode,
         context: ContextPack | None,
         review_feedback: ReviewResult | None = None,
+        workflow_instructions: str = "",
     ) -> str:
         base = (node.instructions or node.title).strip() or node.title
         body = base
@@ -1184,6 +1357,8 @@ class AgentWorkflow:
             body += "\n\n# 上一轮审核要求返修\n" + json.dumps(
                 to_plain(review_feedback), ensure_ascii=False
             )
+        if workflow_instructions.strip():
+            body += "\n\n# 工作流执行阶段附加要求\n" + workflow_instructions.strip()
         return body + _EXECUTOR_OUTPUT_INSTRUCTION
 
     def _execute_plan_graph(
@@ -1197,6 +1372,7 @@ class AgentWorkflow:
         base: dict[str, str],
         round_dir: Path,
         review_feedback: ReviewResult | None,
+        workflow_node: WorkflowNode,
     ) -> AgentTask | None:
         """Run the implementation/integration nodes of the task PlanGraph in
         topological order, one executor call per node, with structured context
@@ -1249,7 +1425,7 @@ class AgentWorkflow:
             for node in ready:
                 outcome = self._run_plan_node(
                     task, node, plan, policy, effective_agent_policy,
-                    workspace, workspace_path, base, review_feedback,
+                    workspace, workspace_path, base, review_feedback, workflow_node,
                 )
                 if outcome is not None:
                     return outcome
@@ -1310,6 +1486,7 @@ class AgentWorkflow:
         workspace_path: Path,
         base: dict[str, str],
         review_feedback: ReviewResult | None,
+        workflow_node: WorkflowNode,
     ) -> AgentTask | None:
         """Execute one plan node via the executor runtime. Returns ``None`` on
         success or skip (node state persisted); returns the task on a terminal
@@ -1363,12 +1540,18 @@ class AgentWorkflow:
         request = AgentRequest(
             task_id=task.task_id,
             role="executor",
-            instructions=self._node_instructions(node, context, review_feedback),
+            instructions=self._node_instructions(
+                node,
+                context,
+                review_feedback,
+                workflow_node.instructions,
+            ),
             workspace=request_workspace,
             access=AgentAccess.WORKSPACE_WRITE,
             policy=effective_agent_policy,
             budget=self._agent_budget(task),
             session_id=str(state.get("session_id", "")),
+            workflow_node_id=workflow_node.node_id,
             **self._node_fields(node, context_ref),
         )
 
@@ -1421,7 +1604,10 @@ class AgentWorkflow:
                     workspace,
                 )
 
-            result_ref = f"artifacts/node-runs/{node.node_id}/{task.iteration}.json"
+            result_ref = (
+                f"artifacts/node-runs/{workflow_node.node_id}/"
+                f"{node.node_id}/{task.iteration}.json"
+            )
             self.store.write_json(self.store.task_dir(task.task_id) / result_ref, node_result)
             state["status"] = "completed"
             state["session_id"] = result.session_id
@@ -1874,6 +2060,7 @@ class AgentWorkflow:
             "schema_version": 1,
             "index": task.run_count,
             "role": request.role,
+            "workflow_node_id": request.workflow_node_id,
             "status": "running",
             "access": request.access.value,
             "policy": to_plain(request.policy),
@@ -2138,6 +2325,7 @@ class AgentWorkflow:
         self,
         task: AgentTask,
         policy: ProjectPolicy | None = None,
+        workflow_node: WorkflowNode | None = None,
     ) -> str:
         payload = {
             "title": task.title,
@@ -2160,7 +2348,11 @@ class AgentWorkflow:
         )
         return self._with_node_instructions(
             instructions,
-            self._task_workflow(task).instructions_for(WorkflowNodeKind.PLANNER),
+            (
+                workflow_node.instructions
+                if workflow_node is not None
+                else self._task_workflow(task).instructions_for(WorkflowNodeKind.PLANNER)
+            ),
         )
 
     def _executor_instructions(
@@ -2168,6 +2360,7 @@ class AgentWorkflow:
         task: AgentTask,
         plan: ExecutionPlan,
         review_feedback: ReviewResult | None,
+        workflow_node: WorkflowNode | None = None,
     ) -> str:
         payload = {"plan": to_plain(plan), "review_feedback": to_plain(review_feedback)}
         instructions = "按照已批准的 ExecutionPlan 修改当前工作区。\n" + json.dumps(
@@ -2175,7 +2368,11 @@ class AgentWorkflow:
         ) + _EXECUTOR_OUTPUT_INSTRUCTION
         return self._with_node_instructions(
             instructions,
-            self._task_workflow(task).instructions_for(WorkflowNodeKind.EXECUTOR),
+            (
+                workflow_node.instructions
+                if workflow_node is not None
+                else self._task_workflow(task).instructions_for(WorkflowNodeKind.EXECUTOR)
+            ),
         )
 
     def _reviewer_instructions(
@@ -2183,15 +2380,18 @@ class AgentWorkflow:
         task: AgentTask,
         plan: ExecutionPlan,
         diff: str,
-        validation: ValidationResult,
+        validation: ValidationResult | None,
+        workflow_node: WorkflowNode | None = None,
     ) -> str:
         payload = {
             "requirement": task.requirement,
             "plan": to_plain(plan),
             "diff": diff,
-            "validation": {
-                **to_plain(validation),
-            },
+            "validation": (
+                {**to_plain(validation)}
+                if validation is not None
+                else {"available": False, "reason": "No validation node has run yet."}
+            ),
         }
         instructions = (
             "独立审核当前只读工作区，并输出结构化 ReviewResult。只输出符合 "
@@ -2201,7 +2401,11 @@ class AgentWorkflow:
         )
         return self._with_node_instructions(
             instructions,
-            self._task_workflow(task).instructions_for(WorkflowNodeKind.REVIEWER),
+            (
+                workflow_node.instructions
+                if workflow_node is not None
+                else self._task_workflow(task).instructions_for(WorkflowNodeKind.REVIEWER)
+            ),
         )
 
     def _replanner_instructions(
