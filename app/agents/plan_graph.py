@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -205,6 +206,7 @@ class PlanGraph:
     nodes: list[PlanNode]
     planning_model: ModelBinding = field(default_factory=ModelBinding)
     review_model: ModelBinding = field(default_factory=ModelBinding)
+    layout: dict[str, dict[str, float]] = field(default_factory=dict)
     graph_id: str = field(default_factory=lambda: new_id("GRAPH"))
     version: int = 1
     status: str = "draft"
@@ -249,6 +251,17 @@ class PlanGraph:
 
         for node_id in by_id:
             visit(node_id)
+        for node_id, position in self.layout.items():
+            if node_id not in by_id:
+                raise ValueError(f"plan graph layout references missing node: {node_id}")
+            if not isinstance(position, dict):
+                raise ValueError(f"plan graph layout position must be an object: {node_id}")
+            for axis in ("x", "y"):
+                value = position.get(axis)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"plan graph layout {node_id}.{axis} must be numeric")
+                if not math.isfinite(value) or value < 0 or value > 10000:
+                    raise ValueError(f"plan graph layout {node_id}.{axis} is out of range")
         self.planning_model.validate()
         self.review_model.validate()
 
@@ -259,11 +272,15 @@ class PlanGraph:
         raw_nodes = data.get("nodes")
         if not isinstance(raw_nodes, list):
             raise ValueError("plan graph nodes must be an array")
+        raw_layout = data.get("layout", {})
+        if not isinstance(raw_layout, dict):
+            raise ValueError("plan graph layout must be an object")
         graph = cls(
             requirement_summary=str(data.get("requirement_summary", "")),
             nodes=[PlanNode.from_dict(item) for item in raw_nodes],
             planning_model=ModelBinding.from_dict(data.get("planning_model")),
             review_model=ModelBinding.from_dict(data.get("review_model")),
+            layout=dict(raw_layout),
             graph_id=str(data.get("graph_id", new_id("GRAPH"))),
             version=int(data.get("version", 1)),
             status=str(data.get("status", "draft")),
@@ -358,6 +375,10 @@ class PlanGraph:
             "nodes": [node.to_dict() for node in self.nodes],
             "planning_model": self.planning_model.to_dict(),
             "review_model": self.review_model.to_dict(),
+            "layout": {
+                node_id: {"x": position["x"], "y": position["y"]}
+                for node_id, position in self.layout.items()
+            },
             "created_at": self.created_at,
             "approved_at": self.approved_at,
         }

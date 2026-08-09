@@ -153,6 +153,14 @@ class DeliveryService:
             raise ValueError("DeliveryReport 与任务提交不一致。")
         project = self.workflow.get_project(task.project_id)
         repository = Path(project.repository)
+        if project.workspace_mode == "directory" and task.source_digest:
+            current_source_digest = self.workflow.directory_projects.digest(
+                self.workflow.directory_projects.source(project)
+            )
+            if current_source_digest != task.source_digest:
+                raise ValueError(
+                    "源目录在任务创建后发生了外部修改；为避免覆盖，请重新创建任务或先同步这些修改。"
+                )
         current_target = self.git.head(repository, f"refs/heads/{task.target_branch}")
         if current_target != report.target_commit:
             return self._require_integration(task, current_target)
@@ -164,6 +172,17 @@ class DeliveryService:
             task.task_commit,
             strategy,
         )
+        directory_changes: list[str] = []
+        if project.workspace_mode == "directory":
+            directory_changes = self.workflow.directory_projects.apply_changes(
+                project,
+                current_target,
+                delivered_commit,
+                task.source_digest,
+            )
+            task.source_digest = self.workflow.directory_projects.digest(
+                self.workflow.directory_projects.source(project)
+            )
         task.delivered_commit = delivered_commit
         task.transition(AgentTaskStatus.DELIVERED, reason=f"confirmed_{strategy}")
         record_ref = "artifacts/delivery-record.json"
@@ -176,6 +195,9 @@ class DeliveryService:
                 "target_before": current_target,
                 "delivered_commit": delivered_commit,
                 "confirmed": True,
+                "workspace_mode": project.workspace_mode,
+                "source_directory": project.source_directory,
+                "directory_changes": directory_changes,
                 "delivered_at": utc_now(),
             },
         )

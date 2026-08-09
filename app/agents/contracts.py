@@ -573,6 +573,7 @@ class AgentTask:
     task_commit: str = ""
     delivery_target_commit: str = ""
     delivered_commit: str = ""
+    source_digest: str = ""
     integration_count: int = 0
     task_id: str = field(default_factory=lambda: new_id("TASK"))
     status: AgentTaskStatus = AgentTaskStatus.DRAFT
@@ -641,6 +642,7 @@ def agent_task_from_dict(data: dict[str, Any]) -> AgentTask:
         task_commit=str(data.get("task_commit", "")),
         delivery_target_commit=str(data.get("delivery_target_commit", "")),
         delivered_commit=str(data.get("delivered_commit", "")),
+        source_digest=str(data.get("source_digest", "")),
         integration_count=int(data.get("integration_count", 0)),
         task_id=str(data["task_id"]),
         status=AgentTaskStatus(data.get("status", AgentTaskStatus.DRAFT.value)),

@@ -104,6 +104,46 @@ class PlanGraphTest(unittest.TestCase):
         self.assertEqual(restored.planning_model.profile_id, "planner")
         self.assertEqual(restored.review_model.profile_id, "reviewer")
 
+    def test_canvas_layout_round_trips_without_affecting_execution_order(self) -> None:
+        graph = PlanGraph.from_dict(
+            {
+                "requirement_summary": "Lay out the task graph",
+                "nodes": [
+                    {"node_id": "a", "title": "A", "kind": "custom"},
+                    {
+                        "node_id": "b",
+                        "title": "B",
+                        "kind": "custom",
+                        "depends_on": ["a"],
+                    },
+                ],
+                "layout": {
+                    "a": {"x": 40, "y": 80},
+                    "b": {"x": 320.5, "y": 80},
+                },
+            }
+        )
+
+        restored = PlanGraph.from_dict(graph.to_dict())
+
+        self.assertEqual(restored.layout["a"], {"x": 40, "y": 80})
+        self.assertEqual(restored.layout["b"], {"x": 320.5, "y": 80})
+        self.assertEqual([node.node_id for node in restored.ready(set())], ["a"])
+
+    def test_canvas_layout_rejects_missing_nodes_and_invalid_coordinates(self) -> None:
+        base = {
+            "requirement_summary": "Invalid layout",
+            "nodes": [{"node_id": "a", "title": "A", "kind": "custom"}],
+        }
+        with self.assertRaisesRegex(ValueError, "references missing node"):
+            PlanGraph.from_dict({**base, "layout": {"missing": {"x": 0, "y": 0}}})
+        with self.assertRaisesRegex(ValueError, "must be numeric"):
+            PlanGraph.from_dict({**base, "layout": {"a": {"x": "left", "y": 0}}})
+        with self.assertRaisesRegex(ValueError, "out of range"):
+            PlanGraph.from_dict({**base, "layout": {"a": {"x": float("nan"), "y": 0}}})
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            PlanGraph.from_dict({**base, "layout": []})
+
     def test_legacy_graph_without_phase_models_still_loads(self) -> None:
         graph = PlanGraph.from_dict(
             {

@@ -55,6 +55,7 @@ from app.core.redaction import redact, redact_value
 from app.memory.experience_store import ExperienceStore
 from app.policy.policy_checker import PolicyChecker
 from app.projects.contracts import Project, ProjectPolicy
+from app.projects.directory_project import DirectoryProjectService
 from app.projects.git_worktree import GitWorktreeService, PreparedWorktree
 from app.projects.policy import ProjectPolicyLoader
 from app.projects.registry import ProjectRegistry
@@ -212,6 +213,7 @@ class AgentWorkflow:
         validator: TaskValidator | None = None,
         max_iterations: int = 3,
         git_worktrees: GitWorktreeService | None = None,
+        directory_projects: DirectoryProjectService | None = None,
         composer: ExecutionComposer | None = None,
         experience_store: ExperienceStore | None = None,
     ):
@@ -223,6 +225,9 @@ class AgentWorkflow:
         self.projects = ProjectRegistry(self.root / "projects")
         self.workflows = WorkflowCatalog(self.root / "workflows.json")
         self.git_worktrees = git_worktrees or GitWorktreeService()
+        self.directory_projects = directory_projects or DirectoryProjectService(
+            self.root / "managed-projects"
+        )
         self.policy_loader = ProjectPolicyLoader()
         self.policy_checker = PolicyChecker()
         self.runtime = runtime
@@ -241,22 +246,53 @@ class AgentWorkflow:
     ) -> Project:
         if not name.strip():
             raise ValueError("项目名称不能为空。")
-        repo_root, branch = self.git_worktrees.inspect(repository, default_branch)
+        requested = Path(repository).expanduser().resolve()
+        if not requested.is_dir():
+            raise ValueError(f"项目目录不存在或不可访问：{requested}")
         try:
-            self.root.resolve().relative_to(repo_root)
+            repo_root, detected_branch = self.git_worktrees.inspect(requested, "")
         except ValueError:
-            pass
-        else:
-            raise ValueError("Workloop 数据根必须位于目标 Git 仓库之外。")
-        self.policy_loader.load(repo_root, config_path)
-        return self.projects.add(
-            Project(
-                name=name.strip(),
-                repository=str(repo_root),
-                default_branch=branch,
-                config_path=config_path,
+            repo_root, detected_branch = None, ""
+        if repo_root == requested:
+            branch = detected_branch
+            if default_branch.strip():
+                _, branch = self.git_worktrees.inspect(requested, default_branch)
+            try:
+                self.root.resolve().relative_to(repo_root)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("Workloop 数据根必须位于目标 Git 仓库之外。")
+            self.policy_loader.load(repo_root, config_path)
+            return self.projects.add(
+                Project(
+                    name=name.strip(),
+                    repository=str(repo_root),
+                    default_branch=branch,
+                    config_path=config_path,
+                    workspace_mode="git",
+                    source_directory=str(repo_root),
+                )
             )
+
+        project = Project(
+            name=name.strip(),
+            repository="",
+            default_branch=default_branch.strip() or "main",
+            config_path=config_path,
+            workspace_mode="directory",
+            source_directory=str(requested),
         )
+        project.repository = str(
+            self.directory_projects.root / project.project_id / "repository"
+        )
+        project.managed_policy = self.directory_projects.initialize(project)
+        try:
+            self.policy_loader.load(Path(project.repository), config_path)
+        except Exception:
+            shutil.rmtree(Path(project.repository).parent, ignore_errors=True)
+            raise
+        return self.projects.add(project)
 
     def create_task(
         self,
@@ -275,6 +311,10 @@ class AgentWorkflow:
         )
         effective_budget.validate()
         workflow = self.workflows.get(workflow_id)
+        project = self.projects.get(project_id)
+        source_digest = ""
+        if project.workspace_mode == "directory":
+            source_digest, _ = self.directory_projects.sync_source(project)
         task = AgentTask(
             title=title.strip(),
             requirement=requirement.strip(),
@@ -283,8 +323,8 @@ class AgentWorkflow:
             workflow=to_plain(workflow),
             budget=effective_budget,
             graph_execution=True,
+            source_digest=source_digest,
         )
-        project = self.projects.get(project_id)
         prepared = self.git_worktrees.plan(
             project,
             task.task_id,

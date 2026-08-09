@@ -283,6 +283,16 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual(detail["plan"]["steps"], ["Write result.txt"])
         self.assertEqual([item["id"] for item in detail["actions"]], ["approve"])
 
+        graph = detail["plan_graph"]
+        graph["layout"] = {graph["nodes"][0]["node_id"]: {"x": 48, "y": 72}}
+        status, saved = self.request(
+            "POST",
+            f"/api/agent/tasks/{task_id}/plan-graph",
+            graph,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["plan_graph"]["layout"], graph["layout"])
+
         status, queued = self.request("POST", f"/api/agent/tasks/{task_id}/approve")
         self.assertEqual(status, 202)
         self.assertEqual(queued["status"], "queued_for_execution")
@@ -326,6 +336,55 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual(delivered["status"], "delivered")
         self.assertEqual((self.repository / "result.txt").read_text("utf-8"), "done\n")
 
+    def test_plain_directory_runs_without_git_and_delivers_back_to_source(self) -> None:
+        source = self.root / "plain-source"
+        source.mkdir()
+        (source / "input.txt").write_text("plain\n", encoding="utf-8")
+        directory_plan = plan()
+        directory_plan["required_tests"] = ["workloop-check"]
+        self.runtime.scripts["planner"] = [
+            FakeAgentStep(output=directory_plan, session_id="directory-planner")
+        ]
+
+        status, project = self.request(
+            "POST",
+            "/api/agent/projects",
+            {"name": "Plain folder", "repository": str(source), "default_branch": ""},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(project["workspace_mode"], "directory")
+        self.assertEqual(project["source_directory"], str(source.resolve()))
+        self.assertFalse((source / ".git").exists())
+        self.assertFalse((source / ".workloop").exists())
+
+        status, created = self.request(
+            "POST",
+            "/api/agent/tasks",
+            {
+                "title": "Plain directory task",
+                "requirement": "Create result.txt",
+                "project_id": project["project_id"],
+            },
+        )
+        self.assertEqual(status, 202)
+        task_id = created["task_id"]
+        _, analyzed = self.request("POST", "/api/agent/queue/run-next")
+        self.assertEqual(analyzed["status"], "waiting_for_plan_approval")
+        self.request("POST", f"/api/agent/tasks/{task_id}/approve")
+        _, executed = self.request("POST", "/api/agent/queue/run-next")
+        self.assertEqual(executed["status"], "ready_to_deliver")
+        self.request("POST", f"/api/agent/tasks/{task_id}/prepare-delivery")
+        status, delivered = self.request(
+            "POST",
+            f"/api/agent/tasks/{task_id}/deliver",
+            {"strategy": "merge", "confirmed": True},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(delivered["status"], "delivered")
+        self.assertEqual((source / "result.txt").read_text("utf-8"), "done\n")
+        self.assertFalse((source / ".git").exists())
+
     def test_health_exposes_supported_profiles_without_editable_commands(self) -> None:
         status, payload = self.request("GET", "/api/agent/runtime-health")
 
@@ -333,6 +392,26 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertIn("profiles", payload)
         self.assertNotIn("command", json.dumps(payload["profiles"]))
         self.assertTrue(payload["health"]["available"])
+
+    def test_project_directory_browser_lists_roots_parent_and_children(self) -> None:
+        status, listing = self.request(
+            "POST",
+            "/api/agent/projects/browse-directories",
+            {"path": str(self.root)},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["path"], str(self.root.resolve()))
+        self.assertEqual(listing["parent"], str(self.root.resolve().parent))
+        self.assertIn(str(self.repository.resolve()), [item["path"] for item in listing["directories"]])
+        self.assertTrue(listing["roots"])
+
+        status, error = self.request(
+            "POST",
+            "/api/agent/projects/browse-directories",
+            {"path": str(self.root / "missing")},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("missing", error["error"])
 
     def test_clarification_is_persisted_and_requeues_the_same_planner_session(self) -> None:
         self.runtime.scripts["planner"] = [
@@ -491,6 +570,15 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertIn('class="skip-link" href="#workspace"', page)
         self.assertIn(":focus-visible", page)
         self.assertIn('aria-current="step"', page)
+        self.assertIn('class="graph-workbench"', page)
+        self.assertIn('data-graph-connect', page)
+        self.assertIn('自动布局', page)
+        self.assertIn('ArrowLeft', page)
+        self.assertIn('viewport.onmousedown', page)
+        self.assertIn('class="graph-dependency-field"', page)
+        self.assertIn('id="browseProjectPath"', page)
+        self.assertIn('id="directoryDialog"', page)
+        self.assertIn('/api/agent/projects/browse-directories', page)
         self.assertNotIn("流程编排", page)
         self.assertNotIn("经验记忆", page)
         self.assertNotIn("/api/models/config", page)

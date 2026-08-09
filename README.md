@@ -63,12 +63,20 @@ required.
 python -m app.cli serve --root . --port 8765
 ```
 
-Open `http://127.0.0.1:8765`, register a clean Git project, and create a task.
+Open `http://127.0.0.1:8765`, register a Git repository or any ordinary local
+directory, and create a task. Ordinary directories do not need `.git` or a
+Workloop policy file: Workloop keeps a managed Git snapshot under its own data
+root and leaves the source directory untouched during registration.
 The task console supports:
 
+- an in-app project-directory browser for projects on any local drive;
+- ordinary-directory projects backed by an isolated managed snapshot, with
+  confirmed delivery writing only task changes back to the source directory;
 - structured plan review and clarification;
 - per-task workflow selection and immutable workflow snapshots;
 - controlled custom workflows with planner, executor, and reviewer instructions;
+- a visual task-graph canvas for dragging nodes, editing dependencies, and
+  persisting operator-defined layouts before plan approval;
 - persistent FIFO scheduling with one local agent slot;
 - normalized Claude/Codex events, sessions, budgets, and runtime health;
 - worktree diffs, policy evidence, deterministic validation, and review issues;
@@ -139,6 +147,8 @@ task's `PlanGraph` instead of a single executor call. Each `IMPLEMENTATION` and
   compact and resumable;
 - per-node status persists to `AgentTask.node_runs`, so an interrupted task
   resumes by skipping completed nodes and re-running failed or pending ones;
+- canvas coordinates persist in `PlanGraph.layout`; moving a node changes only
+  its presentation, while dependency edges remain the source of execution order;
 - the merged node output feeds the existing validation → review → delivery
   path unchanged.
 

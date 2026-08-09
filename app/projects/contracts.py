@@ -12,6 +12,9 @@ class Project:
     repository: str
     default_branch: str
     config_path: str = ".workloop/project.toml"
+    workspace_mode: str = "git"
+    source_directory: str = ""
+    managed_policy: bool = False
     project_id: str = field(default_factory=lambda: new_id("PROJECT"))
     created_at: str = field(default_factory=utc_now)
     schema_version: int = 1
@@ -48,6 +51,9 @@ def project_from_dict(data: dict[str, Any]) -> Project:
         repository=str(data["repository"]),
         default_branch=str(data["default_branch"]),
         config_path=str(data.get("config_path", ".workloop/project.toml")),
+        workspace_mode=str(data.get("workspace_mode", "git")),
+        source_directory=str(data.get("source_directory", data["repository"])),
+        managed_policy=bool(data.get("managed_policy", False)),
         project_id=str(data["project_id"]),
         created_at=str(data.get("created_at", utc_now())),
         schema_version=int(data.get("schema_version", 1)),

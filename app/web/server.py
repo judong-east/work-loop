@@ -45,6 +45,15 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
 
+def _filesystem_roots() -> list[Path]:
+    if os.name != "nt":
+        return [Path("/")]
+    import ctypes
+
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    return [Path(f"{chr(65 + index)}:\\") for index in range(26) if mask & (1 << index)]
+
+
 def _resolve_static_dir() -> Path:
     """Return the static directory, handling both normal and PyInstaller-frozen modes."""
     if getattr(sys, "frozen", False):
@@ -127,6 +136,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/memory$"), "handle_list_memory"),
     ]
     POST_ROUTES = [
+        (re.compile(r"^/api/agent/projects/browse-directories$"), "handle_agent_browse_directories"),
         (re.compile(r"^/api/agent/projects$"), "handle_agent_register_project"),
         (re.compile(r"^/api/agent/workflows$"), "handle_agent_save_workflow"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_create_task"),
@@ -1062,6 +1072,37 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             config_path or ".workloop/project.toml",
         )
         self._send_json(200, to_plain(project))
+
+    def handle_agent_browse_directories(self, body: dict) -> None:
+        raw_path = str(body.get("path", "")).strip()
+        current = Path(raw_path).expanduser() if raw_path else Path.home()
+        if not current.is_absolute():
+            current = self.server.workloop_root / current
+        current = current.resolve()
+        if not current.is_dir():
+            raise _HttpError(400, f"目录不存在或不可访问：{current}")
+        try:
+            directories = []
+            for child in current.iterdir():
+                try:
+                    if child.is_dir():
+                        directories.append({"name": child.name, "path": str(child.resolve())})
+                except OSError:
+                    continue
+        except OSError as error:
+            raise _HttpError(400, f"无法读取目录 {current}：{error}") from error
+        directories.sort(key=lambda item: item["name"].casefold())
+        truncated = len(directories) > 500
+        self._send_json(
+            200,
+            {
+                "path": str(current),
+                "parent": "" if current.parent == current else str(current.parent),
+                "roots": [str(root) for root in _filesystem_roots()],
+                "directories": directories[:500],
+                "truncated": truncated,
+            },
+        )
 
     def handle_agent_save_workflow(self, body: dict) -> None:
         workflow = workflow_from_dict(body)
