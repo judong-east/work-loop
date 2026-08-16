@@ -559,7 +559,8 @@ class CodexCliRuntime(AgentRuntime):
             "--sandbox",
             "workspace-write",
             "--config",
-            "sandbox_workspace_write.network_access=false",
+            "sandbox_workspace_write.network_access="
+            + ("true" if request.policy.network_allowed else "false"),
         ]
         provider = self.profile.provider
         if provider is not None:
@@ -610,13 +611,6 @@ class CodexCliRuntime(AgentRuntime):
                 succeeded=False,
                 error="CodexCliRuntime 只接受 workspace-write executor 请求。",
                 error_type="policy_blocked",
-                **identity,
-            )
-        if request.policy.network_allowed:
-            return AgentResult(
-                succeeded=False,
-                error="Codex 网络权限尚未获得独立人工授权。",
-                error_type="permission_required",
                 **identity,
             )
         if request.budget.total_timeout_seconds <= 0 or request.budget.idle_timeout_seconds <= 0:

@@ -22,6 +22,7 @@ from app.agents.contracts import (
     AgentTaskStatus,
     ExecutionPlan,
     ExecutionResult,
+    ReviewIssue,
     ReviewResult,
     ReviewVerdict,
     TaskBudget,
@@ -50,7 +51,14 @@ from app.agents.workflow_config import (
     WorkflowNodeKind,
     workflow_from_dict,
 )
-from app.core.contracts import FileChange, PolicyBoundary, PolicyCheck, to_plain, utc_now
+from app.core.contracts import (
+    FileChange,
+    PolicyBoundary,
+    PolicyCheck,
+    Severity,
+    to_plain,
+    utc_now,
+)
 from app.core.redaction import redact, redact_value
 from app.memory.experience_store import ExperienceStore
 from app.policy.policy_checker import PolicyChecker
@@ -300,7 +308,7 @@ class AgentWorkflow:
         requirement: str,
         project_id: str,
         budget: TaskBudget | None = None,
-        workflow_id: str = "guarded",
+        workflow_id: str = "quick",
     ) -> AgentTask:
         if not title.strip() or not requirement.strip():
             raise ValueError("任务标题和需求不能为空。")
@@ -384,23 +392,47 @@ class AgentWorkflow:
     def requires_plan_approval(self, task_id: str) -> bool:
         return self.get_workflow(task_id).requires_plan_approval
 
-    def record_clarification(self, task_id: str, answer: str) -> AgentTask:
+    def record_clarification(self, task_id: str, answer: str, question: str = "") -> AgentTask:
+        """Answer one open question (defaults to the first); kept for API compatibility."""
+        question = question.strip()
+        return self.record_clarifications(
+            task_id,
+            [{"question": question} if question else {}],
+            [answer],
+        )
+
+    def record_clarifications(
+        self,
+        task_id: str,
+        questions: list[dict],
+        answers: list[str],
+    ) -> AgentTask:
+        """Record answers for every open question of the current plan at once."""
+        if len(questions) != len(answers):
+            raise ValueError("澄清问题与答复数量不一致。")
         task = self.store.load(task_id)
         self._require_status(task, AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL)
         plan = self._load_plan(task)
         if not plan.open_questions:
             raise ValueError("当前计划没有待回答的澄清问题。")
-        cleaned = answer.strip()
-        if not cleaned:
-            raise ValueError("澄清答复不能为空。")
-        task.clarifications.append(
-            {
-                "question": plan.open_questions[0],
-                "answer": cleaned,
-                "at": utc_now(),
-            }
-        )
+        open_questions = list(plan.open_questions)
+        entries = []
+        for index, (raw_question, raw_answer) in enumerate(zip(questions, answers), start=1):
+            question = str(raw_question.get("question", "")).strip()
+            if not question:
+                question = open_questions[0]
+            if question not in open_questions:
+                raise ValueError(f"第 {index} 条答复的问题不在当前计划的待澄清列表中：{question}")
+            cleaned = raw_answer.strip()
+            if not cleaned:
+                raise ValueError(f"第 {index} 条澄清答复不能为空。")
+            entries.append({"question": question, "answer": cleaned, "at": utc_now()})
+        task.clarifications.extend(entries)
         self.store.save(task)
+        self.store.append_event(
+            task.task_id,
+            {"type": "clarified", "status": task.status.value, "count": len(entries)},
+        )
         return task
 
     def resume_task_creation(self, task_id: str) -> AgentTask:
@@ -1005,9 +1037,10 @@ class AgentWorkflow:
             if not review.succeeded:
                 return self._fail(task, review)
             # A parse error is a shape problem a model can self-correct on a
-            # second turn; a validate_pass error is a semantic rejection
-            # (missing/failed acceptance) that repair cannot fix. Only the
-            # former triggers a bounded repair; the latter fails as before.
+            # second turn, so only that triggers the bounded repair. A pass
+            # verdict whose acceptance does not line up with the approved plan
+            # is also fixable output drift: degrade it to a revision round so
+            # the executor/reviewer loop converges instead of failing the task.
             try:
                 review_result = ReviewResult.from_dict(review.output)
             except ValueError as error:
@@ -1023,10 +1056,7 @@ class AgentWorkflow:
             try:
                 review_result.validate_pass(plan)
             except ValueError as error:
-                return self._fail(
-                    task,
-                    AgentResult(succeeded=False, error=f"审核结果无效：{error}"),
-                )
+                review_result = self._inconsistent_pass_review(review_result, error)
             self.store.write_json(round_dir / "review.json", review_result)
             self.store.write_json(node_dir / "review.json", review_result)
 
@@ -2083,6 +2113,31 @@ class AgentWorkflow:
             return None
 
     @staticmethod
+    def _inconsistent_pass_review(result: ReviewResult, error: ValueError) -> ReviewResult:
+        """Turn a rejected pass verdict into a revision request.
+
+        The host still refuses to accept the pass (the delivery gate re-checks
+        validate_pass against the approved plan), but the task itself degrades
+        to a revise_code round instead of dying on reviewer wording drift.
+        """
+        return ReviewResult(
+            verdict=ReviewVerdict.REVISE_CODE,
+            acceptance=list(result.acceptance),
+            issues=[
+                ReviewIssue(
+                    file="",
+                    line=0,
+                    severity=Severity.BLOCKER,
+                    message=f"宿主拒绝该 pass 结论：{error}",
+                    suggestion="逐字引用批准计划中的验收标准，并如实标记每项是否通过。",
+                    evidence="宿主 validate_pass 校验",
+                )
+            ],
+            recommended_tests=list(result.recommended_tests),
+            summary=f"审核结论与批准计划不一致，已降级为返修：{error}",
+        )
+
+    @staticmethod
     def _merge_node_results(results: list[ExecutionResult]) -> ExecutionResult:
         completed_steps: list[str] = []
         modified_files: list[str] = []
@@ -2293,7 +2348,10 @@ class AgentWorkflow:
             allowed_commands=[list(command.argv) for command in commands],
             protected_paths=list(policy.protected_paths),
             timeout_seconds=policy.timeout_seconds,
-            network_allowed=False,
+            # The versioned project policy is the human authorization: a repo
+            # that opts into network=allow explicitly grants its executor and
+            # validation commands network access.
+            network_allowed=policy.network == "allow",
             redact_patterns=list(policy.redact_patterns),
         )
 

@@ -32,13 +32,18 @@ def custom_workflow(workflow_id: str = "personal") -> dict:
 
 
 class WorkflowDefinitionTest(unittest.TestCase):
-    def test_builtins_offer_guarded_and_autopilot_topologies(self) -> None:
+    def test_builtins_offer_guarded_and_quick_topologies(self) -> None:
         self.assertTrue(BUILTIN_WORKFLOWS["guarded"].requires_plan_approval)
-        self.assertFalse(BUILTIN_WORKFLOWS["autopilot"].requires_plan_approval)
+        self.assertFalse(BUILTIN_WORKFLOWS["quick"].requires_plan_approval)
         self.assertEqual(
-            BUILTIN_WORKFLOWS["autopilot"].node(WorkflowNodeKind.EXECUTOR).label,
+            BUILTIN_WORKFLOWS["quick"].node(WorkflowNodeKind.EXECUTOR).label,
             "Codex 执行",
         )
+
+    def test_legacy_autopilot_id_resolves_to_quick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = WorkflowCatalog(Path(tmp) / "workflows.json")
+            self.assertEqual(catalog.get("autopilot").workflow_id, "quick")
 
     def test_accepts_reordered_and_repeated_middle_nodes(self) -> None:
         data = custom_workflow()
@@ -95,7 +100,7 @@ class WorkflowDefinitionTest(unittest.TestCase):
             self.assertEqual(catalog.get("personal").instructions_for(WorkflowNodeKind.PLANNER), "Inspect public APIs first.")
             self.assertEqual(
                 {item.workflow_id for item in catalog.list_all()},
-                {"guarded", "autopilot", "personal"},
+                {"guarded", "quick", "personal"},
             )
 
             data = custom_workflow("guarded")

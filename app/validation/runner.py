@@ -111,9 +111,19 @@ class ProcessTreeRunner:
 class CodexCommandSandbox:
     """Run trusted project commands inside Codex's OS sandbox without invoking a model."""
 
-    def __init__(self, processes: ProcessTreeRunner | None = None, executable: str = "codex"):
+    # Canary results hold for a short window per (workspace, network) pair so a
+    # multi-command validation stage pays the fixed probe cost once, not per
+    # command. A fresh probe still happens on the next validation round.
+    HEALTH_CACHE_TTL_SECONDS = 600.0
+
+    def __init__(
+        self,
+        processes: ProcessTreeRunner | None = None,
+        executable: str = "codex",
+    ):
         self.processes = processes or ProcessTreeRunner()
         self.executable = executable
+        self._health_cache: dict[tuple[str, str], float] = {}
 
     def run(
         self,
@@ -131,14 +141,67 @@ class CodexCommandSandbox:
                 sandbox="codex-cli",
                 inherited_names=sorted(environment),
             )
-        if network != "deny":
+        failure = self._health_check(workspace, network, timeout_seconds, environment)
+        if failure:
             return SandboxedCommandOutcome(
                 exit_code=None,
-                error="验证命令请求网络权限，必须先经过独立人工授权。",
+                error=failure,
                 sandbox="codex-cli",
                 inherited_names=sorted(environment),
             )
+
+        validation_temp = workspace / ".wl-vtmp"
+        validation_temp.mkdir()
+        command_environment = {
+            **environment,
+            "TEMP": str(validation_temp),
+            "TMP": str(validation_temp),
+        }
+        try:
+            outcome = self.processes.run(
+                self._sandbox_argv(workspace, command.argv, network),
+                workspace,
+                timeout_seconds,
+                command_environment,
+            )
+        finally:
+            shutil.rmtree(validation_temp, ignore_errors=True)
+        return SandboxedCommandOutcome(
+            **outcome.__dict__,
+            sandbox="codex-cli",
+            inherited_names=sorted(command_environment),
+        )
+
+    def _health_check(
+        self,
+        workspace: Path,
+        network: str,
+        timeout_seconds: int,
+        environment: dict[str, str],
+    ) -> str:
+        """Probe sandbox boundaries once per window; empty string means healthy."""
+        cache_key = (str(workspace), network)
+        cached_at = self._health_cache.get(cache_key)
+        if cached_at is not None and time.monotonic() - cached_at < self.HEALTH_CACHE_TTL_SECONDS:
+            return ""
+
         canary_timeout = max(3, min(timeout_seconds, 10))
+        if network == "deny":
+            failure = self._network_canary(workspace, canary_timeout, environment)
+            if failure:
+                return failure
+        failure = self._file_canary(workspace, canary_timeout, environment)
+        if failure:
+            return failure
+        self._health_cache[cache_key] = time.monotonic()
+        return ""
+
+    def _network_canary(
+        self,
+        workspace: Path,
+        canary_timeout: int,
+        environment: dict[str, str],
+    ) -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen(1)
@@ -155,23 +218,19 @@ class CodexCommandSandbox:
                 "    sys.exit(86)\n"
             )
             network_check = self.processes.run(
-                self._sandbox_argv(workspace, [sys.executable, "-c", network_script]),
+                self._sandbox_argv(workspace, [sys.executable, "-c", network_script], "deny"),
                 workspace,
                 canary_timeout,
                 environment,
             )
-        failure = self._canary_failure(network_check, "网络隔离")
-        if failure:
-            return SandboxedCommandOutcome(
-                exit_code=None,
-                stdout=network_check.stdout,
-                stderr=network_check.stderr,
-                error=failure,
-                timed_out=network_check.timed_out,
-                sandbox="codex-cli",
-                inherited_names=sorted(environment),
-            )
+        return self._canary_failure(network_check, "网络隔离")
 
+    def _file_canary(
+        self,
+        workspace: Path,
+        canary_timeout: int,
+        environment: dict[str, str],
+    ) -> str:
         canary_path = ""
         try:
             canary = workspace.parent / f".workloop-read-canary-{uuid4().hex}"
@@ -189,7 +248,7 @@ class CodexCommandSandbox:
                 "    sys.exit(86)\n"
             )
             file_check = self.processes.run(
-                self._sandbox_argv(workspace, [sys.executable, "-c", file_script]),
+                self._sandbox_argv(workspace, [sys.executable, "-c", file_script], "deny"),
                 workspace,
                 canary_timeout,
                 environment,
@@ -197,41 +256,14 @@ class CodexCommandSandbox:
         finally:
             if canary_path:
                 Path(canary_path).unlink(missing_ok=True)
-        failure = self._canary_failure(file_check, "工作区外读取隔离")
-        if failure:
-            return SandboxedCommandOutcome(
-                exit_code=None,
-                stdout=file_check.stdout,
-                stderr=file_check.stderr,
-                error=failure,
-                timed_out=file_check.timed_out,
-                sandbox="codex-cli",
-                inherited_names=sorted(environment),
-            )
+        return self._canary_failure(file_check, "工作区外读取隔离")
 
-        validation_temp = workspace / ".wl-vtmp"
-        validation_temp.mkdir()
-        command_environment = {
-            **environment,
-            "TEMP": str(validation_temp),
-            "TMP": str(validation_temp),
-        }
-        try:
-            outcome = self.processes.run(
-                self._sandbox_argv(workspace, command.argv),
-                workspace,
-                timeout_seconds,
-                command_environment,
-            )
-        finally:
-            shutil.rmtree(validation_temp, ignore_errors=True)
-        return SandboxedCommandOutcome(
-            **outcome.__dict__,
-            sandbox="codex-cli",
-            inherited_names=sorted(command_environment),
-        )
-
-    def _sandbox_argv(self, workspace: Path, command: list[str]) -> list[str]:
+    def _sandbox_argv(
+        self,
+        workspace: Path,
+        command: list[str],
+        network: str,
+    ) -> list[str]:
         executable = shutil.which(self.executable, path=minimal_environment().get("PATH"))
         if not executable:
             return []
@@ -241,15 +273,16 @@ class CodexCommandSandbox:
             "--include-managed-config",
             "-P",
             ":workspace",
-            "--sandbox-state-disable-network",
-            "-C",
-            str(workspace),
         ]
+        if network == "deny":
+            argv.append("--sandbox-state-disable-network")
+        argv.extend(["-C", str(workspace)])
         if platform.system() == "Windows":
             argv.extend(["-c", 'windows.sandbox="elevated"'])
         return [*argv, "--", *command]
 
-    def _canary_failure(self, outcome: ProcessOutcome, boundary: str) -> str:
+    @staticmethod
+    def _canary_failure(outcome: ProcessOutcome, boundary: str) -> str:
         if outcome.exit_code == 86:
             return f"{boundary}健康检查失败：Codex 沙箱未落实项目策略。"
         if outcome.timed_out:

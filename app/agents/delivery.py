@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from app.agents.contracts import (
@@ -22,6 +23,14 @@ class DeliveryService:
     def __init__(self, workflow: AgentWorkflow, git: GitDelivery | None = None):
         self.workflow = workflow
         self.git = git or GitDelivery()
+        # Parallel slots let tasks from the same project finish together; the
+        # final merge into the shared target repository stays serialized.
+        self._project_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _project_lock(self, project_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._project_locks.setdefault(project_id, threading.Lock())
 
     def prepare(self, task_id: str) -> AgentTask:
         task = self.workflow.get_task(task_id)
@@ -143,11 +152,29 @@ class DeliveryService:
         strategy: str,
         confirmed: bool,
     ) -> AgentTask:
+        task = self.workflow.get_task(task_id)
+        with self._project_lock(task.project_id):
+            return self._deliver_locked(task_id, strategy, confirmed)
+
+    def _deliver_locked(
+        self,
+        task_id: str,
+        strategy: str,
+        confirmed: bool,
+    ) -> AgentTask:
         if not confirmed:
             raise ValueError("交付必须经过用户明确确认。")
         task = self.workflow.get_task(task_id)
         if task.status is not AgentTaskStatus.READY_TO_DELIVER:
             raise ValueError(f"任务 {task_id} 状态为 {task.status.value}，不能交付。")
+        if not task.artifacts.get("delivery_report"):
+            # One-click delivery: the report is generated on confirmation instead
+            # of requiring a separate prepare step. prepare may itself move the
+            # task to integration_required, in which case delivery stops here and
+            # the returned task tells the operator what to do next.
+            task = self.prepare(task_id)
+            if task.status is not AgentTaskStatus.READY_TO_DELIVER:
+                return task
         report = self.load_report(task_id)
         if report.task_commit != task.task_commit:
             raise ValueError("DeliveryReport 与任务提交不一致。")

@@ -92,10 +92,11 @@ BUILTIN_WORKFLOWS: dict[str, WorkflowDefinition] = {
             _node("deliver", WorkflowNodeKind.DELIVERY, "确认交付"),
         ],
     ),
-    "autopilot": WorkflowDefinition(
-        workflow_id="autopilot",
-        label="自动推进",
-        description="计划无待澄清问题时自动进入执行，最终交付仍需人工确认。",
+    # Default preset: no plan-approval gate; the only human gate is delivery.
+    "quick": WorkflowDefinition(
+        workflow_id="quick",
+        label="快速",
+        description="计划无待澄清问题时自动执行，完成后一键确认交付。",
         builtin=True,
         nodes=[
             _node("plan", WorkflowNodeKind.PLANNER, "Claude 规划"),
@@ -106,6 +107,10 @@ BUILTIN_WORKFLOWS: dict[str, WorkflowDefinition] = {
         ],
     ),
 }
+
+# The no-approval preset was originally shipped as "autopilot"; persisted
+# references still resolve to the same definition under its new name.
+WORKFLOW_ALIASES = {"autopilot": "quick"}
 
 
 def workflow_from_dict(data: Any, *, builtin: bool = False) -> WorkflowDefinition:
@@ -235,8 +240,9 @@ class WorkflowCatalog:
         return list(workflows.values())
 
     def get(self, workflow_id: str) -> WorkflowDefinition:
+        resolved = WORKFLOW_ALIASES.get(workflow_id, workflow_id)
         selected = next(
-            (item for item in self.list_all() if item.workflow_id == workflow_id),
+            (item for item in self.list_all() if item.workflow_id == resolved),
             None,
         )
         if selected is None:

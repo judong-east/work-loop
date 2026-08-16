@@ -153,22 +153,17 @@ class DeliveryServiceTest(unittest.TestCase):
             self.assertEqual((repository / "result.txt").read_text("utf-8"), "done\n")
             self.assertEqual(delivered.delivered_commit, prepared.task_commit)
 
-    def test_cherry_pick_delivery_also_requires_a_bound_report(self) -> None:
+    def test_cherry_pick_delivery_prepares_and_confirms_in_one_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workflow, delivery, task, repository = ready_task(
                 Path(tmp),
                 {"result.txt": "done\n"},
             )
 
-            with self.assertRaisesRegex(FileNotFoundError, "DeliveryReport"):
-                delivery.deliver(task.task_id, strategy="cherry-pick", confirmed=True)
-
-            prepared = delivery.prepare(task.task_id)
-            delivered = delivery.deliver(
-                task.task_id,
-                strategy="cherry-pick",
-                confirmed=True,
-            )
+            # One-click delivery: the DeliveryReport is generated inside the
+            # confirmed call instead of requiring a separate prepare step, and
+            # the delivered commit stays bound to that report.
+            delivered = delivery.deliver(task.task_id, strategy="cherry-pick", confirmed=True)
 
             self.assertEqual(delivered.status, AgentTaskStatus.DELIVERED)
             self.assertEqual((repository / "result.txt").read_text("utf-8"), "done\n")
@@ -176,7 +171,8 @@ class DeliveryServiceTest(unittest.TestCase):
                 run_git(repository, "show", "--format=%s", "--no-patch", "HEAD").stdout.strip(),
                 f"workloop({task.task_id}): {task.title}",
             )
-            self.assertTrue(prepared.task_commit)
+            report = delivery.load_report(task.task_id)
+            self.assertEqual(report.task_commit, delivered.task_commit)
 
     def test_target_advance_rebases_then_revalidates_and_rereviews(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

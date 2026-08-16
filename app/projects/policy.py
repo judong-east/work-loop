@@ -41,8 +41,8 @@ class ProjectPolicyLoader:
         permissions = self._table(data, "permissions")
         protected_paths = self._string_list(permissions, "protected_paths")
         network = permissions.get("network", "deny")
-        if network != "deny":
-            raise ValueError("第一版 permissions.network 必须是 deny；网络访问需要单独人工授权。")
+        if network not in {"deny", "allow"}:
+            raise ValueError("permissions.network 必须是 deny 或 allow；allow 表示该项目显式授权联网。")
 
         validation = self._table(data, "validation")
         timeout = validation.get("timeout_seconds")

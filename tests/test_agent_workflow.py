@@ -725,7 +725,7 @@ class AgentWorkflowTest(unittest.TestCase):
             self.assertIn("只读", result.error)
             self.assertFalse((workflow.workspace_path(task.task_id) / "unauthorized.txt").exists())
 
-    def test_review_cannot_pass_with_failed_acceptance_criterion(self) -> None:
+    def test_review_pass_with_failed_acceptance_degrades_to_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = ScriptedFakeRuntime(
@@ -742,18 +742,32 @@ class AgentWorkflowTest(unittest.TestCase):
                                 "next_steps": [],
                             },
                             writes={"result.txt": "wrong\n"},
-                        )
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["返修写入正确内容"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        ),
                     ],
                     "reviewer": [
                         FakeAgentStep(
                             output={
                                 "verdict": "pass",
-                                "acceptance": [{"criterion": "result.txt 内容为 done", "passed": False}],
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": False}
+                                ],
                                 "issues": [],
                                 "recommended_tests": [],
                                 "summary": "错误地声称通过。",
                             }
-                        )
+                        ),
+                        FakeAgentStep(output=passing_review("返修后通过。")),
                     ],
                 }
             )
@@ -763,11 +777,24 @@ class AgentWorkflowTest(unittest.TestCase):
 
             result = workflow.approve_plan(task.task_id)
 
-            self.assertEqual(result.status, AgentTaskStatus.FAILED)
-            self.assertIn("验收", result.error)
-            self.assertEqual(workflow.get_task(task.task_id).status, AgentTaskStatus.FAILED)
+            # The host rejects the inconsistent pass, but the task degrades to a
+            # revision round instead of failing; the second reviewer turn passes.
+            self.assertEqual(result.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(result.iteration, 2)
+            self.assertEqual(result.error, "")
+            first_review = json.loads(
+                (
+                    workflow.store.task_dir(task.task_id)
+                    / "artifacts"
+                    / "rounds"
+                    / "1"
+                    / "review.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(first_review["verdict"], "revise_code")
+            self.assertIn("降级", first_review["summary"])
 
-    def test_review_cannot_pass_with_blocker_issue(self) -> None:
+    def test_review_pass_with_blocker_issue_degrades_to_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = ScriptedFakeRuntime(
@@ -784,13 +811,26 @@ class AgentWorkflowTest(unittest.TestCase):
                                 "next_steps": [],
                             },
                             writes={"result.txt": "done\n"},
-                        )
+                        ),
+                        FakeAgentStep(
+                            output={
+                                "completed_steps": ["返修后重新提交"],
+                                "modified_files": ["result.txt"],
+                                "tests": [],
+                                "deviations": [],
+                                "remaining_risks": [],
+                                "next_steps": [],
+                            },
+                            writes={"result.txt": "done\n"},
+                        ),
                     ],
                     "reviewer": [
                         FakeAgentStep(
                             output={
                                 "verdict": "pass",
-                                "acceptance": [{"criterion": "result.txt 内容为 done", "passed": True}],
+                                "acceptance": [
+                                    {"criterion": "result.txt 内容为 done", "passed": True}
+                                ],
                                 "issues": [
                                     {
                                         "file": "result.txt",
@@ -804,18 +844,20 @@ class AgentWorkflowTest(unittest.TestCase):
                                 "recommended_tests": [],
                                 "summary": "结论自相矛盾。",
                             }
-                        )
+                        ),
+                        FakeAgentStep(output=passing_review("阻断问题已修复。")),
                     ],
                 }
             )
             workflow, project = project_workflow(root, runtime, PassingValidator())
-            task = workflow.create_task("阻断门禁", "阻断问题不得通过", project.project_id)
+            task = workflow.create_task("阻断门禁", "阻断问题不得直接通过", project.project_id)
             workflow.analyze(task.task_id)
 
             result = workflow.approve_plan(task.task_id)
 
-            self.assertEqual(result.status, AgentTaskStatus.FAILED)
-            self.assertIn("阻断", result.error)
+            self.assertEqual(result.status, AgentTaskStatus.READY_TO_DELIVER)
+            self.assertEqual(result.iteration, 2)
+            self.assertEqual(result.error, "")
 
     def test_approved_task_reaches_ready_to_deliver_and_survives_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
