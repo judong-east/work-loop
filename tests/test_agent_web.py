@@ -157,7 +157,7 @@ class AgentWebApiTest(unittest.TestCase):
             windows_sandbox="unelevated",
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
-            "app.web.server.load_codex_cli_profile", return_value=profile
+            "app.agents.runtime_factory.load_codex_cli_profile", return_value=profile
         ) as loader:
             root = Path(tmp)
             (root / "agent-profiles.json").write_text(

@@ -20,7 +20,7 @@ from app.agents.native_harness import (
 )
 from app.agents.plan_graph import ModelBinding
 from app.agents.profiles import load_agent_profiles
-from app.web.server import WorkloopServer
+from app.agents.runtime_factory import default_model_catalog
 
 _EXECUTION_RESULT = {
     "completed_steps": ["写 greeting"],
@@ -691,7 +691,7 @@ class NativeServerWiringTest(unittest.TestCase):
                 "WORKLOOP_NATIVE_EXECUTOR_MODEL": "DeepSeek-V4",
             }
             with patch.dict(os.environ, env):
-                catalog = WorkloopServer._default_model_catalog()
+                catalog = default_model_catalog()
                 models = {m.profile_id: m for m in catalog.list_all()}
                 self.assertTrue(all(m.runtime == "native" for m in models.values()))
                 self.assertEqual(models["executor"].model, "DeepSeek-V4")
