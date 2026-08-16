@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import threading
-from typing import Iterable
 
 from app.agents.contracts import AgentRequest, AgentResult
 
@@ -26,6 +25,12 @@ class AgentRuntime(ABC):
 
 
 class RoleRoutedRuntime(AgentRuntime):
+    """Route by request role, with describe-time pending registration.
+
+    Subclasses override :meth:`_runtime_for` to redirect specific requests
+    (for example by model profile) while the role map stays the fallback.
+    """
+
     def __init__(self, runtimes: dict[str, AgentRuntime]):
         if not runtimes:
             raise ValueError("角色 Runtime 路由不能为空。")
@@ -35,7 +40,7 @@ class RoleRoutedRuntime(AgentRuntime):
         self._lock = threading.Lock()
 
     def invoke(self, request: AgentRequest) -> AgentResult:
-        runtime = self._runtime(request.role)
+        runtime = self._runtime_for(request)
         with self._lock:
             self._pending.pop(request.task_id, None)
             self._active[request.task_id] = runtime
@@ -46,7 +51,7 @@ class RoleRoutedRuntime(AgentRuntime):
                 self._active.pop(request.task_id, None)
 
     def describe(self, request: AgentRequest) -> dict:
-        runtime = self._runtime(request.role)
+        runtime = self._runtime_for(request)
         with self._lock:
             self._pending[request.task_id] = runtime
         try:
@@ -73,61 +78,8 @@ class RoleRoutedRuntime(AgentRuntime):
         except KeyError as error:
             raise ValueError(f"角色 {role} 没有配置 AgentRuntime。") from error
 
-
-class NodeRoutedRuntime(RoleRoutedRuntime):
-    """Role-routed runtime that also honors a per-node override map.
-
-    When an ``AgentRequest`` carries a ``node_id`` present in ``node_runtimes``,
-    that runtime is used for the call; otherwise routing falls back to the
-    role-based map (the ``RoleRoutedRuntime`` behavior). This is the control
-    plane for per-node model/runtime selection: a plan node can target its own
-    runtime (for example a Pi session with a specific model) while the default
-    roles keep their configured runtime. The fallback keeps every role covered.
-    """
-
-    def __init__(
-        self,
-        runtimes: dict[str, AgentRuntime],
-        node_runtimes: dict[str, AgentRuntime] | None = None,
-    ):
-        super().__init__(runtimes)
-        self.node_runtimes: dict[str, AgentRuntime] = dict(node_runtimes or {})
-
-    def invoke(self, request: AgentRequest) -> AgentResult:
-        runtime = self._runtime_for(request)
-        with self._lock:
-            self._pending.pop(request.task_id, None)
-            self._active[request.task_id] = runtime
-        try:
-            return runtime.invoke(request)
-        finally:
-            with self._lock:
-                self._active.pop(request.task_id, None)
-
-    def describe(self, request: AgentRequest) -> dict:
-        runtime = self._runtime_for(request)
-        with self._lock:
-            self._pending[request.task_id] = runtime
-        try:
-            return runtime.describe(request)
-        except Exception:
-            with self._lock:
-                self._pending.pop(request.task_id, None)
-            raise
-
-    def health_check(self) -> dict:
-        result = super().health_check()
-        for node_id, runtime in self.node_runtimes.items():
-            result[f"node:{node_id}"] = runtime.health_check()
-        return result
-
     def _runtime_for(self, request: AgentRequest) -> AgentRuntime:
-        if request.node_id and request.node_id in self.node_runtimes:
-            return self.node_runtimes[request.node_id]
         return self._runtime(request.role)
-
-    def configured_node_ids(self) -> Iterable[str]:
-        return self.node_runtimes.keys()
 
 
 class ProfileRoutedRuntime(RoleRoutedRuntime):
@@ -142,28 +94,6 @@ class ProfileRoutedRuntime(RoleRoutedRuntime):
         if not profile_runtimes:
             raise ValueError("模型 Profile Runtime 路由不能为空。")
         self.profile_runtimes = dict(profile_runtimes)
-
-    def invoke(self, request: AgentRequest) -> AgentResult:
-        runtime = self._runtime_for(request)
-        with self._lock:
-            self._pending.pop(request.task_id, None)
-            self._active[request.task_id] = runtime
-        try:
-            return runtime.invoke(request)
-        finally:
-            with self._lock:
-                self._active.pop(request.task_id, None)
-
-    def describe(self, request: AgentRequest) -> dict:
-        runtime = self._runtime_for(request)
-        with self._lock:
-            self._pending[request.task_id] = runtime
-        try:
-            return runtime.describe(request)
-        except Exception:
-            with self._lock:
-                self._pending.pop(request.task_id, None)
-            raise
 
     def health_check(self) -> dict:
         result = super().health_check()
