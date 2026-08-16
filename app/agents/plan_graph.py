@@ -38,7 +38,7 @@ class ModelBinding:
     def validate(self) -> None:
         if self.profile_id and not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.profile_id):
             raise ValueError("model.profile_id is invalid")
-        if self.runtime and self.runtime not in {"claude_code", "codex_cli", "pi_rpc"}:
+        if self.runtime and self.runtime not in {"claude_code", "codex_cli", "pi_rpc", "native"}:
             raise ValueError("model.runtime is invalid")
         if self.provider and not re.fullmatch(r"[A-Za-z0-9_.-]+", self.provider):
             raise ValueError("model.provider is invalid")

@@ -19,6 +19,7 @@ from app.agents.composition import ExecutionComposer, ModelCatalog, ModelOption
 from app.agents.contracts import AgentAccess, AgentTaskStatus, TaskBudget
 from app.agents.delivery import DeliveryService
 from app.agents.profiles import load_model_catalog, migrate_legacy_profiles
+from app.agents.native_harness import NativeHarnessProfile, NativeHarnessRuntime
 from app.agents.pi_rpc import PiRpcProfile, PiRpcRuntime
 from app.agents.plan_graph import PlanGraph
 from app.agents.runtime import ProfileRoutedRuntime
@@ -967,6 +968,20 @@ class WorkloopServer(ThreadingHTTPServer):
             def build_runtime(option: ModelOption):
                 if option.runtime == "pi_rpc":
                     return pi_runtime(option)
+                if option.runtime == "native":
+                    return NativeHarnessRuntime(
+                        NativeHarnessProfile(
+                            model=option.model,
+                            base_url=option.base_url
+                            or os.environ.get("WORKLOOP_NATIVE_BASE_URL", "").strip(),
+                            api_key_env=option.api_key_env
+                            or os.environ.get("WORKLOOP_NATIVE_API_KEY_ENV", "").strip()
+                            or "WORKLOOP_NATIVE_API_KEY",
+                            provider=option.provider,
+                            thinking=option.thinking,
+                            max_tokens=option.max_tokens,
+                        )
+                    )
                 if option.runtime == "claude_code":
                     return ClaudeCodeRuntime(
                         ClaudeCodeProfile(model=option.model or "sonnet")
@@ -1017,6 +1032,78 @@ class WorkloopServer(ThreadingHTTPServer):
     def _default_model_catalog() -> ModelCatalog:
         planner_model = os.environ.get("WORKLOOP_CLAUDE_MODEL", "sonnet")
         executor_model = os.environ.get("WORKLOOP_CODEX_MODEL", "") or "gpt-5.2-codex"
+        native_base_url = os.environ.get("WORKLOOP_NATIVE_BASE_URL", "").strip()
+        native_model = os.environ.get("WORKLOOP_NATIVE_MODEL", "").strip()
+        if native_base_url and native_model:
+            # A fully CLI-free default stack: with one base URL and one model
+            # (plus a key) every role runs through the in-process harness.
+            api_key_env = (
+                os.environ.get("WORKLOOP_NATIVE_API_KEY_ENV", "").strip()
+                or "WORKLOOP_NATIVE_API_KEY"
+            )
+            native_provider = os.environ.get("WORKLOOP_NATIVE_PROVIDER", "").strip()
+            native_thinking = os.environ.get("WORKLOOP_NATIVE_THINKING", "medium").strip() or "medium"
+            native_max_tokens = int(os.environ.get("WORKLOOP_NATIVE_MAX_TOKENS", "0") or 0)
+            role_models = {
+                "planner": os.environ.get("WORKLOOP_NATIVE_PLANNER_MODEL", "").strip() or native_model,
+                "executor": os.environ.get("WORKLOOP_NATIVE_EXECUTOR_MODEL", "").strip() or native_model,
+                "reviewer": os.environ.get("WORKLOOP_NATIVE_REVIEWER_MODEL", "").strip() or native_model,
+            }
+            return ModelCatalog(
+                [
+                    ModelOption(
+                        profile_id="planner",
+                        label="Planner",
+                        runtime="native",
+                        model=role_models["planner"],
+                        access=AgentAccess.READ_ONLY,
+                        capabilities=["planning", "architecture", "general"],
+                        quality=4,
+                        input_cost_per_million=0.0,
+                        output_cost_per_million=0.0,
+                        provider=native_provider,
+                        thinking=native_thinking,
+                        base_url=native_base_url,
+                        api_key_env=api_key_env,
+                        max_tokens=native_max_tokens,
+                    ),
+                    ModelOption(
+                        profile_id="executor",
+                        label="Executor",
+                        runtime="native",
+                        model=role_models["executor"],
+                        access=AgentAccess.WORKSPACE_WRITE,
+                        capabilities=[
+                            "implementation", "frontend", "backend", "security",
+                            "testing", "migration", "documentation",
+                        ],
+                        quality=4,
+                        input_cost_per_million=0.0,
+                        output_cost_per_million=0.0,
+                        provider=native_provider,
+                        thinking=native_thinking,
+                        base_url=native_base_url,
+                        api_key_env=api_key_env,
+                        max_tokens=native_max_tokens,
+                    ),
+                    ModelOption(
+                        profile_id="reviewer",
+                        label="Reviewer",
+                        runtime="native",
+                        model=role_models["reviewer"],
+                        access=AgentAccess.READ_ONLY,
+                        capabilities=["review", "security", "general"],
+                        quality=4,
+                        input_cost_per_million=0.0,
+                        output_cost_per_million=0.0,
+                        provider=native_provider,
+                        thinking=native_thinking,
+                        base_url=native_base_url,
+                        api_key_env=api_key_env,
+                        max_tokens=native_max_tokens,
+                    ),
+                ]
+            )
         return ModelCatalog(
             [
                 ModelOption(

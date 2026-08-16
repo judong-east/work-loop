@@ -16,9 +16,9 @@ ROLE_RUNTIME = {
     "reviewer": ("claude_code", "read_only"),
 }
 ROLE_RUNTIME_OPTIONS = {
-    "planner": {"claude_code", "pi_rpc"},
-    "executor": {"codex_cli", "pi_rpc"},
-    "reviewer": {"claude_code", "pi_rpc"},
+    "planner": {"claude_code", "pi_rpc", "native"},
+    "executor": {"codex_cli", "pi_rpc", "native"},
+    "reviewer": {"claude_code", "pi_rpc", "native"},
 }
 
 

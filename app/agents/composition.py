@@ -16,7 +16,7 @@ from app.agents.plan_graph import (
 
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _CAPABILITY = re.compile(r"[a-z][a-z0-9_-]{0,63}")
-_RUNTIMES = {"claude_code", "codex_cli", "pi_rpc"}
+_RUNTIMES = {"claude_code", "codex_cli", "pi_rpc", "native"}
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,12 @@ class ModelOption:
     provider: str = ""
     thinking: str = "medium"
     context_window: int = 0
+    # Native-harness endpoint wiring. The API key itself never enters the
+    # catalog: api_key_env names the environment variable (or the variable
+    # points at WORKLOOP_NATIVE_KEY_FILE) that holds it.
+    base_url: str = ""
+    api_key_env: str = ""
+    max_tokens: int = 0
 
     @classmethod
     def from_dict(cls, data: Any) -> "ModelOption":
@@ -64,6 +70,9 @@ class ModelOption:
             ),
             thinking=str(data.get("thinking", "medium")).strip() or "medium",
             context_window=int(data.get("context_window", 0)),
+            base_url=str(data.get("base_url", "")).strip(),
+            api_key_env=str(data.get("api_key_env", "")).strip(),
+            max_tokens=int(data.get("max_tokens", 0)),
         )
         option.validate()
         return option
@@ -83,6 +92,9 @@ class ModelOption:
             "cached_input_cost_per_million": self.cached_input_cost_per_million,
             "thinking": self.thinking,
             "context_window": self.context_window,
+            "base_url": self.base_url,
+            "api_key_env": self.api_key_env,
+            "max_tokens": self.max_tokens,
         }
 
     def validate(self) -> None:
@@ -96,6 +108,14 @@ class ModelOption:
             raise ValueError("claude_code profiles must be read_only")
         if self.runtime == "codex_cli" and self.access is not AgentAccess.WORKSPACE_WRITE:
             raise ValueError("codex_cli profiles must use workspace_write")
+        # native runs both access levels: read tools for read_only, file
+        # mutation for workspace_write, both confined by the harness.
+        if self.base_url and not re.fullmatch(r"https?://[^\s]+", self.base_url):
+            raise ValueError("model base_url must be an http(s) URL")
+        if self.api_key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env):
+            raise ValueError("model api_key_env is invalid")
+        if self.max_tokens < 0:
+            raise ValueError("model max_tokens cannot be negative")
         if len(self.model) > 200:
             raise ValueError("model name must be <= 200 characters")
         if not 1 <= self.quality <= 5:

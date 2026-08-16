@@ -195,6 +195,58 @@ $env:WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR="1"
 Read-only planner and reviewer requests are unaffected. Use `CodexCliRuntime`
 for write nodes when the isolation guarantee matters.
 
+**Native harness runtime** — model entries with `"runtime": "native"` run
+without any CLI subprocess: Workloop itself is the harness (the
+"Model + Harness = Agent" split behind Pi and DeepSeek Harness). It calls an
+OpenAI-compatible chat-completions endpoint directly and runs the tool-calling
+loop in-process, so the model is not constrained by an external harness's tool
+set — it autonomously uses the `read_file` / `list_files` / `search_content` /
+`write_file` / `edit_file` (and, when offered, `run_command`) tools that
+Workloop implements:
+
+```json
+{
+  "profile_id": "deepseek-writer",
+  "label": "DeepSeek writer",
+  "runtime": "native",
+  "provider": "deepseek",
+  "model": "DeepSeek-V4-Flash",
+  "access": "workspace_write",
+  "capabilities": ["implementation", "frontend", "backend", "testing", "general"],
+  "quality": 4,
+  "input_cost_per_million": 0.28,
+  "output_cost_per_million": 0.42,
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key_env": "DEEPSEEK_API_KEY"
+}
+```
+
+- The API key never enters the catalog: `api_key_env` names an environment
+  variable, or `WORKLOOP_NATIVE_KEY_FILE` points at a key file (bare key,
+  `KEY=value`, or JSON).
+- File tools are confined to the task worktree in-process and honor protected
+  paths — stronger isolation than PiRpcRuntime's working-directory-only model.
+- `run_command` is the only tool that can leave the worktree, so it alone
+  carries the `WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR` gate when the project
+  policy denies network; the file tools keep working regardless.
+- Read-only roles get read/list/search only. Sessions persist as JSON message
+  logs under `.workloop-native-sessions/<task>/` and resume on retry or
+  revision; budgets, cancellation, and the event stream behave like the other
+  runtimes.
+- A fully CLI-free default stack needs two environment variables (plus a key):
+
+```powershell
+$env:WORKLOOP_NATIVE_BASE_URL="https://api.deepseek.com/v1"
+$env:WORKLOOP_NATIVE_MODEL="DeepSeek-V4-Flash"
+$env:DEEPSEEK_API_KEY="..."
+python -m app.cli serve --root . --port 8765
+```
+
+Per-role overrides: `WORKLOOP_NATIVE_PLANNER_MODEL`, `_EXECUTOR_MODEL`,
+`_REVIEWER_MODEL`; global tuning: `WORKLOOP_NATIVE_PROVIDER`,
+`WORKLOOP_NATIVE_THINKING`, `WORKLOOP_NATIVE_MAX_TOKENS`. The CLI runtimes
+remain available and can be mixed with native entries per node.
+
 **Per-node model routing** — with both flags set, each plan node's
 `ModelBinding` flows onto its `AgentRequest`, so one Pi runtime can route per
 node — for example Opus for planning, GPT for the backend, Kimi for the UI.

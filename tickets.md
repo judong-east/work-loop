@@ -143,3 +143,15 @@ Work the **frontier**: any ticket whose blockers are all done. For a purely line
 - [x] 任务冻结工作流快照，目录后续修改不改变运行中任务。
 - [x] Web 支持配置、选择和查看任务工作流。
 - [x] 自动推进仍保留澄清、审核返修、策略验证和最终人工交付门禁。
+
+## 用原生 Harness 运行时摆脱终端 CLI
+
+**What to build:** 模型不再经由 Claude Code、Codex CLI 或 Pi 终端子进程执行；Workloop 直接调用 OpenAI 兼容 API 并在进程内运行工具循环（参照 Pi 的极简 harness 与 DeepSeek Harness 的 "Model + Harness = Agent"），模型自主决定工具使用，宿主只提供工具并强制边界。源规格见 `docs/superpowers/specs/2026-08-16-native-harness-runtime.md`。
+
+**Blocked by:** 增加受控工作流配置。
+
+- [x] 进程内工具层：read/list/search/write/edit 受 worktree 限制并遵守保护路径；run_command 单独沿用 unsandboxed 门槛。
+- [x] NativeHarnessRuntime：工具调用循环、结构化输出、会话持久化与恢复、总/空闲超时、轮数上限、取消、usage 汇总。
+- [x] 模型目录 schema v2 增加 base_url / api_key_env / max_tokens；native 可承担只读与写角色，角色与图校验放行。
+- [x] WORKLOOP_NATIVE_* 环境变量一键切换无 CLI 默认栈，密钥不落目录（环境变量或密钥文件）。
+- [x] 24 项新测试覆盖工具边界、门控、会话恢复、取消、健康检查与服务器装配；全量 248 项测试通过。
