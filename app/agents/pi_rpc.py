@@ -20,6 +20,12 @@ from app.agents.contracts import (
     AgentResult,
 )
 from app.agents.runtime import AgentRuntime
+from app.agents.runtime_common import (
+    UNSANDBOXED_OPT_IN,
+    ensure_terminal_event,
+    parse_structured_output,
+    unsandboxed_allowed,
+)
 from app.core.process_tree import ProcessTreeHandle, process_group_options
 
 
@@ -34,13 +40,6 @@ _SAFE_TOOL = re.compile(r"^[a-z][a-z0-9_-]*$")
 # no violation, no diff and no evidence. So a write-access request whose policy
 # denies network is refused unless the operator opts in explicitly, the same way
 # UnsafeDirectCommandSandbox is named and gated for validation.
-_UNSANDBOXED_OPT_IN = "WORKLOOP_ALLOW_UNSANDBOXED_EXECUTOR"
-
-
-def _unsandboxed_allowed() -> bool:
-    return os.environ.get(_UNSANDBOXED_OPT_IN, "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
 
 
 @dataclass(frozen=True)
@@ -90,12 +89,12 @@ class PiRpcRuntime(AgentRuntime):
         if (
             request.access is AgentAccess.WORKSPACE_WRITE
             and not request.policy.network_allowed
-            and not _unsandboxed_allowed()
+            and not unsandboxed_allowed()
         ):
             return self._failure(
                 request,
                 "项目策略拒绝网络访问，但 PiRpcRuntime 无法在操作系统层面隔离写入或"
-                f"网络。要在无沙箱条件下执行，请显式设置 {_UNSANDBOXED_OPT_IN}=1，"
+                f"网络。要在无沙箱条件下执行，请显式设置 {UNSANDBOXED_OPT_IN}=1，"
                 "或改用 CodexCliRuntime 执行写节点。",
                 "sandbox_unavailable",
                 identity,
@@ -141,7 +140,7 @@ class PiRpcRuntime(AgentRuntime):
                 self._active[request.task_id] = (process, tree)
 
             result = self._run_rpc(request, process, tree, identity)
-            return self._ensure_terminal_event(result, request.role)
+            return ensure_terminal_event(result, request.role)
         except FileNotFoundError as error:
             return self._failure(request, f"Pi executable not found: {error}", "environment_missing", identity)
         except OSError as error:
@@ -180,7 +179,7 @@ class PiRpcRuntime(AgentRuntime):
                 # provide: the worktree is a working directory, not a boundary.
                 "sandbox": "none",
                 "network_enforced": False,
-                "unsandboxed_opt_in": _unsandboxed_allowed(),
+                "unsandboxed_opt_in": unsandboxed_allowed(),
             },
         }
 
@@ -311,7 +310,7 @@ class PiRpcRuntime(AgentRuntime):
                 stderr_chunks,
             )
         try:
-            output = _parse_json_object(final_message)
+            output = parse_structured_output(final_message)
         except ValueError as error:
             return self._failure(
                 request,
@@ -512,19 +511,6 @@ class PiRpcRuntime(AgentRuntime):
             tree.close()
 
     @staticmethod
-    def _ensure_terminal_event(result: AgentResult, role: str) -> AgentResult:
-        if any(event.event_type in {AgentEventType.COMPLETED, AgentEventType.FAILED, AgentEventType.CANCELLED} for event in result.events):
-            return result
-        result.events.append(
-            AgentEvent(
-                AgentEventType.COMPLETED if result.succeeded else AgentEventType.FAILED,
-                role,
-                {"reason": result.error_type or "completed"},
-            )
-        )
-        return result
-
-    @staticmethod
     def _failure(
         request: AgentRequest,
         error: str,
@@ -572,24 +558,3 @@ def _message_text(messages: Any) -> str:
             if parts:
                 return "".join(parts)
     return ""
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        candidate = "\n".join(line for line in lines if not line.strip().startswith("```")).strip()
-    try:
-        value = json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("Pi did not return a JSON object") from None
-        try:
-            value = json.loads(candidate[start : end + 1])
-        except json.JSONDecodeError as error:
-            raise ValueError(f"Pi returned invalid JSON: {error}") from error
-    if not isinstance(value, dict):
-        raise ValueError("Pi structured output must be a JSON object")
-    return value

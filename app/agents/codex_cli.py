@@ -26,6 +26,7 @@ from app.agents.contracts import (
     AgentResult,
 )
 from app.agents.runtime import AgentRuntime
+from app.agents.runtime_common import normalize_terminal_event
 from app.core.process_tree import ProcessTreeHandle, process_group_options
 from app.core.redaction import redact, redact_value
 
@@ -164,10 +165,10 @@ class CodexCliRuntime(AgentRuntime):
                 duplicate = None
                 self._pending.add(request.task_id)
         if duplicate is not None:
-            return self._ensure_terminal_event(duplicate, request.role)
+            return normalize_terminal_event(duplicate, request.role)
         try:
             result = self._invoke_pending(request, started)
-            return self._ensure_terminal_event(result, request.role)
+            return normalize_terminal_event(result, request.role)
         finally:
             with self._lock:
                 self._pending.discard(request.task_id)
@@ -795,29 +796,6 @@ class CodexCliRuntime(AgentRuntime):
             return "idle_timeout"
         return ""
 
-    @staticmethod
-    def _ensure_terminal_event(result: AgentResult, role: str) -> AgentResult:
-        if result.succeeded:
-            expected = AgentEventType.COMPLETED
-        elif result.error_type == "user_cancelled":
-            expected = AgentEventType.CANCELLED
-        else:
-            expected = AgentEventType.FAILED
-        terminal_types = {
-            AgentEventType.COMPLETED,
-            AgentEventType.FAILED,
-            AgentEventType.CANCELLED,
-        }
-        matching = [event for event in result.events if event.event_type is expected]
-        result.events = [
-            event for event in result.events if event.event_type not in terminal_types
-        ]
-        result.events.append(
-            matching[-1]
-            if matching
-            else AgentEvent(expected, role, {"reason": result.error_type or "completed"})
-        )
-        return result
 
 
 def _normalize_event(raw: dict, role: str) -> list[AgentEvent]:

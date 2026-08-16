@@ -33,8 +33,12 @@ from app.agents.contracts import (
     AgentResult,
 )
 from app.agents.harness_tools import ToolContext, execute_tool, tools_for
-from app.agents.pi_rpc import _parse_json_object, _unsandboxed_allowed
 from app.agents.runtime import AgentRuntime
+from app.agents.runtime_common import (
+    append_terminal_event,
+    parse_structured_output,
+    unsandboxed_allowed,
+)
 from app.core.atomic_files import write_json_atomic
 
 _THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -197,7 +201,7 @@ class NativeHarnessRuntime(AgentRuntime):
                 # tool alone carries the unsandboxed gate.
                 "files_confined_to_worktree": True,
                 "shell_tool": "allowed" if shell_allowed else "gated",
-                "unsandboxed_opt_in": _unsandboxed_allowed(),
+                "unsandboxed_opt_in": unsandboxed_allowed(),
                 "session_dir": str(self._session_dir(request)),
             },
         }
@@ -372,14 +376,14 @@ class NativeHarnessRuntime(AgentRuntime):
                         identity, events, raw_events, usage_total,
                     )
                 try:
-                    output = _parse_json_object(final_message)
+                    output = parse_structured_output(final_message)
                 except ValueError as error:
                     return AgentResult(
                         succeeded=False,
                         error=str(error),
                         error_type="structured_output_failed",
                         final_message=final_message,
-                        events=self._terminal(events, request.role, False),
+                        events=append_terminal_event(events, request.role, False),
                         raw_events=raw_events,
                         usage=usage_total,
                         runtime="native-harness",
@@ -392,7 +396,7 @@ class NativeHarnessRuntime(AgentRuntime):
                     output=output,
                     session_id=str(session_path),
                     final_message=final_message,
-                    events=self._terminal(events, request.role, True),
+                    events=append_terminal_event(events, request.role, True),
                     raw_events=raw_events,
                     usage=usage_total,
                     runtime="native-harness",
@@ -464,7 +468,7 @@ class NativeHarnessRuntime(AgentRuntime):
         # withheld unless the operator opted in or the policy allows network.
         if request.policy.network_allowed:
             return True
-        return _unsandboxed_allowed()
+        return unsandboxed_allowed()
 
     def _base_url(self) -> str:
         return self.profile.base_url.strip() or os.environ.get("WORKLOOP_NATIVE_BASE_URL", "").strip()
@@ -552,17 +556,6 @@ class NativeHarnessRuntime(AgentRuntime):
         details = usage.get("prompt_tokens_details")
         if isinstance(details, dict):
             total["cached_input_tokens"] += count(details.get("cached_tokens"))
-
-    @staticmethod
-    def _terminal(events: list[AgentEvent], role: str, succeeded: bool) -> list[AgentEvent]:
-        events.append(
-            AgentEvent(
-                AgentEventType.COMPLETED if succeeded else AgentEventType.FAILED,
-                role,
-                {"reason": "completed" if succeeded else "failed"},
-            )
-        )
-        return events
 
     @staticmethod
     def _cancelled(
