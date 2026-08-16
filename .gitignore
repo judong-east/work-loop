@@ -5,3 +5,6 @@ tasks/
 .selfhost-data/
 .selfhost-runtime/
 .preview_server.py
+
+# runtime queue state (workflows.json stays tracked)
+agent-runtime/queue/

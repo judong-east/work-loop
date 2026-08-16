@@ -1,3 +1,7 @@
+"""Legacy models.json reader kept only for the one-time console migration to
+agent-profiles.json (profiles.migrate_legacy_profiles). Remove this package
+together with the migration endpoint once no operator still needs it."""
+
 from __future__ import annotations
 
 import json
@@ -10,8 +14,7 @@ def load_routing_config(path: Path) -> ModelRoutingConfig:
     config_path = Path(path)
     if not config_path.is_file():
         raise FileNotFoundError(
-            f"模型配置文件 {config_path} 不存在。离线试跑可用 models_smoke.json，"
-            "真实模型请参照 README 创建 models.json。"
+            f"模型配置文件 {config_path} 不存在。真实模型请参照 README 创建 models.json。"
         )
     data = json.loads(config_path.read_text(encoding="utf-8"))
 

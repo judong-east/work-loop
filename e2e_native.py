@@ -13,55 +13,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import tempfile
-import urllib.request
 from pathlib import Path
+
+from configure_pi_provider import DEFAULT_KEY_FILE, probe_models, read_key
 
 from app.agents.contracts import AgentAccess, AgentBudget, AgentPolicy, AgentRequest
 from app.agents.native_harness import NativeHarnessProfile, NativeHarnessRuntime
 
-DEFAULT_KEY_FILE = Path(r"C:\Users\23393\Desktop\密钥.txt")
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
-
-
-def read_key() -> str:
-    env = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if env:
-        return env
-    raw = DEFAULT_KEY_FILE.read_text(encoding="utf-8", errors="replace").strip()
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            for name in ("apiKey", "api_key", "key", "token", "DEEPSEEK_API_KEY"):
-                if isinstance(data.get(name), str) and data[name].strip():
-                    return data[name].strip()
-    except json.JSONDecodeError:
-        pass
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line and not line.startswith("sk-"):
-            line = line.split("=", 1)[1]
-        return line.strip().strip("\"'")
-    raise SystemExit("FATAL: no key found")
-
-
-def probe_models(base_url: str, key: str) -> list[str]:
-    request = urllib.request.Request(
-        base_url.rstrip("/") + "/models",
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    return [
-        str(item.get("id"))
-        for item in payload.get("data", [])
-        if isinstance(item, dict) and item.get("id")
-    ]
 
 
 def main() -> int:
@@ -70,9 +32,13 @@ def main() -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     args = parser.parse_args()
 
-    key = read_key()
+    key = read_key(DEFAULT_KEY_FILE)
     print("endpoint:", args.base_url)
-    model_ids = probe_models(args.base_url, key)
+    model_ids = [
+        str(item.get("id"))
+        for item in probe_models(args.base_url, key)
+        if isinstance(item, dict) and item.get("id")
+    ]
     print("served models:", ", ".join(model_ids))
     lowered = {item.lower(): item for item in model_ids}
     squashed = re.sub(r"[^a-z0-9]", "", args.model.lower())
