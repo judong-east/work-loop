@@ -217,7 +217,7 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             {item["workflow_id"] for item in workflows},
-            {"guarded", "autopilot"},
+            {"guarded", "quick"},
         )
 
         status, saved = self.request(
@@ -263,6 +263,7 @@ class AgentWebApiTest(unittest.TestCase):
                 "title": "Web task",
                 "requirement": "Create result.txt",
                 "project_id": project["project_id"],
+                "workflow_id": "guarded",
             },
         )
         self.assertEqual(status, 202)
@@ -303,9 +304,13 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual(detail["rounds"][0]["validation"]["passed"], True)
         self.assertEqual(detail["rounds"][0]["review"]["verdict"], "pass")
         self.assertTrue(detail["runs"][0]["events"] == [] or isinstance(detail["runs"], list))
+        self.assertEqual(detail["task_events"][0]["type"], "task_created")
+        self.assertEqual(
+            [event["type"] for event in detail["task_events"]][-1], "task_changed"
+        )
         self.assertEqual(
             [item["id"] for item in detail["actions"]],
-            ["prepare_delivery"],
+            ["deliver"],
         )
 
         status, prepared = self.request(
@@ -364,6 +369,7 @@ class AgentWebApiTest(unittest.TestCase):
                 "title": "Plain directory task",
                 "requirement": "Create result.txt",
                 "project_id": project["project_id"],
+                "workflow_id": "guarded",
             },
         )
         self.assertEqual(status, 202)
@@ -426,6 +432,7 @@ class AgentWebApiTest(unittest.TestCase):
                 "title": "Clarify task",
                 "requirement": "Create result.txt",
                 "project_id": project["project_id"],
+                "workflow_id": "guarded",
             },
         )
         task_id = task["task_id"]
@@ -435,7 +442,7 @@ class AgentWebApiTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in analyzed["actions"]], ["clarify"])
         self.assertEqual(
             analyzed["actions"][0]["description"],
-            "结果文件应使用哪种换行符？",
+            "计划提出 1 个待澄清问题",
         )
 
         status, error = self.request(

@@ -5,18 +5,19 @@ and reviewer roles, gives Codex CLI the executor role, and keeps Git isolation,
 validation evidence, recovery, review loops, and delivery gates under host
 control.
 
-Workloop executes controlled workflow definitions. The built-in `guarded`
-workflow is:
+Workloop executes controlled workflow definitions. The default built-in `quick`
+workflow keeps a single human gate:
 
 ```text
-request -> Claude plan -> human approval -> Codex execute
+request -> Claude plan -> Codex execute
         -> deterministic validation -> independent Claude review
-        -> delivery report -> human-confirmed Git delivery
+        -> one-click human-confirmed Git delivery
 ```
 
-The built-in `autopilot` workflow removes only the plan approval gate: a plan
-without open questions proceeds directly to Codex. Git delivery always requires
-explicit human confirmation. Custom workflows may add role-specific
+A plan without open questions proceeds directly to the executor; confirming
+delivery generates the delivery report and merges in the same step. The built-in
+`guarded` workflow adds a plan-approval gate after the planner. The legacy id
+`autopilot` still resolves to `quick`. Custom workflows may add role-specific
 instructions, may include or omit the plan approval node, and may reorder or
 repeat executor, validation, and reviewer nodes. The host keeps role access,
 validation commands, review outcomes, and delivery authority fixed.
@@ -53,9 +54,11 @@ commands = [
 redact_patterns = ["API_KEY=*"]
 ```
 
-Plans may select only named validation commands from this file. The first
-version always denies agent network access and pauses when broader authority is
-required.
+Plans may select only named validation commands from this file. `network`
+defaults to `"deny"`; setting it to `"allow"` in the versioned policy is the
+explicit per-project authorization for executor and validation commands to
+reach the network (dependency installs, online test fixtures). Sandbox health
+canaries run once per validation window instead of once per command.
 
 ## Run
 
@@ -72,15 +75,23 @@ The task console supports:
 - an in-app project-directory browser for projects on any local drive;
 - ordinary-directory projects backed by an isolated managed snapshot, with
   confirmed delivery writing only task changes back to the source directory;
-- structured plan review and clarification;
-- per-task workflow selection and immutable workflow snapshots;
+- structured plan review with batch clarification (all open questions in one
+  submission);
+- per-task workflow selection with `quick` as the default preset;
 - controlled custom workflows with planner, executor, and reviewer instructions;
 - a visual task-graph canvas for dragging nodes, editing dependencies, and
   persisting operator-defined layouts before plan approval;
-- persistent FIFO scheduling with one local agent slot;
+- persistent FIFO scheduling with `WORKLOOP_SLOTS` parallel execution slots
+  (default 1);
+- an append-only per-task event log (`logs/events.jsonl`) streamed live to the
+  console over SSE (`/api/agent/tasks/{id}/events`), so progress shows within a
+  second instead of the 4-second poll;
 - normalized Claude/Codex events, sessions, budgets, and runtime health;
 - worktree diffs, policy evidence, deterministic validation, and review issues;
+- review pass verdicts whose acceptance drifts from the approved plan degrade
+  to a revision round instead of failing the task;
 - interrupted-stage recovery, rerun, cancellation, and budget adjustment;
+- one-click delivery: the report is generated inside the confirmed call;
 - auditable task commits, target-branch reintegration, and confirmed delivery;
 - read-only display of `legacy-v1` tasks and their surviving artifacts.
 
@@ -196,14 +207,29 @@ $env:WORKLOOP_EXECUTION="graph"; $env:WORKLOOP_RUNTIME="pi_rpc"
 python -m app.cli serve --root . --port 8765
 ```
 
+## Parallel Slots
+
+`WORKLOOP_SLOTS`（默认 1，上限 8）controls how many tasks execute at the same
+time. Every task owns its isolated Git worktree, so distinct tasks are safe to
+run in parallel; one task still occupies exactly one slot for the whole stage,
+and deliveries into the same target repository are serialized by the host.
+Set it before starting the server:
+
+```powershell
+$env:WORKLOOP_SLOTS="3"
+python -m app.cli serve --root . --port 8765
+```
+
 ## Legacy Workflow
 
-The former `create-task`, `run-loop`, `resume`, `deliver`, and `memory` CLI
-commands are disabled. Legacy Web write endpoints return `410 Gone`; arbitrary
-CLI command templates can no longer obtain executor access. Existing
-`tasks/<id>/state.json` records remain available through the read-only history
-view. Missing, malformed, absolute, or escaping artifact references are shown
-as local unavailable items rather than failing the entire task detail.
+The legacy-v1 kernel (old `WorkloopKernel`, its model backends, decision and
+evaluation modules) has been removed from the codebase. The former
+`create-task`, `run-loop`, `resume`, `deliver`, and `memory` CLI commands exit
+with an explanation, legacy Web write endpoints return `410 Gone`, and the old
+`/api/tasks`/`/api/models`/`/api/workflow`/`/api/memory` endpoints are gone.
+Existing `tasks/<id>/state.json` records remain readable through the read-only
+history view (`/api/agent/history`), including local-unavailable markers for
+missing or escaping artifact references.
 
 ## Tests
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -89,14 +90,32 @@ class AgentQueueStore:
 
 
 class PersistentAgentScheduler:
-    """Persistent FIFO scheduler with one local execution slot."""
+    """Persistent FIFO scheduler with a configurable number of local slots.
 
-    def __init__(self, workflow: AgentWorkflow):
+    Each task owns its isolated Git worktree, so distinct tasks may execute in
+    parallel up to `slots` (WORKLOOP_SLOTS, default 1). One task still occupies
+    exactly one slot for the whole stage dispatch; the queue never lets the
+    same task run twice concurrently.
+    """
+
+    MAX_SLOTS = 8
+
+    def __init__(self, workflow: AgentWorkflow, slots: int | None = None):
         self.workflow = workflow
         self.store = AgentQueueStore(workflow.root / "queue")
         self._state_lock = threading.RLock()
-        self._execution_slot = threading.Lock()
+        self.slots = self._resolve_slots(slots)
+        self._execution_slots = threading.Semaphore(self.slots)
         self.scan_startup()
+
+    @classmethod
+    def _resolve_slots(cls, slots: int | None) -> int:
+        raw = str(slots if slots is not None else os.environ.get("WORKLOOP_SLOTS", "1"))
+        try:
+            parsed = int(raw.strip())
+        except (TypeError, ValueError):
+            parsed = 1
+        return max(1, min(parsed, cls.MAX_SLOTS))
 
     def enqueue_analysis(self, task_id: str) -> QueueEntry:
         return self._enqueue(
@@ -120,6 +139,21 @@ class PersistentAgentScheduler:
     def answer_clarification(self, task_id: str, answer: str) -> QueueEntry:
         with self._state_lock:
             self.workflow.record_clarification(task_id, answer)
+            return self._enqueue(
+                task_id,
+                QueueOperation.ANALYZE,
+                AgentTaskStatus.WAITING_FOR_PLAN_APPROVAL,
+                AgentTaskStatus.QUEUED_FOR_ANALYSIS,
+            )
+
+    def answer_clarifications(
+        self,
+        task_id: str,
+        questions: list[dict],
+        answers: list[str],
+    ) -> QueueEntry:
+        with self._state_lock:
+            self.workflow.record_clarifications(task_id, questions, answers)
             return self._enqueue(
                 task_id,
                 QueueOperation.ANALYZE,
@@ -186,12 +220,17 @@ class PersistentAgentScheduler:
         return self._entries_with_status(QueueEntryStatus.PAUSED)
 
     def run_next(self) -> AgentTask | None:
-        if not self._execution_slot.acquire(blocking=False):
+        if not self._execution_slots.acquire(blocking=False):
             return None
         try:
             with self._state_lock:
                 state = self.store.load()
-                if any(entry.status is QueueEntryStatus.RUNNING for entry in state.entries):
+                running = sum(
+                    1
+                    for entry in state.entries
+                    if entry.status is QueueEntryStatus.RUNNING
+                )
+                if running >= self.slots:
                     return None
                 queued = sorted(
                     (
@@ -238,7 +277,7 @@ class PersistentAgentScheduler:
                     latest = self.workflow.get_task(entry.task_id)
                 return latest
         finally:
-            self._execution_slot.release()
+            self._execution_slots.release()
 
     def terminate(self, task_id: str) -> AgentTask:
         task = self.workflow.cancel_task(task_id)

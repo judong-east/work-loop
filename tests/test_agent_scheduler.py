@@ -349,8 +349,12 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 }
             )
             workflow, project_id = create_workflow(root, runtime)
-            first = workflow.create_task("First", "First task", project_id)
-            second = workflow.create_task("Second", "Second task", project_id)
+            first = workflow.create_task(
+                "First", "First task", project_id, workflow_id="guarded"
+            )
+            second = workflow.create_task(
+                "Second", "Second task", project_id, workflow_id="guarded"
+            )
             scheduler = PersistentAgentScheduler(workflow)
 
             first_entry = scheduler.enqueue_analysis(first.task_id)
@@ -392,8 +396,12 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             root = Path(tmp)
             runtime = BlockingPlannerRuntime()
             workflow, project_id = create_workflow(root, runtime)
-            first = workflow.create_task("First", "First task", project_id)
-            second = workflow.create_task("Second", "Second task", project_id)
+            first = workflow.create_task(
+                "First", "First task", project_id, workflow_id="guarded"
+            )
+            second = workflow.create_task(
+                "Second", "Second task", project_id, workflow_id="guarded"
+            )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(first.task_id)
             scheduler.enqueue_analysis(second.task_id)
@@ -494,7 +502,9 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             crashing_workflow, project_id = create_workflow(root, CrashRuntime())
-            task = crashing_workflow.create_task("Crash", "Resume me", project_id)
+            task = crashing_workflow.create_task(
+                "Crash", "Resume me", project_id, workflow_id="guarded"
+            )
             task.sessions["planner"] = "planner-before-crash"
             crashing_workflow.store.save(task)
             crashing_scheduler = PersistentAgentScheduler(crashing_workflow)
@@ -541,7 +551,9 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             crashing_workflow, project_id = create_workflow(root, CrashRuntime())
-            task = crashing_workflow.create_task("Crash", "Rerun me", project_id)
+            task = crashing_workflow.create_task(
+                "Crash", "Rerun me", project_id, workflow_id="guarded"
+            )
             task.sessions.update(
                 {
                     "planner": "old-planner-session",
@@ -628,6 +640,7 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 "Stop after one round",
                 second_project,
                 budget=TaskBudget(max_iterations=1),
+                workflow_id="guarded",
             )
             second_scheduler = PersistentAgentScheduler(second_workflow)
             second_scheduler.enqueue_analysis(second.task_id)
@@ -663,7 +676,9 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             idle_workflow, project_id = create_workflow(root, IdleTimeoutPlannerRuntime())
-            idle_task = idle_workflow.create_task("Idle", "Stop on idle", project_id)
+            idle_task = idle_workflow.create_task(
+                "Idle", "Stop on idle", project_id, workflow_id="guarded"
+            )
             idle_scheduler = PersistentAgentScheduler(idle_workflow)
             idle_scheduler.enqueue_analysis(idle_task.task_id)
 
@@ -722,7 +737,9 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             )
             crashing = CrashOnRoleRuntime(first_runtime, "executor")
             workflow, project_id = create_workflow(root, crashing)
-            task = workflow.create_task("Execution crash", "Resume execution", project_id)
+            task = workflow.create_task(
+                "Execution crash", "Resume execution", project_id, workflow_id="guarded"
+            )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(task.task_id)
             scheduler.run_next()
@@ -1050,7 +1067,12 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                 CrashValidator(),
             )
             project = workflow.register_project("Validation crash", repository, "main")
-            task = workflow.create_task("Validation crash", "Resume validation", project.project_id)
+            task = workflow.create_task(
+                "Validation crash",
+                "Resume validation",
+                project.project_id,
+                workflow_id="guarded",
+            )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(task.task_id)
             scheduler.run_next()
@@ -1130,6 +1152,7 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
                     call_timeout_seconds=1,
                     idle_timeout_seconds=1,
                 ),
+                workflow_id="guarded",
             )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(task.task_id)
@@ -1188,7 +1211,9 @@ class PersistentAgentSchedulerTest(unittest.TestCase):
             )
             crashing = CrashOnRoleRuntime(delegate, "reviewer")
             workflow, project_id = create_workflow(root, crashing)
-            task = workflow.create_task("Review crash", "Resume review", project_id)
+            task = workflow.create_task(
+                "Review crash", "Resume review", project_id, workflow_id="guarded"
+            )
             scheduler = PersistentAgentScheduler(workflow)
             scheduler.enqueue_analysis(task.task_id)
             scheduler.run_next()
