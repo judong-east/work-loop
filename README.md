@@ -144,11 +144,9 @@ settings are not loaded into executor tasks.
 
 ## Plan Graph Execution & Per-Node Models
 
-Two opt-in flags extend the execution model. Both default off, so the proven
-single-executor loop runs unchanged when neither is set.
-
-**Graph execution** — `WORKLOOP_EXECUTION=graph` makes plan approval drive the
-task's `PlanGraph` instead of a single executor call. Each `IMPLEMENTATION` and
+New tasks execute their composed `PlanGraph` by default (the former
+`WORKLOOP_EXECUTION` opt-in no longer exists). Plan approval drives the graph
+instead of a single executor call, and each `IMPLEMENTATION` and
 `INTEGRATION` node runs in topological order on the shared task worktree:
 
 - a node carries a `ModelBinding` (`provider` / `model` / `thinking`) and an
@@ -173,12 +171,12 @@ are deterministic per `(task_id, node_id)` and resume-safe; a crashed run's
 stale worktree is pruned on the next attempt. Default off keeps the shared
 single-worktree behavior.
 
-**Pi runtime** — `WORKLOOP_RUNTIME=pi_rpc` swaps every role to `PiRpcRuntime`
-(`@earendil-works/pi-coding-agent`, JSONL RPC over stdio), which honors a
-per-request `--model` / `--provider` / `--thinking`. Install and authenticate
-the `pi` binary first. Per-role model overrides come from
-`WORKLOOP_PI_PLANNER_MODEL`, `WORKLOOP_PI_EXECUTOR_MODEL`, and
-`WORKLOOP_PI_REVIEWER_MODEL`.
+**Pi runtime** — model-catalog entries with `"runtime": "pi_rpc"` run through
+`PiRpcRuntime` (`@earendil-works/pi-coding-agent`, JSONL RPC over stdio), which
+honors a per-request `--model` / `--provider` / `--thinking`. Install and
+authenticate the `pi` binary first; `WORKLOOP_PI_COMMAND`,
+`WORKLOOP_PI_PROVIDER`, and `WORKLOOP_PI_CONFIG_DIR` adjust the launch and
+config location.
 
 Pi is launched with a working directory and a tool allow-list only — unlike
 Codex it gets no OS sandbox, so its `bash`/`write`/`edit` tools can reach any
@@ -247,15 +245,17 @@ Per-role overrides: `WORKLOOP_NATIVE_PLANNER_MODEL`, `_EXECUTOR_MODEL`,
 `WORKLOOP_NATIVE_THINKING`, `WORKLOOP_NATIVE_MAX_TOKENS`. The CLI runtimes
 remain available and can be mixed with native entries per node.
 
-**Per-node model routing** — with both flags set, each plan node's
-`ModelBinding` flows onto its `AgentRequest`, so one Pi runtime can route per
-node — for example Opus for planning, GPT for the backend, Kimi for the UI.
-Routing is by model, not by harness: every node still runs through the same
-role runtime. Only the Pi runtime honors per-node model fields; the default
-Claude and Codex runtimes ignore them, so the feature is a no-op there.
+**Per-node model routing** — each plan node's `ModelBinding` flows onto its
+`AgentRequest`, so one runtime family can route per node — for example Opus
+for planning, GPT for the backend, Kimi for the UI. Routing is by model, not
+by harness: every node still runs through the runtime its model profile
+selects. The Pi and native runtimes honor per-node model fields; the Claude
+and Codex runtimes ignore them, so the feature is a no-op there.
+
+Per-node worktrees stay opt-in:
 
 ```powershell
-$env:WORKLOOP_EXECUTION="graph"; $env:WORKLOOP_RUNTIME="pi_rpc"
+$env:WORKLOOP_NODE_WORKTREE="1"
 python -m app.cli serve --root . --port 8765
 ```
 

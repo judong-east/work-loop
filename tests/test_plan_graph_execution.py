@@ -191,36 +191,17 @@ class NodeScriptedFakeRuntime(AgentRuntime):
 
 
 @contextmanager
-def graph_execution_env():
-    prior = os.environ.get("WORKLOOP_EXECUTION")
-    os.environ["WORKLOOP_EXECUTION"] = "graph"
-    try:
-        yield
-    finally:
-        if prior is None:
-            os.environ.pop("WORKLOOP_EXECUTION", None)
-        else:
-            os.environ["WORKLOOP_EXECUTION"] = prior
-
-
-@contextmanager
 def node_worktree_env():
-    """Enable graph execution AND per-node isolated worktrees."""
-    prior_exec = os.environ.get("WORKLOOP_EXECUTION")
+    """Enable per-node isolated worktrees."""
     prior_node = os.environ.get("WORKLOOP_NODE_WORKTREE")
-    os.environ["WORKLOOP_EXECUTION"] = "graph"
     os.environ["WORKLOOP_NODE_WORKTREE"] = "1"
     try:
         yield
     finally:
-        for key, prior in (
-            ("WORKLOOP_EXECUTION", prior_exec),
-            ("WORKLOOP_NODE_WORKTREE", prior_node),
-        ):
-            if prior is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prior
+        if prior_node is None:
+            os.environ.pop("WORKLOOP_NODE_WORKTREE", None)
+        else:
+            os.environ["WORKLOOP_NODE_WORKTREE"] = prior_node
 
 
 def project_workflow(root: Path, runtime: AgentRuntime, validator=PassingValidator()):
@@ -365,7 +346,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertEqual(completed.node_runs["step-1"]["session_id"], "node-session")
 
     def test_read_only_custom_node_is_executed_and_handed_to_writer(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -423,7 +404,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             )
 
     def test_linear_graph_executes_per_node_and_delivers(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -463,7 +444,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertEqual(execution["completed_steps"], ["写入 result.txt"])
 
     def test_multi_node_graph_runs_in_topological_order_with_context_handoff(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -521,7 +502,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertEqual(completed.node_runs["ui"]["status"], "completed")
 
     def test_resume_retries_failed_node_and_skips_completed_nodes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             # First pass: backend succeeds, ui fails (human pause).
             runtime_a = NodeScriptedFakeRuntime(
@@ -593,7 +574,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             )
 
     def test_node_failure_with_human_policy_pauses(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -623,7 +604,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
             self.assertIn("boom", result.node_runs["step-1"]["error"])
 
     def test_node_failure_with_skip_policy_continues_to_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -655,7 +636,7 @@ class PlanGraphExecutionTest(unittest.TestCase):
         # reaches the runtime on the AgentRequest, so a single Pi runtime can
         # route per node (Opus-planning / GPT-execution / Kimi-ui) without a
         # separate runtime per node. This locks the wiring end-to-end.
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -931,7 +912,7 @@ class NodeWorktreeExecutionTest(unittest.TestCase):
     def test_graph_without_node_worktree_flag_uses_shared_worktree(self) -> None:
         # Graph mode ON but WORKLOOP_NODE_WORKTREE unset: nodes run in the
         # shared task worktree (regression guard for the per-node path).
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             os.environ.pop("WORKLOOP_NODE_WORKTREE", None)
             runtime = NodeScriptedFakeRuntime(
@@ -1003,7 +984,7 @@ class GraphRevisionRoundTest(unittest.TestCase):
     it paused on max_iterations — with per-round artifacts that looked normal."""
 
     def test_revise_code_reruns_write_nodes_with_reviewer_feedback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -1056,7 +1037,7 @@ class GraphRevisionRoundTest(unittest.TestCase):
     def test_first_round_has_no_review_feedback_block(self) -> None:
         """The feedback block is only added on a revision round, so a first-round
         node prompt stays exactly what it was."""
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -1107,7 +1088,7 @@ class OutputRepairTest(unittest.TestCase):
         return workflow, task
 
     def test_executor_invalid_then_valid_self_repairs_and_delivers(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -1143,7 +1124,7 @@ class OutputRepairTest(unittest.TestCase):
             self.assertIn("解析错误", executor_reqs[1].instructions)
 
     def test_executor_repair_still_invalid_fails_bounded(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -1176,7 +1157,7 @@ class OutputRepairTest(unittest.TestCase):
             self.assertEqual(len([r for r in runtime.requests if r.role == "executor"]), 2)
 
     def test_reviewer_invalid_then_valid_self_repairs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
@@ -1203,7 +1184,7 @@ class OutputRepairTest(unittest.TestCase):
             self.assertIn("解析错误", review_reqs[1].instructions)
 
     def test_reviewer_repair_still_invalid_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, graph_execution_env():
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = NodeScriptedFakeRuntime(
                 {
