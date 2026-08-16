@@ -22,7 +22,7 @@ WORKER_ROLE = "worker"
 def execution_plan_schema() -> dict[str, Any]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -52,7 +52,7 @@ def execution_plan_schema() -> dict[str, Any]:
 
 def review_result_schema() -> dict[str, Any]:
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "additionalProperties": False,
         "required": ["verdict", "acceptance", "issues", "recommended_tests", "summary"],
@@ -108,7 +108,7 @@ def review_result_schema() -> dict[str, Any]:
 def execution_result_schema() -> dict[str, Any]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -421,9 +421,15 @@ class ClaudeProtocolState:
                 error_type="structured_output_failed",
             )
         if self.terminal_count != 1:
+            detail = f"Claude stream-json 必须恰好包含一个 result，实际为 {self.terminal_count}。"
+            # A CLI that rejects its arguments dies before emitting any event
+            # and only speaks on stderr; surface that instead of a bare count.
+            stderr_excerpt = stderr.strip()
+            if stderr_excerpt:
+                detail += f" stderr：{stderr_excerpt[:300]}"
             return self._terminal_result(
                 succeeded=False,
-                error=f"Claude stream-json 必须恰好包含一个 result，实际为 {self.terminal_count}。",
+                error=detail,
                 error_type="structured_output_failed",
             )
         if not self.session_id:
