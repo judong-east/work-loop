@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.projects.contracts import Project
+from app.projects.git_process import run_git
 
 
 @dataclass
@@ -200,23 +200,16 @@ class GitWorktreeService:
 
     def _git(self, repository: Path, *args: str) -> str:
         trusted_repository = Path(repository).resolve()
-        try:
-            result = subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    f"safe.directory={trusted_repository}",
-                    "-C",
-                    str(trusted_repository),
-                    *args,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-        except OSError as error:
-            raise ValueError(f"无法启动 Git：{error}") from error
+        result = run_git(
+            [
+                "git",
+                "-c",
+                f"safe.directory={trusted_repository}",
+                "-C",
+                str(trusted_repository),
+                *args,
+            ]
+        )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise ValueError(f"Git 命令失败（{' '.join(args)}）：{detail}")

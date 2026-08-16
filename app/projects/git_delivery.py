@@ -7,6 +7,8 @@ import subprocess
 import tarfile
 from pathlib import Path, PurePosixPath
 
+from app.projects.git_process import run_git
+
 
 class GitDelivery:
     def head(self, repository: Path, reference: str = "HEAD") -> str:
@@ -55,10 +57,9 @@ class GitDelivery:
         return sorted(path for path in output.split("\0") if path)
 
     def snapshot(self, repository: Path, commit: str) -> dict[str, str]:
-        result = subprocess.run(
+        result = run_git(
             ["git", "-C", str(repository), "archive", "--format=tar", commit],
-            check=False,
-            capture_output=True,
+            text=False,
         )
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", errors="replace").strip()
@@ -115,24 +116,17 @@ class GitDelivery:
 
     @staticmethod
     def _run(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    f"core.hooksPath={os.devnull}",
-                    "-c",
-                    "core.longpaths=true",
-                    "-c",
-                    f"safe.directory={repository.resolve()}",
-                    "-C",
-                    str(repository),
-                    *args,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-        except OSError as error:
-            raise ValueError(f"无法启动 Git：{error}") from error
+        return run_git(
+            [
+                "git",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "-c",
+                "core.longpaths=true",
+                "-c",
+                f"safe.directory={repository.resolve()}",
+                "-C",
+                str(repository),
+                *args,
+            ]
+        )

@@ -7,6 +7,9 @@ import threading
 from pathlib import Path
 
 
+WINDOWS_TERMINATION_TIMEOUT_SECONDS = 1
+
+
 def process_group_options() -> dict[str, object]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -18,12 +21,16 @@ class ProcessTreeHandle:
         self.process = process
         self.windows_job = _WindowsJob.attach(process) if os.name == "nt" else None
         self._lock = threading.Lock()
+        self._terminated = False
 
     def terminate(self) -> None:
+        with self._lock:
+            if getattr(self, "_terminated", False):
+                return
+            self._terminated = True
+            windows_job = self.windows_job
+            self.windows_job = None
         if os.name == "nt":
-            with self._lock:
-                windows_job = self.windows_job
-                self.windows_job = None
             if windows_job is not None:
                 windows_job.close()
                 return
@@ -34,7 +41,7 @@ class ProcessTreeHandle:
                     [str(taskkill), "/PID", str(self.process.pid), "/T", "/F"],
                     check=False,
                     capture_output=True,
-                    timeout=10,
+                    timeout=WINDOWS_TERMINATION_TIMEOUT_SECONDS,
                 )
                 if result.returncode != 0:
                     self.process.kill()
@@ -51,6 +58,7 @@ class ProcessTreeHandle:
 
     def close(self) -> None:
         with self._lock:
+            self._terminated = True
             windows_job = self.windows_job
             self.windows_job = None
         if windows_job is not None:
@@ -60,6 +68,7 @@ class ProcessTreeHandle:
 class _WindowsJob:
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    TERMINATION_WAIT_MILLISECONDS = 1000
 
     def __init__(self, handle: int):
         self.handle = handle
@@ -133,7 +142,7 @@ class _WindowsJob:
                 kernel32.CloseHandle(handle)
                 return None
             return cls(int(handle))
-        except (AttributeError, OSError):
+        except (AttributeError, OSError, TypeError):
             return None
 
     def close(self) -> None:
@@ -146,5 +155,13 @@ class _WindowsJob:
         from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle(wintypes.HANDLE(handle))
+        native_handle = wintypes.HANDLE(handle)
+        # KILL_ON_JOB_CLOSE is asynchronous. Explicit termination followed by
+        # a bounded wait prevents short-lived descendants from retaining a
+        # workspace directory after the parent command has returned.
+        kernel32.TerminateJobObject(native_handle, 1)
+        kernel32.WaitForSingleObject(native_handle, self.TERMINATION_WAIT_MILLISECONDS)
+        kernel32.CloseHandle(native_handle)

@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 from app.projects.contracts import Project
 from app.projects.git_delivery import GitDelivery
+from app.projects.git_process import run_git
 
 
 def _default_policy() -> str:
@@ -211,7 +212,7 @@ class DirectoryProjectService:
 
     @staticmethod
     def _run(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
+        result = run_git(
             [
                 "git",
                 "-c",
@@ -224,10 +225,6 @@ class DirectoryProjectService:
                 str(repository),
                 *args,
             ],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()

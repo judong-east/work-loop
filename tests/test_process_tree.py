@@ -63,6 +63,22 @@ class ProcessTreeHandleTest(unittest.TestCase):
         job.close.assert_called_once_with()
         self.assertIsNone(handle.windows_job)
 
+    def test_windows_fallback_termination_is_bounded_and_idempotent(self) -> None:
+        handle = ProcessTreeHandle.__new__(ProcessTreeHandle)
+        handle.process = Mock(pid=1234)
+        handle.windows_job = None
+        handle._lock = threading.Lock()
+
+        with patch("app.core.process_tree.os.name", "nt"), patch(
+            "app.core.process_tree.subprocess.run",
+            return_value=Mock(returncode=0),
+        ) as run:
+            handle.terminate()
+            handle.terminate()
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["timeout"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

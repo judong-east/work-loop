@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,12 +51,15 @@ class PartialDirectoryPrepareService(GitWorktreeService):
 class ProjectWorktreeTest(unittest.TestCase):
     def test_git_commands_trust_only_the_registered_repository(self) -> None:
         repository = Path("relative-repository").resolve()
-        completed = Mock(returncode=0, stdout="ok\n", stderr="")
+        process = Mock(returncode=0)
+        process.communicate.return_value = ("ok\n", "")
 
         with patch(
-            "app.projects.git_worktree.subprocess.run",
-            return_value=completed,
-        ) as run:
+            "app.projects.git_process.subprocess.Popen",
+            return_value=process,
+        ) as run, patch(
+            "app.projects.git_process.git_executable", return_value="git"
+        ):
             output = GitWorktreeService()._git(repository, "rev-parse", "HEAD")
 
         self.assertEqual(output, "ok")
@@ -71,6 +75,22 @@ class ProjectWorktreeTest(unittest.TestCase):
                 "HEAD",
             ],
         )
+
+    def test_git_commands_fail_fast_when_the_process_times_out(self) -> None:
+        repository = Path("relative-repository").resolve()
+        process = Mock(returncode=None)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="git", timeout=60),
+            ("", ""),
+        ]
+        with patch(
+            "app.projects.git_process.subprocess.Popen",
+            return_value=process,
+        ) as run, patch("app.projects.git_process.ProcessTreeHandle"):
+            with self.assertRaisesRegex(ValueError, "Git 命令超时"):
+                GitWorktreeService()._git(repository, "status", "--porcelain")
+
+        self.assertEqual(process.communicate.call_args_list[0].kwargs["timeout"], 60)
 
     def test_preparing_task_can_cancel_unregistered_partial_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,7 @@ def write_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        temporary.write_text(
-            json.dumps(to_plain(data), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_durable(temporary, json.dumps(to_plain(data), ensure_ascii=False, indent=2))
         _replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -26,10 +24,18 @@ def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        temporary.write_text(text, encoding="utf-8")
+        _write_durable(temporary, text)
         _replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_durable(path: Path, text: str) -> None:
+    """Flush a complete temporary file before publishing it with replace()."""
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def _replace_with_retry(temporary: Path, path: Path) -> None:
