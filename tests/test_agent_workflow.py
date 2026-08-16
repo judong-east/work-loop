@@ -17,6 +17,7 @@ from app.agents.contracts import (
     ValidationResult,
 )
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
+from app.agents.prompts import node_instructions
 from app.agents.plan_graph import (
     ModelBinding,
     PlanNode,
@@ -1291,7 +1292,7 @@ class PromptSchemaHintTest(unittest.TestCase):
             outputs=[],
             on_failure="human",
         )
-        instructions = AgentWorkflow._node_instructions(node, None)
+        instructions = node_instructions(node, None)
         self.assertIn("ExecutionResult", instructions)
         self.assertIn("exit_code", instructions)
 
