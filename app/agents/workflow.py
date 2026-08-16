@@ -43,6 +43,12 @@ from app.agents.plan_graph import (
 )
 from app.agents.runtime import AgentRuntime
 from app.agents.store import AgentTaskStore
+from app.agents.task_budget import (
+    agent_budget,
+    task_budget_error,
+    task_budget_overrun,
+    usage_tokens,
+)
 from app.agents.workflow_config import (
     BUILTIN_WORKFLOWS,
     WorkflowCatalog,
@@ -813,7 +819,7 @@ class AgentWorkflow:
                         workspace=workspace_path,
                         access=AgentAccess.WORKSPACE_WRITE,
                         policy=effective_agent_policy,
-                        budget=self._agent_budget(task),
+                        budget=agent_budget(task),
                         workflow_node_id=node.node_id,
                         **self._node_request_fields(
                             task, PlanNodeKind.IMPLEMENTATION, "executor"
@@ -857,7 +863,7 @@ class AgentWorkflow:
                 self.store.write_json(node_dir / "policy-after.json", after_check)
                 if not after_check.passed:
                     return self._block_policy(task, after_check)
-                budget_error = self._task_budget_error(task)
+                budget_error = task_budget_error(task)
                 if budget_error:
                     return self._pause(task, budget_error)
                 validation_started = time.monotonic()
@@ -934,7 +940,7 @@ class AgentWorkflow:
                         resume_phase=AgentTaskStatus.VALIDATING,
                     )
                 self._advance_workflow_cursor(task)
-                budget_error = self._task_budget_overrun(task)
+                budget_error = task_budget_overrun(task)
                 if budget_error:
                     resume_phase = self._workflow_status(
                         workflow.nodes[task.workflow_cursor]
@@ -962,7 +968,7 @@ class AgentWorkflow:
                 workspace=workspace_path,
                 access=AgentAccess.READ_ONLY,
                 policy=effective_agent_policy,
-                budget=self._agent_budget(task),
+                budget=agent_budget(task),
                 artifact_root=self.store.task_dir(task.task_id),
                 workflow_node_id=node.node_id,
                 **self._node_request_fields(task, PlanNodeKind.REVIEW, "reviewer"),
@@ -1140,7 +1146,7 @@ class AgentWorkflow:
                 workspace=self.workspace_path(task.task_id),
                 access=AgentAccess.READ_ONLY,
                 policy=self._agent_policy(policy, []),
-                budget=self._agent_budget(task),
+                budget=agent_budget(task),
                 workflow_node_id=planner_node.node_id,
                 **self._planning_request_fields(task, planning_binding),
             ),
@@ -1661,7 +1667,7 @@ class AgentWorkflow:
         if state.get("status") in {"completed", "skipped"}:
             return None
 
-        budget_error = self._task_budget_error(task)
+        budget_error = task_budget_error(task)
         if budget_error:
             return self._pause(
                 task, budget_error, "节点执行前预算已耗尽。",
@@ -1706,7 +1712,7 @@ class AgentWorkflow:
                 else AgentAccess.READ_ONLY
             ),
             policy=effective_agent_policy,
-            budget=self._agent_budget(task),
+            budget=agent_budget(task),
             artifact_root=self.store.task_dir(task.task_id),
             session_id=resumed_session,
             workflow_node_id=workflow_node.node_id,
@@ -2115,76 +2121,8 @@ class AgentWorkflow:
                 f"任务 {task.task_id} 状态为 {task.status.value}，要求以下之一：{names}。"
             )
 
-    def _agent_budget(self, task: AgentTask) -> AgentBudget:
-        remaining_time = max(
-            0.001,
-            task.budget.total_timeout_seconds
-            - task.budget.consumed_active_seconds,
-        )
-        remaining_cost = (
-            max(0.001, task.budget.max_cost_usd - task.budget.consumed_cost_usd)
-            if task.budget.max_cost_usd is not None
-            else None
-        )
-        return AgentBudget(
-            total_timeout_seconds=min(task.budget.call_timeout_seconds, remaining_time),
-            idle_timeout_seconds=min(task.budget.idle_timeout_seconds, remaining_time),
-            max_cost_usd=remaining_cost,
-        )
 
-    @staticmethod
-    def _task_budget_error(task: AgentTask) -> str:
-        if task.budget.consumed_active_seconds >= task.budget.total_timeout_seconds:
-            return "total_timeout"
-        if (
-            task.budget.max_cost_usd is not None
-            and task.budget.consumed_cost_usd >= task.budget.max_cost_usd
-        ):
-            return "budget_exhausted"
-        if (
-            task.budget.max_total_tokens is not None
-            and task.budget.consumed_input_tokens + task.budget.consumed_output_tokens
-            >= task.budget.max_total_tokens
-        ):
-            return "token_budget_exhausted"
-        if (
-            task.budget.max_input_tokens is not None
-            and task.budget.consumed_input_tokens >= task.budget.max_input_tokens
-        ):
-            return "input_token_budget_exhausted"
-        if (
-            task.budget.max_output_tokens is not None
-            and task.budget.consumed_output_tokens >= task.budget.max_output_tokens
-        ):
-            return "output_token_budget_exhausted"
-        return ""
 
-    @staticmethod
-    def _task_budget_overrun(task: AgentTask) -> str:
-        if task.budget.consumed_active_seconds > task.budget.total_timeout_seconds:
-            return "total_timeout"
-        if (
-            task.budget.max_cost_usd is not None
-            and task.budget.consumed_cost_usd > task.budget.max_cost_usd
-        ):
-            return "budget_exhausted"
-        if (
-            task.budget.max_total_tokens is not None
-            and task.budget.consumed_input_tokens + task.budget.consumed_output_tokens
-            > task.budget.max_total_tokens
-        ):
-            return "token_budget_exhausted"
-        if (
-            task.budget.max_input_tokens is not None
-            and task.budget.consumed_input_tokens > task.budget.max_input_tokens
-        ):
-            return "input_token_budget_exhausted"
-        if (
-            task.budget.max_output_tokens is not None
-            and task.budget.consumed_output_tokens > task.budget.max_output_tokens
-        ):
-            return "output_token_budget_exhausted"
-        return ""
 
     def _load_project_policy(self, task: AgentTask) -> ProjectPolicy:
         project = self.projects.get(task.project_id)
@@ -2303,7 +2241,7 @@ class AgentWorkflow:
                 task.artifacts["last_agent_run"] = run_ref
                 self.store.save(task)
 
-        budget_error = self._task_budget_error(task)
+        budget_error = task_budget_error(task)
         if task.status in {AgentTaskStatus.CANCELLING, AgentTaskStatus.CANCELLED}:
             response = AgentResult(
                 succeeded=False,
@@ -2332,7 +2270,7 @@ class AgentWorkflow:
 
         task.budget.consumed_active_seconds += time.monotonic() - started
         input_tokens, output_tokens, cached_tokens, uncached_input_tokens = (
-            self._usage_tokens(response.usage)
+            usage_tokens(response.usage)
         )
         task.budget.consumed_input_tokens += input_tokens
         task.budget.consumed_output_tokens += output_tokens
@@ -2352,7 +2290,7 @@ class AgentWorkflow:
                 + cached_tokens * cached_rate
                 + output_tokens * option.output_cost_per_million
             ) / 1_000_000
-        budget_error = self._task_budget_overrun(task)
+        budget_error = task_budget_overrun(task)
         if response.succeeded and budget_error:
             response = self._reject_role_session(
                 response,
@@ -2445,29 +2383,6 @@ class AgentWorkflow:
             )
         return response
 
-    @staticmethod
-    def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
-        def first(*keys: str) -> int:
-            for key in keys:
-                value = usage.get(key)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    return max(0, int(value))
-            return 0
-
-        raw_input = first("input_tokens", "prompt_tokens", "input")
-        output = first("output_tokens", "completion_tokens", "output")
-        cached = first(
-            "cached_input_tokens",
-            "cache_read_input_tokens",
-            "cached_tokens",
-            "cache_read",
-        )
-        cache_is_included = any(
-            key in usage for key in ("cached_input_tokens", "cached_tokens")
-        )
-        uncached = max(0, raw_input - cached) if cache_is_included else raw_input
-        total_input = raw_input if cache_is_included else raw_input + cached
-        return total_input, output, cached, uncached
 
     @staticmethod
     def _reject_role_session(

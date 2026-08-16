@@ -9,6 +9,7 @@ from app.agents.context_ledger import MAX_CONTEXT_CHARS, ContextLedger, ContextP
 from app.agents.contracts import AgentAccess, AgentTask, AgentTaskStatus, ExecutionPlan, TaskBudget
 from app.agents.fake_runtime import FakeAgentStep, ScriptedFakeRuntime
 from app.agents.plan_graph import PlanGraph, PlanNode, PlanNodeAccess, PlanNodeKind
+from app.agents.task_budget import usage_tokens
 from app.agents.workflow import AgentWorkflow
 from app.memory.experience_store import ExperienceStore
 from tests.git_support import create_repository
@@ -309,7 +310,7 @@ class ComposedWorkflowBehaviorTest(unittest.TestCase):
 
     def test_codex_included_cache_tokens_are_not_counted_twice(self) -> None:
         self.assertEqual(
-            AgentWorkflow._usage_tokens(
+            usage_tokens(
                 {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10}
             ),
             (100, 10, 40, 60),
