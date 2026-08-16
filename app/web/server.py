@@ -1044,20 +1044,28 @@ class WorkloopServer(ThreadingHTTPServer):
             native_provider = os.environ.get("WORKLOOP_NATIVE_PROVIDER", "").strip()
             native_thinking = os.environ.get("WORKLOOP_NATIVE_THINKING", "medium").strip() or "medium"
             native_max_tokens = int(os.environ.get("WORKLOOP_NATIVE_MAX_TOKENS", "0") or 0)
-            role_models = {
-                "planner": os.environ.get("WORKLOOP_NATIVE_PLANNER_MODEL", "").strip() or native_model,
-                "executor": os.environ.get("WORKLOOP_NATIVE_EXECUTOR_MODEL", "").strip() or native_model,
-                "reviewer": os.environ.get("WORKLOOP_NATIVE_REVIEWER_MODEL", "").strip() or native_model,
+            role_specs = [
+                ("planner", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_PLANNER_MODEL"),
+                ("executor", AgentAccess.WORKSPACE_WRITE, "WORKLOOP_NATIVE_EXECUTOR_MODEL"),
+                ("reviewer", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_REVIEWER_MODEL"),
+            ]
+            role_capabilities = {
+                "planner": ["planning", "architecture", "general"],
+                "executor": [
+                    "implementation", "frontend", "backend", "security",
+                    "testing", "migration", "documentation",
+                ],
+                "reviewer": ["review", "security", "general"],
             }
             return ModelCatalog(
                 [
                     ModelOption(
-                        profile_id="planner",
-                        label="Planner",
+                        profile_id=role,
+                        label=role.title(),
                         runtime="native",
-                        model=role_models["planner"],
-                        access=AgentAccess.READ_ONLY,
-                        capabilities=["planning", "architecture", "general"],
+                        model=os.environ.get(model_env, "").strip() or native_model,
+                        access=access,
+                        capabilities=role_capabilities[role],
                         quality=4,
                         input_cost_per_million=0.0,
                         output_cost_per_million=0.0,
@@ -1066,42 +1074,8 @@ class WorkloopServer(ThreadingHTTPServer):
                         base_url=native_base_url,
                         api_key_env=api_key_env,
                         max_tokens=native_max_tokens,
-                    ),
-                    ModelOption(
-                        profile_id="executor",
-                        label="Executor",
-                        runtime="native",
-                        model=role_models["executor"],
-                        access=AgentAccess.WORKSPACE_WRITE,
-                        capabilities=[
-                            "implementation", "frontend", "backend", "security",
-                            "testing", "migration", "documentation",
-                        ],
-                        quality=4,
-                        input_cost_per_million=0.0,
-                        output_cost_per_million=0.0,
-                        provider=native_provider,
-                        thinking=native_thinking,
-                        base_url=native_base_url,
-                        api_key_env=api_key_env,
-                        max_tokens=native_max_tokens,
-                    ),
-                    ModelOption(
-                        profile_id="reviewer",
-                        label="Reviewer",
-                        runtime="native",
-                        model=role_models["reviewer"],
-                        access=AgentAccess.READ_ONLY,
-                        capabilities=["review", "security", "general"],
-                        quality=4,
-                        input_cost_per_million=0.0,
-                        output_cost_per_million=0.0,
-                        provider=native_provider,
-                        thinking=native_thinking,
-                        base_url=native_base_url,
-                        api_key_env=api_key_env,
-                        max_tokens=native_max_tokens,
-                    ),
+                    )
+                    for role, access, model_env in role_specs
                 ]
             )
         return ModelCatalog(
