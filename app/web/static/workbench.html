@@ -39,6 +39,7 @@
         <div class="composer-meta">
           <div class="mode-switch" role="group" aria-label="交互模式"><button type="button" data-mode="chat" class="active">普通对话</button><button type="button" data-mode="task">任务模式</button></div>
           <label class="workflow-picker hidden" id="workflowPicker"><span>工作流</span><select id="workflowSelect" aria-label="任务工作流"></select></label>
+          <label class="workflow-picker hidden" id="strategyPicker"><span>策略</span><select id="strategySelect" aria-label="任务策略"></select></label>
           <span class="model-label" id="modelLabel">尚未配置模型</span>
         </div>
         <div class="composer"><textarea id="messageInput" rows="1" placeholder="描述你想完成的事情…" aria-label="消息"></textarea><button class="send-button" id="sendMessage" type="button" aria-label="发送">↑</button></div>
@@ -49,7 +50,7 @@
     <aside class="inspector" id="inspector">
       <div class="inspector-head"><div><span class="eyebrow">ORCHESTRATION</span><h2>任务编排</h2></div><button class="icon-button" id="closeInspector" type="button" aria-label="收起编排面板" title="收起编排面板">×</button></div>
       <div class="inspector-empty" id="inspectorEmpty"><span class="empty-icon">⌘</span><strong>任务模式尚未运行</strong><p>切换到任务模式后，节点、模型和上下文流转会显示在这里。</p></div>
-      <div class="flow-panel hidden" id="flowPanel"><div class="flow-summary"><span id="flowStatus" class="status-dot idle"></span><span id="flowStatusText">准备运行</span><span class="flow-count" id="flowCount">0 / 0</span></div><div class="flow-list" id="flowList"></div><details class="context-details"><summary>共享上下文</summary><pre id="contextView">{}</pre></details></div>
+      <div class="flow-panel hidden" id="flowPanel"><div class="flow-summary"><span id="flowStatus" class="status-dot idle"></span><span id="flowStatusText">准备运行</span><span class="flow-count" id="flowCount">0 / 0</span></div><div class="policy-strip" id="policyStrip"><span>策略：<strong id="policyStrategy">引导开发</strong></span><span>复杂度 <strong id="policyComplexity">M</strong></span><span>风险 <strong id="policyRisk">medium</strong></span><span>阶段 <strong id="policyPhase">analysis</strong></span><span>Gate <strong id="policyGate">开放</strong></span></div><div class="policy-next" id="policyNext"><span></span><span class="policy-actions"><button class="button quiet compact hidden" id="approvePolicy" type="button">批准 Gate</button><button class="button quiet compact hidden" id="replanPolicy" type="button">重新规划</button></span></div><div class="flow-list" id="flowList"></div><details class="context-details"><summary>共享上下文</summary><pre id="contextView">{}</pre></details></div>
       <div class="inspector-footer"><button class="text-button" data-open-management type="button">管理模型与节点 <span aria-hidden="true">→</span></button><span id="sessionModeLabel">普通对话</span></div>
     </aside>
   </div>

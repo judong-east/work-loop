@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.domain.models import ModelAlias, ModelProvider, NodeDefinition, Project, Session, SessionMode, WorkflowDefinition, WorkflowNode
+from app.core.contracts import utc_now
+from app.domain.models import ModelAlias, ModelProvider, NodeDefinition, Project, Session, SessionMode, TaskPolicy, WorkflowDefinition, WorkflowNode
 from app.domain.node_catalog import NodeCatalog
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator, ModelGateway, OrchestrationEvent
+from app.domain.strategy_presets import get_strategy_preset, infer_strategy, list_strategy_presets
 from app.domain.workflow_catalog import WorkflowCatalog
 from app.infrastructure.json_repository import JsonCollection
 from app.infrastructure.model_gateway import OpenAICompatibleGateway
@@ -74,12 +76,25 @@ class WorkbenchService:
     def get_project(self, project_id: str) -> Project:
         return self.projects.get(project_id)
 
-    def create_session(self, project_id: str, title: str, *, mode: SessionMode = SessionMode.CHAT, workflow_id: str = "") -> Session:
+    def create_session(
+        self,
+        project_id: str,
+        title: str,
+        *,
+        mode: SessionMode = SessionMode.CHAT,
+        workflow_id: str = "",
+        policy: TaskPolicy | dict[str, Any] | None = None,
+    ) -> Session:
         project = self.get_project(project_id)
         if mode is SessionMode.TASK:
             workflow_id = workflow_id or "default-task"
             self.workflows.get(workflow_id)
-        session = Session.create(project_id, title, mode, workflow_id)
+        if isinstance(policy, TaskPolicy):
+            task_policy = policy
+        else:
+            task_policy = TaskPolicy.from_dict(policy)
+        task_policy.validate()
+        session = Session.create(project_id, title, mode, workflow_id, policy=task_policy)
         session.context = session.context.merge({"inputs": {"project": {
             "project_id": project.project_id,
             "name": project.name,
@@ -87,6 +102,41 @@ class WorkbenchService:
             "knowledge_refs": list(project.knowledge_refs),
             "default_model": project.default_model,
         }}})
+        return self.sessions.save(session, session.session_id)
+
+    def list_strategies(self) -> list[dict[str, Any]]:
+        return list_strategy_presets()
+
+    def strategy_for(self, text: str) -> dict[str, Any]:
+        return get_strategy_preset(infer_strategy(text))
+
+    def update_policy(self, session_id: str, value: dict[str, Any]) -> Session:
+        session = self.get_session(session_id)
+        current = session.policy.to_dict()
+        current.update({key: value[key] for key in value if key in current and key != "history"})
+        if "history" in value:
+            current["history"] = value["history"]
+        session.policy = TaskPolicy.from_dict(current)
+        session.policy.revision += 1
+        session.updated_at = utc_now()
+        return self.sessions.save(session, session.session_id)
+
+    def approve_policy(self, session_id: str) -> Session:
+        session = self.get_session(session_id)
+        session.policy.gate_status = "approved"
+        session.policy.gate = ""
+        if session.status in {"waiting_for_human", "needs_replan"}:
+            session.status = "idle"
+        session.policy.revision += 1
+        return self.sessions.save(session, session.session_id)
+
+    def replan_policy(self, session_id: str, *, reason: str = "") -> Session:
+        session = self.get_session(session_id)
+        session.policy.gate_status = "open"
+        session.policy.gate = ""
+        session.policy.revision += 1
+        session.policy.next_action = reason.strip() or "重新规划任务"
+        session.status = "idle"
         return self.sessions.save(session, session.session_id)
 
     def list_sessions(self, project_id: str = "") -> list[Session]:

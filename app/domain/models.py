@@ -25,6 +25,79 @@ class SessionMode(str, Enum):
 
 
 @dataclass
+class TaskPolicy:
+    """Durable governance metadata for a task session.
+
+    Policy is intentionally separate from workflow topology: it records why a
+    task is being run and where human/quality gates stand without changing the
+    provider, model, or node contracts already used by the workbench.
+    """
+
+    task_type: str = "feature"
+    complexity: str = "M"
+    risk: str = "medium"
+    strategy: str = "guided-develop"
+    current_phase: str = "analysis"
+    next_action: str = ""
+    gate: str = ""
+    gate_status: str = "open"
+    revision: int = 0
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if self.complexity not in {"S", "M", "L", "XL"}:
+            raise ValueError("complexity must be S, M, L, or XL")
+        if self.risk not in {"low", "medium", "high"}:
+            raise ValueError("risk must be low, medium, or high")
+        if self.gate_status not in {"open", "blocked", "approved"}:
+            raise ValueError("gate_status must be open, blocked, or approved")
+        if not self.task_type.strip() or not self.strategy.strip():
+            raise ValueError("task_type and strategy are required")
+        # Import lazily so the model module remains the dependency root while
+        # strategy presets stay easy to extend independently.
+        from .strategy_presets import STRATEGY_PRESETS
+        if self.strategy not in STRATEGY_PRESETS:
+            raise ValueError(f"unknown strategy: {self.strategy}")
+        if self.revision < 0:
+            raise ValueError("policy revision cannot be negative")
+        if not isinstance(self.history, list):
+            raise ValueError("policy history must be a list")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "task_type": self.task_type,
+            "complexity": self.complexity,
+            "risk": self.risk,
+            "strategy": self.strategy,
+            "current_phase": self.current_phase,
+            "next_action": self.next_action,
+            "gate": self.gate,
+            "gate_status": self.gate_status,
+            "revision": self.revision,
+            "history": [dict(item) for item in self.history[-50:] if isinstance(item, dict)],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> "TaskPolicy":
+        value = value if isinstance(value, dict) else {}
+        policy = cls(
+            task_type=str(value.get("task_type", "feature")),
+            complexity=str(value.get("complexity", "M")).upper(),
+            risk=str(value.get("risk", "medium")).lower(),
+            strategy=str(value.get("strategy", "guided-develop")),
+            current_phase=str(value.get("current_phase", "analysis")),
+            next_action=str(value.get("next_action", "")),
+            gate=str(value.get("gate", "")),
+            gate_status=str(value.get("gate_status", "open")),
+            revision=int(value.get("revision", 0)),
+            history=[dict(item) for item in value.get("history", []) if isinstance(item, dict)],
+        )
+        policy.validate()
+        return policy
+
+
+@dataclass
 class ModelProvider:
     """A vendor connection without exposing a secret in serialized state."""
 
@@ -302,14 +375,27 @@ class Session:
     messages: list[SessionMessage] = field(default_factory=list)
     context: ContextState = field(default_factory=ContextState)
     workflow_id: str = ""
+    policy: TaskPolicy = field(default_factory=TaskPolicy)
     status: str = "idle"
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     schema_version: int = 1
 
     @classmethod
-    def create(cls, project_id: str, title: str, mode: SessionMode = SessionMode.CHAT, workflow_id: str = "") -> "Session":
-        return cls(new_id("SESSION"), project_id, title.strip() or "未命名会话", mode, workflow_id=workflow_id)
+    def create(
+        cls,
+        project_id: str,
+        title: str,
+        mode: SessionMode = SessionMode.CHAT,
+        workflow_id: str = "",
+        *,
+        policy: TaskPolicy | dict[str, Any] | None = None,
+    ) -> "Session":
+        task_policy = policy if isinstance(policy, TaskPolicy) else TaskPolicy.from_dict(policy)
+        return cls(
+            new_id("SESSION"), project_id, title.strip() or "未命名会话", mode,
+            workflow_id=workflow_id, policy=task_policy,
+        )
 
     def add_message(self, role: str, content: str, *, node_id: str = "", metadata: dict[str, Any] | None = None) -> SessionMessage:
         message = SessionMessage(role=role, content=content, node_id=node_id, metadata=metadata or {})
@@ -329,6 +415,7 @@ class Session:
             "messages": [item.to_dict() for item in self.messages],
             "context": self.context.to_dict(),
             "workflow_id": self.workflow_id,
+            "policy": self.policy.to_dict(),
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -345,6 +432,7 @@ class Session:
             messages=[SessionMessage.from_dict(item) for item in value.get("messages", [])],
             context=ContextState.from_dict(dict(value.get("context", {}))),
             workflow_id=str(value.get("workflow_id", "")),
+            policy=TaskPolicy.from_dict(value.get("policy")),
             status=str(value.get("status", "idle")),
             created_at=str(value.get("created_at", utc_now())),
             updated_at=str(value.get("updated_at", value.get("created_at", utc_now()))),

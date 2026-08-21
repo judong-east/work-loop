@@ -1,8 +1,8 @@
 (() => {
   const state = {
     projects: [], sessions: [], project: null, session: null, mode: "chat",
-    catalog: { nodes: [], workflows: [] }, resources: { providers: [], models: [], health: [] },
-    selectedWorkflowId: "default-task", editingWorkflow: null, testingProviders: new Set(),
+    catalog: { nodes: [], workflows: [] }, strategies: [], resources: { providers: [], models: [], health: [] },
+    selectedWorkflowId: "default-task", selectedStrategy: "guided-develop", editingWorkflow: null, testingProviders: new Set(),
   };
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -30,6 +30,7 @@
       state.session = state.sessions.find(item => item.session_id === button.dataset.session) || null;
       state.mode = state.session?.mode || "chat";
       if (state.session?.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
+      if (state.session?.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
       renderMode(); renderProjects(); renderSessions();
     }));
     document.querySelectorAll("[data-new-session]").forEach(button => button.addEventListener("click", async () => {
@@ -37,6 +38,7 @@
         state.session = await post(`/api/v2/projects/${state.project.project_id}/sessions`, {
           title: "新的会话", mode: state.mode,
           workflow_id: state.mode === "task" ? state.selectedWorkflowId : "",
+          policy: state.mode === "task" ? { strategy: state.selectedStrategy } : undefined,
         });
         state.sessions.unshift(state.session); renderProjects(); renderSessions();
       } catch (error) { toast(error.message); }
@@ -48,6 +50,8 @@
     if (!workflows.some(item => item.workflow_id === state.selectedWorkflowId)) state.selectedWorkflowId = workflows[0]?.workflow_id || "";
     $("workflowSelect").innerHTML = workflows.map(item => option(item.workflow_id, item.label, state.selectedWorkflowId)).join("");
     $("workflowPicker").classList.toggle("hidden", state.mode !== "task");
+    $("strategyPicker").classList.toggle("hidden", state.mode !== "task");
+    $("strategySelect").innerHTML = state.strategies.map(item => option(item.strategy, item.label, state.selectedStrategy)).join("");
   }
 
   function renderMode() {
@@ -87,6 +91,16 @@
     $("flowCount").textContent = `${done} / ${nodes.length}`;
     $("flowStatusText").textContent = session.status === "completed" ? "已完成" : (session.status === "waiting_for_human" ? "等待处理" : "准备运行");
     $("flowStatus").className = `status-dot ${session.status === "completed" ? "done" : (session.status === "waiting_for_human" ? "failed" : (session.status === "running" ? "running" : "idle"))}`;
+    const policy = session.policy || {};
+    const strategy = state.strategies.find(item => item.strategy === policy.strategy);
+    $("policyStrategy").textContent = strategy?.label || policy.strategy || "引导开发";
+    $("policyComplexity").textContent = policy.complexity || "M";
+    $("policyRisk").textContent = policy.risk || "medium";
+    $("policyPhase").textContent = policy.current_phase || "analysis";
+    $("policyGate").textContent = policy.gate_status === "blocked" ? `阻塞 · ${policy.gate || "需处理"}` : policy.gate_status === "approved" ? "已批准" : "开放";
+    $("policyNext").querySelector("span").textContent = policy.next_action ? `下一步：${policy.next_action}` : "";
+    $("approvePolicy").classList.toggle("hidden", policy.gate_status !== "blocked");
+    $("replanPolicy").classList.toggle("hidden", policy.gate_status !== "blocked");
     $("flowList").innerHTML = nodes.map((node, index) => {
       const status = statuses[node.node_id] || (current?.node_id === node.node_id ? "current" : "pending");
       const statusText = { pending: "等待", current: "执行中", skipped: "跳过", completed: "完成", failed: "失败" }[status] || status;
@@ -100,9 +114,10 @@
       state.project = state.projects.find(project => project.project_id === projectId) || null;
       state.sessions = await api(`/api/v2/projects/${encodeURIComponent(projectId)}/sessions`);
       state.session = state.sessions[0] || null;
-      if (!state.session) state.session = await post(`/api/v2/projects/${encodeURIComponent(projectId)}/sessions`, { title: "新的会话", mode: state.mode, workflow_id: state.mode === "task" ? state.selectedWorkflowId : "" });
+      if (!state.session) state.session = await post(`/api/v2/projects/${encodeURIComponent(projectId)}/sessions`, { title: "新的会话", mode: state.mode, workflow_id: state.mode === "task" ? state.selectedWorkflowId : "", policy: state.mode === "task" ? { strategy: state.selectedStrategy } : undefined });
       state.mode = state.session.mode || "chat";
       if (state.session.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
+      if (state.session.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
       renderMode(); renderProjects(); renderSessions(); $("rail").classList.remove("open");
     } catch (error) { toast(error.message); }
   }
@@ -114,7 +129,7 @@
     try {
       const workflowId = state.mode === "task" ? state.selectedWorkflowId : "";
       if (!state.session || state.session.mode !== state.mode || (state.mode === "task" && state.session.workflow_id !== workflowId)) {
-        state.session = await post(`/api/v2/projects/${state.project.project_id}/sessions`, { title: content.slice(0, 36), mode: state.mode, workflow_id: workflowId });
+        state.session = await post(`/api/v2/projects/${state.project.project_id}/sessions`, { title: content.slice(0, 36), mode: state.mode, workflow_id: workflowId, policy: state.mode === "task" ? { strategy: state.selectedStrategy } : undefined });
         state.sessions.unshift(state.session);
       }
       state.session = await post(`/api/v2/sessions/${state.session.session_id}/messages`, { content });
@@ -124,7 +139,7 @@
   }
 
   async function refreshManagement() {
-    [state.catalog, state.resources] = await Promise.all([api("/api/v2/catalog"), api("/api/v2/resources")]);
+    [state.catalog, state.resources, state.strategies] = await Promise.all([api("/api/v2/catalog"), api("/api/v2/resources"), api("/api/v2/strategies")]);
     const modelCount = state.resources.models.length;
     $("resourceHint").textContent = modelCount ? `${modelCount} 个模型可用` : "尚未配置模型";
     $("modelLabel").textContent = modelCount ? `${modelCount} 个模型` : "尚未配置模型";
@@ -365,6 +380,26 @@
   $("messageInput").addEventListener("input", event => { event.target.style.height = "auto"; event.target.style.height = `${Math.min(event.target.scrollHeight, 180)}px`; });
   document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => { state.mode = button.dataset.mode; renderMode(); }));
   $("workflowSelect").addEventListener("change", event => { state.selectedWorkflowId = event.target.value; renderFlow(); });
+  $("strategySelect").addEventListener("change", async event => {
+    state.selectedStrategy = event.target.value;
+    if (state.session?.mode === "task") {
+      try {
+        state.session = await post(`/api/v2/sessions/${state.session.session_id}/policy`, { strategy: state.selectedStrategy });
+        renderSessions();
+      } catch (error) { toast(error.message); }
+    }
+    renderMode();
+  });
+  $("approvePolicy").addEventListener("click", async () => {
+    if (!state.session) return;
+    try { state.session = await post(`/api/v2/sessions/${state.session.session_id}/policy/approve`, {}); renderSessions(); toast("Gate 已批准"); }
+    catch (error) { toast(error.message); }
+  });
+  $("replanPolicy").addEventListener("click", async () => {
+    if (!state.session) return;
+    try { state.session = await post(`/api/v2/sessions/${state.session.session_id}/policy/replan`, { reason: "用户请求重新规划" }); renderSessions(); toast("已解除 Gate，可重新运行"); }
+    catch (error) { toast(error.message); }
+  });
   document.querySelectorAll("[data-starter]").forEach(button => button.addEventListener("click", () => { $("messageInput").value = button.dataset.starter; $("messageInput").focus(); }));
   $("mobileMenu").addEventListener("click", () => $("rail").classList.toggle("open"));
   $("refreshProjects").addEventListener("click", init);

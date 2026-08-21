@@ -115,7 +115,10 @@ report:
 - **Interaction layer**: `WorkbenchService` exposes projects and sessions with
   explicit `chat` and `task` modes. The UI at `/` includes provider and model
   CRUD, custom-node CRUD, workflow editing, explicit node-to-model bindings,
-  node progress, and shared context. Its API is under `/api/v2/*`.
+  node progress, shared context, and task governance (strategy, complexity,
+  risk, next action, and quality Gates). Strategy presets are available at
+  `GET /api/v2/strategies`; policy approval/replanning uses the session policy
+  endpoints under `/api/v2/sessions/{id}/policy`. Its API is under `/api/v2/*`.
 
 The existing `/api/agent/*` API remains an internal compatibility surface;
 new clients should use `/api/v2/*`. A model gateway is injected into

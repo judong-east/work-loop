@@ -94,6 +94,14 @@ class DagOrchestrator:
 
     def run(self, session: Session, workflow: WorkflowDefinition, *, resume: bool = True) -> Session:
         order = self.validate(workflow)
+        if session.policy.gate_status == "blocked":
+            session.status = "needs_replan"
+            self.store.save(session)
+            self._emit(OrchestrationEvent(
+                "policy_gate_blocked", session.session_id, status=session.status,
+                payload={"gate": session.policy.gate},
+            ))
+            return session
         session.mode = session.mode
         session.status = "running"
         self._emit(OrchestrationEvent("session_started", session.session_id, status=session.status))
@@ -115,6 +123,22 @@ class DagOrchestrator:
                 raise OrchestrationError(
                     f"node {node_id} has unfinished dependencies", node_id=node_id, recoverable=True
                 )
+            if self._record_policy_progress(session, node, context):
+                session.status = "needs_replan"
+                session.policy.gate = "loop_detected"
+                session.policy.gate_status = "blocked"
+                session.add_message(
+                    "event",
+                    f"{node.node_id}: loop detected",
+                    node_id=node.node_id,
+                    metadata={"policy_gate": "loop_detected"},
+                )
+                self.store.save(session)
+                self._emit(OrchestrationEvent(
+                    "policy_loop_detected", session.session_id, node.node_id,
+                    session.status, {"gate": "loop_detected"},
+                ))
+                return session
             run = self._run_node(session, node, context)
             runs[node_id] = run
             session.add_message(
@@ -126,6 +150,9 @@ class DagOrchestrator:
             if run.status == "completed":
                 context = context.merge(run.output)
                 session.context = context
+                next_node = next((item for item in order if item not in completed | skipped and item != node_id), "")
+                session.policy.current_phase = node.node_type
+                session.policy.next_action = f"run:{next_node}" if next_node else "complete"
                 completed.add(node_id)
                 self._emit(OrchestrationEvent("node_completed", session.session_id, node_id, run.status, run.output))
             elif run.status == "skipped":
@@ -134,6 +161,12 @@ class DagOrchestrator:
             else:
                 session.status = "waiting_for_human" if node.on_failure == "human" else "failed"
                 session.context = context.merge({"errors": [run.error]})
+                if node.on_failure == "human":
+                    session.policy.gate = "human_review"
+                    session.policy.gate_status = "blocked"
+                elif node.on_failure == "replan":
+                    session.policy.gate = "plan_approval"
+                    session.policy.gate_status = "blocked"
                 self.store.save(session)
                 self._emit(OrchestrationEvent("node_failed", session.session_id, node_id, run.status, {"error": run.error}))
                 if node.on_failure == "replan":
@@ -143,6 +176,11 @@ class DagOrchestrator:
 
         session.status = "completed"
         session.context = context
+        session.policy.current_phase = "completed"
+        session.policy.next_action = ""
+        session.policy.gate = ""
+        if session.policy.gate_status != "blocked":
+            session.policy.gate_status = "approved"
         self.store.save(session)
         self._emit(OrchestrationEvent("session_completed", session.session_id, status=session.status))
         return session
@@ -160,11 +198,16 @@ class DagOrchestrator:
                         "session": session,
                         "node": node,
                         "context": context,
+                        "context_pack": self._context_pack(session, node, context),
                     })
                 else:
                     gateway_node = replace(
                         node,
-                        config={**node.config, "_output_fields": list(definition.output_fields)},
+                        config={
+                            **node.config,
+                            "_output_fields": list(definition.output_fields),
+                            "_context_pack": self._context_pack(session, node, context),
+                        },
                     )
                     output = self.gateway.complete(model_alias=run.model_alias, node=gateway_node, context=context)
                 definition.validate_output(output)
@@ -184,6 +227,67 @@ class DagOrchestrator:
                     run.status = "failed"
                 return run
         return run
+
+    @staticmethod
+    def _context_pack(session: Session, node: WorkflowNode, context: ContextState) -> dict[str, Any]:
+        recent_events = [
+            {
+                "node_id": message.node_id,
+                "content": message.content,
+                "status": message.metadata.get("node_run", {}).get("status", ""),
+            }
+            for message in session.messages
+            if message.role == "event"
+        ][-12:]
+        return {
+            "task": {
+                "session_id": session.session_id,
+                "title": session.title,
+                "status": session.status,
+                "policy": session.policy.to_dict(),
+                "next_action": session.policy.next_action,
+            },
+            "node": {
+                "node_id": node.node_id,
+                "node_type": node.node_type,
+                "model_alias": node.model_alias,
+                "depends_on": list(node.depends_on),
+            },
+            "shared_context": context.to_dict(),
+            "recent_events": recent_events,
+        }
+
+    @staticmethod
+    def _record_policy_progress(session: Session, node: WorkflowNode, context: ContextState) -> bool:
+        signature = {
+            "phase": node.node_type,
+            "next_action": f"run:{node.node_id}",
+            "context_version": context.version,
+            "at": utc_now(),
+        }
+        history = session.policy.history
+        history.append(signature)
+        recent = history[-3:]
+        same_phase = len(recent) == 3 and all(
+            item.get("phase") == signature["phase"]
+            and item.get("next_action") == signature["next_action"]
+            for item in recent
+        )
+        same_context = same_phase and all(
+            item.get("context_version") == signature["context_version"] for item in recent
+        )
+        failed_repeats = sum(
+            1
+            for message in session.messages
+            if message.node_id == node.node_id
+            and isinstance(message.metadata.get("node_run"), dict)
+            and message.metadata["node_run"].get("status") == "failed"
+        )
+        loop = same_phase and (same_context or failed_repeats >= 2)
+        session.policy.history = history[-50:]
+        session.policy.current_phase = node.node_type
+        session.policy.next_action = signature["next_action"]
+        return loop
 
     def _emit(self, event: OrchestrationEvent) -> None:
         if self.event_sink is not None:

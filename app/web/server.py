@@ -101,6 +101,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/workbench/?$"), "handle_workbench"),
         (re.compile(r"^/static/(workbench\.css|workbench\.js)$"), "handle_workbench_asset"),
         (re.compile(r"^/api/v2/catalog$"), "handle_v2_catalog"),
+        (re.compile(r"^/api/v2/strategies$"), "handle_v2_strategies"),
         (re.compile(r"^/api/v2/projects$"), "handle_v2_projects"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_v2_project_sessions"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_v2_session"),
@@ -124,6 +125,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_v2_create_session"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/messages$"), "handle_v2_message"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/run$"), "handle_v2_run"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/policy$"), "handle_v2_update_policy"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/policy/approve$"), "handle_v2_approve_policy"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/policy/replan$"), "handle_v2_replan_policy"),
         (re.compile(r"^/api/v2/resources/providers$"), "handle_v2_save_provider"),
         (re.compile(r"^/api/v2/resources/providers/([\w-]+)/test$"), "handle_v2_test_provider"),
         (re.compile(r"^/api/v2/resources/models$"), "handle_v2_save_model"),
@@ -512,6 +516,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             "workflows": [self._v2_workflow_payload(item) for item in self.server.workbench.list_workflows()],
         })
 
+    def handle_v2_strategies(self) -> None:
+        self._send_json(200, self.server.workbench.list_strategies())
+
     def handle_v2_projects(self) -> None:
         self._send_json(200, [item.to_dict() for item in self.server.workbench.list_projects()])
 
@@ -542,6 +549,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
                 str(body.get("title", "未命名会话")),
                 mode=mode,
                 workflow_id=str(body.get("workflow_id", "")),
+                policy=body.get("policy") if isinstance(body.get("policy"), dict) else None,
             )
         except (KeyError, TypeError, ValueError, FileNotFoundError) as error:
             raise _HttpError(400, str(error)) from error
@@ -563,6 +571,30 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             session = self.server.workbench.run_task(session_id, workflow)
         except (TypeError, ValueError, KeyError, FileNotFoundError) as error:
             raise _HttpError(400, str(error)) from error
+        self._send_json(200, session.to_dict())
+
+    def handle_v2_update_policy(self, session_id: str, body: dict) -> None:
+        try:
+            session = self.server.workbench.update_policy(session_id, body)
+        except (KeyError, TypeError, ValueError, FileNotFoundError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(200, session.to_dict())
+
+    def handle_v2_approve_policy(self, session_id: str, body: dict) -> None:
+        del body
+        try:
+            session = self.server.workbench.approve_policy(session_id)
+        except (KeyError, FileNotFoundError) as error:
+            raise _HttpError(404, str(error)) from error
+        self._send_json(200, session.to_dict())
+
+    def handle_v2_replan_policy(self, session_id: str, body: dict) -> None:
+        try:
+            session = self.server.workbench.replan_policy(
+                session_id, reason=str(body.get("reason", "")),
+            )
+        except (KeyError, FileNotFoundError) as error:
+            raise _HttpError(404, str(error)) from error
         self._send_json(200, session.to_dict())
 
     def handle_v2_resources(self) -> None:

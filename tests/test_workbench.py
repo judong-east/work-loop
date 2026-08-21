@@ -11,9 +11,10 @@ from threading import Thread
 from unittest import mock
 
 from app.application.workbench import WorkbenchService
-from app.domain.models import NodeDefinition, SessionMode, WorkflowDefinition, WorkflowNode
+from app.domain.models import NodeDefinition, Session, SessionMode, TaskPolicy, WorkflowDefinition, WorkflowNode
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator
+from app.domain.strategy_presets import list_strategy_presets
 from app.infrastructure.resource_center import ResourceCenter
 from app.infrastructure.model_gateway import OpenAICompatibleGateway
 from app.web.server import make_server
@@ -448,10 +449,17 @@ class WorkbenchDomainTest(unittest.TestCase):
             status, catalog = request("GET", "/api/v2/catalog")
             self.assertEqual(status, 200)
             self.assertTrue(any(node["node_type"] == "requirement" for node in catalog["nodes"]))
+            status, strategies = request("GET", "/api/v2/strategies")
+            self.assertEqual(status, 200)
+            self.assertTrue(any(item["strategy"] == "guided-develop" for item in strategies))
             _, project = request("POST", "/api/v2/projects", {"name": "API project"})
-            status, session = request("POST", f"/api/v2/projects/{project['project_id']}/sessions", {"title": "Task", "mode": "task"})
+            status, session = request("POST", f"/api/v2/projects/{project['project_id']}/sessions", {"title": "Task", "mode": "task", "policy": {"strategy": "quick-implement", "complexity": "S"}})
             self.assertEqual(status, 201)
             self.assertEqual(session["mode"], "task")
+            self.assertEqual(session["policy"]["strategy"], "quick-implement")
+            status, session = request("POST", f"/api/v2/sessions/{session['session_id']}/policy", {"risk": "high"})
+            self.assertEqual(status, 200)
+            self.assertEqual(session["policy"]["risk"], "high")
             status, detail = request("GET", f"/api/v2/sessions/{session['session_id']}")
             self.assertEqual(status, 200)
             self.assertEqual(detail["project_id"], project["project_id"])
@@ -521,6 +529,53 @@ class WorkbenchDomainTest(unittest.TestCase):
             request("DELETE", "/api/v2/resources/models/secure-model")
             status, _ = request("DELETE", "/api/v2/resources/providers/vendor")
             self.assertEqual(status, 200)
+
+    def test_task_policy_defaults_and_legacy_session_compatibility(self):
+        policy = TaskPolicy.from_dict({})
+        self.assertEqual(policy.strategy, "guided-develop")
+        self.assertEqual(policy.complexity, "M")
+        self.assertEqual(Session.from_dict({
+            "session_id": "legacy", "project_id": "p", "title": "old",
+        }).policy.gate_status, "open")
+        with self.assertRaisesRegex(ValueError, "unknown strategy"):
+            TaskPolicy(strategy="missing").validate()
+        self.assertGreaterEqual(len(list_strategy_presets()), 8)
+
+    def test_policy_is_injected_into_custom_node_context_pack(self):
+        captured = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp))
+            service.registry.register(NodeDefinition("capture", "捕获", "", output_fields=("result",)))
+            service.registry.register_handler("capture", lambda payload: captured.update(payload) or {"result": "ok"})
+            project = service.create_project("Policy")
+            session = service.create_session(
+                project.project_id, "task", mode=SessionMode.TASK,
+                policy={"strategy": "refactor-safely", "complexity": "L", "risk": "high"},
+            )
+            result = service.run_task(session.session_id, WorkflowDefinition(
+                "capture-flow", "Capture", [WorkflowNode("capture", "capture")],
+            ))
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(captured["context_pack"]["task"]["policy"]["strategy"], "refactor-safely")
+            self.assertEqual(captured["context_pack"]["shared_context"]["version"], 3)
+
+    def test_repeated_failed_phase_is_blocked_for_replan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = NodeRegistry()
+            registry.register(NodeDefinition("stuck", "卡住", "", output_fields=("result",)))
+            registry.register_handler("stuck", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+            service = WorkbenchService(Path(tmp))
+            service.registry = registry
+            service.orchestrator = DagOrchestrator(registry, service.sessions, service.gateway)
+            project = service.create_project("Loop")
+            workflow = WorkflowDefinition("stuck-flow", "Stuck", [WorkflowNode("stuck", "stuck", on_failure="retry")])
+            session = service.create_session(project.project_id, "task", mode=SessionMode.TASK)
+            for _ in range(3):
+                result = service.orchestrator.run(session, workflow)
+                session = service.get_session(session.session_id)
+            self.assertEqual(result.status, "needs_replan")
+            self.assertEqual(result.policy.gate, "loop_detected")
+            self.assertEqual(result.policy.gate_status, "blocked")
 
 
 if __name__ == "__main__":

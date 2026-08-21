@@ -32,12 +32,21 @@ for facts, artifacts, decisions, inputs, and errors. Node output is validated by
 its `NodeDefinition` before it is merged, so malformed output stops at the
 responsible node instead of poisoning every downstream prompt.
 
+`Session.policy` carries task governance metadata independently of the graph:
+strategy preset, complexity, risk, current phase, next action, revision, and
+Gate status. Built-in strategy presets are exposed from `GET /api/v2/strategies`;
+the policy can be updated through `POST /api/v2/sessions/{id}/policy`.
+
 ## Failure and resume rules
 
 Every node produces a `NodeRun` event. The orchestrator skips completed or
 skipped nodes when resuming a persisted session. A node can declare `retry`,
 `human`, `skip`, or `replan` as its failure policy. Dependencies are checked
-before execution and a cycle is rejected before any model is called.
+before execution and a cycle is rejected before any model is called. Before
+each node, a bounded `context_pack` contains the task policy, node identity,
+shared context, and recent node events. Repeated failed phases become a
+`loop_detected` Gate and block the session until the user approves or replans;
+human and replan failures create explicit blocked Gates as well.
 
 ## Resource and security rules
 

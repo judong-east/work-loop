@@ -120,6 +120,16 @@ class OpenAICompatibleGateway:
             fields = node.config.get("_output_fields", [])
             contract = {str(field): "any" for field in fields} or {"result": "any"}
         public_config = {key: value for key, value in node.config.items() if not key.startswith("_")}
+        context_pack = node.config.get("_context_pack")
+        user_payload: dict[str, Any] = {
+            "node_id": node.node_id,
+            "node_type": node.node_type,
+            "instructions": node.prompt_template,
+            "config": public_config,
+            "shared_context": context.to_dict(),
+        }
+        if isinstance(context_pack, dict):
+            user_payload["context_pack"] = context_pack
         return [
             {
                 "role": "system",
@@ -131,16 +141,7 @@ class OpenAICompatibleGateway:
             },
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "node_id": node.node_id,
-                        "node_type": node.node_type,
-                        "instructions": node.prompt_template,
-                        "config": public_config,
-                        "shared_context": context.to_dict(),
-                    },
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(user_payload, ensure_ascii=False),
             },
         ]
 
