@@ -66,7 +66,9 @@ canaries run once per validation window instead of once per command.
 python -m app.cli serve --root . --port 8765
 ```
 
-Open `http://127.0.0.1:8765`, register a Git repository or any ordinary local
+Open `http://127.0.0.1:8765/` for the multi-agent workbench. This is the only
+browser UI; `/workbench` redirects to the same entry point. Register a Git
+repository or any ordinary local
 directory, and create a task. Ordinary directories do not need `.git` or a
 Workloop policy file: Workloop keeps a managed Git snapshot under its own data
 root and leaves the source directory untouched during registration.
@@ -94,6 +96,32 @@ The task console supports:
 - one-click delivery: the report is generated inside the confirmed call;
 - auditable task commits, target-branch reintegration, and confirmed delivery;
 - read-only display of `legacy-v1` tasks and their surviving artifacts.
+
+## Workbench V2
+
+The refactored workbench follows three boundaries described in the architecture
+report:
+
+- **Resource layer**: `ResourceCenter` groups multiple model aliases under each
+  provider. Models select either OpenAI Chat Completions or Claude Messages;
+  providers select Bearer, `x-api-key`, custom-header, or no authentication.
+  Credential values remain in separate local secret files and never enter
+  task/session JSON. The HTTP surface is `/api/v2/resources`.
+- **Orchestration layer**: `NodeRegistry`, `NodeCatalog`, `WorkflowCatalog`, and
+  `DagOrchestrator` validate a DAG, merge structured context between nodes,
+  persist node runs, and emit resumable events. Custom node contracts are
+  managed in the UI and persisted in `workbench/nodes.json` without loading
+  executable code from user configuration.
+- **Interaction layer**: `WorkbenchService` exposes projects and sessions with
+  explicit `chat` and `task` modes. The UI at `/` includes provider and model
+  CRUD, custom-node CRUD, workflow editing, explicit node-to-model bindings,
+  node progress, and shared context. Its API is under `/api/v2/*`.
+
+The existing `/api/agent/*` API remains an internal compatibility surface;
+new clients should use `/api/v2/*`. A model gateway is injected into
+  `WorkbenchService`. The bundled OpenAI-compatible gateway resolves stable model
+  aliases through the resource center and requires structured JSON from every
+  node; other vendor adapters can be injected without changing DAG or UI contracts.
 
 ## Workflows
 

@@ -36,9 +36,17 @@ class ModelOption:
     context_window: int = 0
     # Native-harness endpoint wiring. The API key itself never enters the
     # catalog: api_key_env names the environment variable (or the variable
-    # points at WORKLOOP_NATIVE_KEY_FILE) that holds it.
+    # points at WORKLOOP_NATIVE_KEY_FILE) that holds it; api_key_file points
+    # at a per-provider key file managed by the model registry.
     base_url: str = ""
     api_key_env: str = ""
+    api_key_file: str = ""
+    proxy: str = ""
+    # Wire protocol used by the in-process harness. ``openai_chat`` remains
+    # readable for catalogs created before protocol-aware providers existed;
+    # the management UI only creates ``codex`` (Responses) or ``claude``
+    # (Anthropic Messages) entries.
+    protocol: str = "openai_chat"
     max_tokens: int = 0
 
     @classmethod
@@ -72,6 +80,9 @@ class ModelOption:
             context_window=int(data.get("context_window", 0)),
             base_url=str(data.get("base_url", "")).strip(),
             api_key_env=str(data.get("api_key_env", "")).strip(),
+            api_key_file=str(data.get("api_key_file", "")).strip(),
+            proxy=str(data.get("proxy", "")).strip(),
+            protocol=str(data.get("protocol", "openai_chat")).strip() or "openai_chat",
             max_tokens=int(data.get("max_tokens", 0)),
         )
         option.validate()
@@ -94,6 +105,9 @@ class ModelOption:
             "context_window": self.context_window,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
+            "api_key_file": self.api_key_file,
+            "proxy": self.proxy,
+            "protocol": self.protocol,
             "max_tokens": self.max_tokens,
         }
 
@@ -114,6 +128,12 @@ class ModelOption:
             raise ValueError("model base_url must be an http(s) URL")
         if self.api_key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env):
             raise ValueError("model api_key_env is invalid")
+        if self.api_key_file and not self.api_key_file.startswith("keys/"):
+            raise ValueError("model api_key_file must live under keys/")
+        if self.proxy and not re.fullmatch(r"https?://[^\s]+", self.proxy):
+            raise ValueError("model proxy must be an http(s) URL")
+        if self.protocol not in {"codex", "claude", "openai_chat"}:
+            raise ValueError("model protocol must be codex or claude")
         if self.max_tokens < 0:
             raise ValueError("model max_tokens cannot be negative")
         if len(self.model) > 200:
@@ -231,6 +251,23 @@ class ExecutionComposer:
     ) -> ModelBinding:
         selected = self._select(capability, access, text)
         return self._binding(selected, capability, text)
+
+    def binding_for_profile(
+        self,
+        profile_id: str,
+        capability: str,
+        access: AgentAccess,
+        text: str,
+    ) -> ModelBinding:
+        option = self.catalog.get(profile_id)
+        if option.access is not access:
+            raise ValueError(
+                f"model profile {profile_id} cannot satisfy {access.value}"
+            )
+        required = "implementation" if access is AgentAccess.WORKSPACE_WRITE else capability
+        if required not in option.capabilities and "general" not in option.capabilities:
+            raise ValueError(f"model profile {profile_id} lacks {required}")
+        return self._binding(option, capability, text)
 
     def validate(self, graph: PlanGraph) -> None:
         graph.validate()
@@ -429,6 +466,7 @@ class ExecutionComposer:
             provider=model.provider,
             model=model.model,
             thinking=model.thinking,
+            protocol=model.protocol,
             estimated_cost_usd=self._estimated_cost(model, text),
             selection_reason=(
                 f"selected for {capability}; quality={model.quality}; "

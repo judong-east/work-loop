@@ -8,3 +8,13 @@ tasks/
 
 # runtime queue state (workflows.json stays tracked)
 agent-runtime/queue/
+agent-runtime/keys/
+agent-runtime/native-api-key
+agent-runtime/managed-projects/
+agent-runtime/projects/
+agent-profiles.json
+agent-runtime/model-providers.json
+agent-runtime/native-runtime.json
+
+# Workbench V2 stores local projects, sessions, provider credentials, and events.
+workbench/

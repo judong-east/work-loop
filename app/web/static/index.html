@@ -7,23 +7,23 @@
   <style>
     /* ===== Design Tokens (light) ===== */
     :root {
-      --bg: #f7f8fa;
+      --bg: #ffffff;
       --bg-elevated: #ffffff;
-      --surface: #f1f3f5;
-      --surface-hover: #e9ecef;
-      --surface-active: #e3e6ea;
-      --border: #e3e6ea;
+      --sidebar-bg: #f9f9f9;
+      --surface: #f4f4f4;
+      --surface-hover: #ececec;
+      --surface-active: #e3e3e3;
+      --bubble: #f4f4f4;
+      --border: #e5e5e5;
       --border-strong: #d0d5dd;
       --text: #1a1d23;
       --text-2: #4a5159;
       --text-muted: #6b7280;
       --text-dim: #9ca3af;
-      --accent: #6366f1;
-      --accent-bright: #4f46e5;
-      --accent-light: #eef2ff;
-      --accent-glow: rgba(99,102,241,.12);
-      --gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-      --gradient-soft: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
+      --accent: #10a37f;
+      --accent-bright: #0d8c6d;
+      --accent-light: #e8f7f2;
+      --accent-glow: rgba(16,163,127,.16);
       --green: #059669;
       --green-light: #ecfdf5;
       --amber: #d97706;
@@ -50,23 +50,23 @@
 
     /* ===== Design Tokens (dark) ===== */
     .dark {
-      --bg: #08080c;
-      --bg-elevated: #0e0e14;
-      --surface: rgba(255,255,255,.03);
-      --surface-hover: rgba(255,255,255,.06);
-      --surface-active: rgba(255,255,255,.09);
-      --border: rgba(255,255,255,.07);
-      --border-strong: rgba(255,255,255,.12);
+      --bg: #212121;
+      --bg-elevated: #2f2f2f;
+      --sidebar-bg: #171717;
+      --surface: #303030;
+      --surface-hover: #3a3a3a;
+      --surface-active: #424242;
+      --bubble: #303030;
+      --border: #3d3d3d;
+      --border-strong: #4a4a4a;
       --text: #f4f4f5;
       --text-2: #d4d4d8;
       --text-muted: #a1a1aa;
       --text-dim: #71717a;
-      --accent: #818cf8;
-      --accent-bright: #a5b4fc;
-      --accent-light: rgba(129,140,248,.12);
-      --accent-glow: rgba(129,140,248,.25);
-      --gradient: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
-      --gradient-soft: linear-gradient(135deg, rgba(129,140,248,.08) 0%, rgba(192,132,252,.08) 100%);
+      --accent: #10a37f;
+      --accent-bright: #19c69b;
+      --accent-light: rgba(16,163,127,.14);
+      --accent-glow: rgba(16,163,127,.25);
       --green: #34d399;
       --green-light: rgba(52,211,153,.12);
       --amber: #fbbf24;
@@ -87,7 +87,7 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.55 var(--font);
+      font: 14px/1.6 var(--font);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       font-feature-settings: "cv02","cv03","cv04","cv11";
@@ -100,7 +100,6 @@
     [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
     * { border-color: var(--border); }
 
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
@@ -109,102 +108,111 @@
     /* ===== App Shell ===== */
     .app-shell { display: flex; height: 100vh; overflow: hidden; }
 
-    /* ===== Sidebar ===== */
+    /* ===== Sidebar (conversation list) ===== */
     .sidebar {
-      display: flex; flex-direction: column; width: 264px; shrink: 0;
-      background: var(--bg-elevated); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; width: 272px; shrink: 0;
+      background: var(--sidebar-bg); border-right: 1px solid var(--border);
     }
-    .sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 20px 20px 16px; }
+    .sidebar-top { display: flex; align-items: center; gap: 10px; padding: 14px 14px 10px; }
     .brand-mark {
-      width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px;
-      background: var(--gradient); color: #fff; font-weight: 800; font-size: 15px;
-      box-shadow: var(--shadow-md); flex: none;
+      width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%;
+      background: var(--accent); color: #fff; font-weight: 800; font-size: 14px; flex: none;
     }
-    .sidebar-brand strong { font-size: 15px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2; }
-    .sidebar-brand span { display: block; font-size: 11px; color: var(--text-dim); font-weight: 400; }
+    .sidebar-top strong { font-size: 15px; font-weight: 650; letter-spacing: -.02em; }
+    .sidebar-close { display: none; margin-left: auto; color: var(--text-muted); font-size: 18px; padding: 4px 8px; border-radius: var(--radius-sm); }
+    .sidebar-close:hover { background: var(--surface-hover); }
 
-    .sidebar-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 16px 12px; }
-    .metric {
-      display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: var(--radius-sm);
-      background: var(--surface); border: 1px solid var(--border); transition: background .15s;
+    .new-task {
+      margin: 6px 12px 10px; padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13.5px; font-weight: 500;
+      display: flex; align-items: center; gap: 8px; color: var(--text);
+      border: 1px solid var(--border-strong); background: transparent; transition: background .15s;
     }
-    .metric:hover { background: var(--surface-hover); }
-    .metric-label { font-size: 11px; color: var(--text-dim); font-weight: 500; }
-    .metric-value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); letter-spacing: -.02em; }
-    .metric.attention .metric-value { color: var(--amber); }
-    .metric.problem .metric-value { color: var(--red); }
-    .metric.ready .metric-value { color: var(--green); }
+    .new-task:hover { background: var(--surface-hover); }
 
-    .side-head { padding: 0 16px 10px; }
-    .side-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    .side-title h1 { font-size: 11px; margin: 0; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); }
-    .filter-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: var(--surface); padding: 3px; border-radius: var(--radius-sm); }
+    .filter-tabs { display: flex; gap: 2px; padding: 0 12px 8px; }
     .filter-tabs button {
-      border-radius: var(--radius-xs); padding: 6px 4px; font-size: 12px; font-weight: 500;
+      border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 500;
       color: var(--text-muted); transition: all .15s;
     }
     .filter-tabs button:hover { color: var(--text); background: var(--surface-hover); }
-    .filter-tabs button.active { background: var(--bg-elevated); color: var(--accent-bright); box-shadow: var(--shadow-xs); }
+    .filter-tabs button.active { background: var(--surface-active); color: var(--text); }
 
-    .task-list { flex: 1; overflow-y: auto; overflow-x: hidden; padding-bottom: 8px; }
-    .task-row {
-      width: 100%; text-align: left; padding: 12px 16px; display: grid; gap: 6px;
-      border-bottom: 1px solid var(--border); transition: background .12s; position: relative;
+    .conv-list { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 1px; }
+    .conv-item {
+      width: 100%; text-align: left; display: flex; align-items: center; gap: 9px;
+      padding: 9px 10px; border-radius: var(--radius-sm); transition: background .12s; min-width: 0;
     }
-    .task-row:hover { background: var(--surface-hover); }
-    .task-row.selected { background: var(--accent-light); }
-    .task-row.selected::before {
-      content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
-      width: 3px; height: 24px; border-radius: 0 3px 3px 0; background: var(--gradient);
-    }
-    .task-row-top { display: flex; align-items: flex-start; gap: 8px; }
-    .task-row-title { font-weight: 500; min-width: 0; overflow-wrap: anywhere; flex: 1; color: var(--text); font-size: 13px; }
-    .task-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--text-dim); font-size: 11px; }
+    .conv-item:hover { background: var(--surface-hover); }
+    .conv-item.active { background: var(--surface-active); }
+    .conv-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: none; }
+    .conv-dot.running { background: var(--blue); animation: pulse-dot 1.5s ease-in-out infinite; }
+    .conv-dot.human { background: var(--amber); }
+    .conv-dot.failed { background: var(--red); }
+    .conv-dot.ready, .conv-dot.delivered { background: var(--green); }
+    .conv-title { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; color: var(--text); }
+    .conv-meta { flex: none; color: var(--text-dim); font-size: 10.5px; }
+    .conv-empty { padding: 24px 14px; color: var(--text-dim); font-size: 12.5px; text-align: center; line-height: 1.8; }
 
-    .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
-    .sidebar-footer .status-card {
-      display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--radius-sm);
-      background: var(--surface); border: 1px solid var(--border);
+    .sidebar-stats { padding: 8px 16px 4px; color: var(--text-dim); font-size: 11px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .sidebar-stats b { color: var(--text-muted); font-weight: 600; }
+    .sidebar-footer { padding: 10px 12px 12px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
+    .model-chip {
+      display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+      padding: 9px 11px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
+      background: transparent; font-size: 12.5px; color: var(--text-2); transition: background .15s;
     }
+    .model-chip:hover { background: var(--surface-hover); }
+    .model-chip .chip-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .model-chip.attention { color: var(--amber); border-color: var(--amber); }
+    .foot-links { display: flex; gap: 2px; }
+    .foot-links button {
+      flex: 1; padding: 7px 4px; border-radius: var(--radius-sm); font-size: 11.5px;
+      color: var(--text-muted); transition: all .15s;
+    }
+    .foot-links button:hover { color: var(--text); background: var(--surface-hover); }
     .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse-dot 2s ease-in-out infinite; flex: none; }
     @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
-    .sidebar-footer .status-card span { font-size: 12px; font-weight: 500; color: var(--text-muted); }
-    .sidebar-footer .status-card small { margin-left: auto; font-size: 10px; color: var(--text-dim); }
 
-    /* ===== Main Area ===== */
-    .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    .main-header {
-      display: flex; align-items: center; gap: 10px; padding: 0 24px; height: 56px; shrink: 0;
-      background: var(--bg-elevated); border-bottom: 1px solid var(--border); z-index: 10;
-    }
-    .main-header-title { font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: -.01em; }
-    .header-spacer { flex: 1; }
+    .backdrop { display: none; }
 
-    /* ===== Buttons ===== */
-    .top-btn, .icon-btn {
-      min-height: 34px; border-radius: var(--radius-sm); background: var(--bg-elevated); color: var(--text-2);
-      border: 1px solid var(--border-strong); padding: 7px 14px; font-size: 13px; font-weight: 500;
-      transition: all .15s; display: inline-flex; align-items: center; gap: 6px;
+    /* ===== Main chat area ===== */
+    .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+    .chat-topbar {
+      display: flex; align-items: center; gap: 10px; padding: 10px 18px; shrink: 0;
+      background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border); z-index: 10; min-height: 52px;
     }
-    .top-btn:hover, .icon-btn:hover { background: var(--surface-hover); color: var(--text); border-color: var(--text-dim); }
-    .icon-btn { width: 34px; padding: 0; font-size: 16px; justify-content: center; }
-    .primary {
-      background: var(--accent); color: #fff; border: 1px solid var(--accent);
-      box-shadow: 0 1px 2px var(--accent-glow);
-    }
-    .primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); color: #fff; }
-    .danger { background: var(--red); color: #fff; border: 1px solid var(--red); }
-    .danger:hover { background: #c92a3e; border-color: #c92a3e; color: #fff; }
-    .dark .danger:hover { background: #e5526a; border-color: #e5526a; }
-    .quiet { background: var(--bg-elevated); border: 1px solid var(--border-strong); color: var(--text-2); }
-    .quiet:hover { background: var(--surface-hover); color: var(--text); }
-    .cmd {
-      min-height: 34px; padding: 7px 14px; border-radius: var(--radius-sm); font-size: 13px;
-      font-weight: 500; border: 1px solid transparent; transition: all .15s;
-      display: inline-flex; align-items: center; gap: 6px;
-    }
+    .menu-button { display: none; width: 34px; height: 34px; border-radius: var(--radius-sm); color: var(--text-2); font-size: 17px; }
+    .menu-button:hover { background: var(--surface-hover); }
+    .topbar-title { font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: -.01em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .topbar-actions { margin-left: auto; display: flex; gap: 2px; }
+    .icon-ghost { width: 34px; height: 34px; border-radius: var(--radius-sm); color: var(--text-2); font-size: 15px; display: grid; place-items: center; }
+    .icon-ghost:hover { background: var(--surface-hover); color: var(--text); }
 
-    /* ===== Status Pills ===== */
+    .thread-scroll { flex: 1; overflow-y: auto; }
+    .thread { max-width: 768px; margin: 0 auto; padding: 24px 20px 48px; display: flex; flex-direction: column; gap: 22px; }
+
+    /* ===== Messages ===== */
+    .msg { display: flex; gap: 12px; }
+    .msg.user { justify-content: flex-end; }
+    .msg.user .bubble {
+      background: var(--bubble); border-radius: 18px; padding: 12px 16px; max-width: 85%;
+      overflow-wrap: anywhere;
+    }
+    .msg.user .bubble strong { display: block; font-size: 13px; color: var(--text-muted); font-weight: 600; margin-bottom: 4px; }
+    .msg.user .bubble p { margin: 0; white-space: pre-wrap; }
+    .avatar {
+      width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none;
+      background: var(--accent); color: #fff; font-weight: 800; font-size: 13px; margin-top: 2px;
+    }
+    .msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+    .ai-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ai-stage { color: var(--text-muted); font-size: 12.5px; }
+    .typing { display: inline-flex; gap: 4px; align-items: center; }
+    .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); animation: typing-blink 1.2s infinite; }
+    .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+    @keyframes typing-blink { 0%,80%,100% { opacity: .25; } 40% { opacity: 1; } }
+
     .status {
       display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 2px 9px;
       border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap;
@@ -217,126 +225,128 @@
     .status.ready, .status.delivered { color: var(--green); background: var(--green-light); }
     .status.running::before, .status.queued::before { animation: pulse-dot 1.5s ease-in-out infinite; }
 
-    /* ===== Workspace ===== */
-    .workspace { flex: 1; overflow-y: auto; background: var(--bg); }
-    .empty {
-      height: 100%; display: grid; place-items: center; color: var(--text-dim); font-size: 14px;
+    /* ===== Cards inside assistant messages ===== */
+    .card {
+      padding: 16px 18px; background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow-xs); overflow: hidden;
     }
-    .detail { max-width: 1080px; margin: 0 auto; padding: 28px 32px 80px; }
-    .detail-head { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 24px; }
-    .mobile-back { display: none; }
-    .detail-title { min-width: 0; flex: 1; }
-    .detail-title h2 { font-size: 24px; line-height: 1.25; margin: 0 0 6px; overflow-wrap: anywhere; font-weight: 600; letter-spacing: -.02em; }
-    .detail-title p { margin: 0; color: var(--text-muted); font-size: 13px; }
-    .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: flex-start; }
-    .resolution {
-      max-width: 320px; padding: 10px 13px; border-left: 3px solid var(--amber);
-      background: var(--amber-light); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-    }
-    .resolution strong, .resolution span { display: block; }
-    .resolution strong { font-size: 13px; color: var(--amber); }
-    .resolution span { margin-top: 3px; color: var(--amber); font-size: 12px; opacity: .85; }
-
-    /* ===== Pipeline (stepper) ===== */
-    .pipeline {
-      display: grid; gap: 0; margin: 0 0 22px; background: var(--bg-elevated);
-      border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
-      box-shadow: var(--shadow-xs);
-    }
-    .stage { position: relative; min-height: 74px; padding: 14px 10px 11px; border-right: 1px solid var(--border); text-align: center; }
-    .stage:last-child { border-right: 0; }
-    .stage::before {
-      content: ""; position: absolute; left: 50%; top: 13px; transform: translateX(-50%);
-      width: 14px; height: 14px; border-radius: 50%; background: var(--bg-elevated);
-      border: 2px solid var(--border-strong); transition: all .2s;
-    }
-    .stage.done::before { background: var(--green); border-color: var(--green); }
-    .stage.current::before { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
-    .stage strong { display: block; font-size: 12px; font-weight: 500; margin-top: 22px; color: var(--text-muted); }
-    .stage span { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-    .stage.current strong, .stage.done strong { color: var(--text); font-weight: 600; }
-    .stage.stage-planner::before { border-color: var(--amber); }
-    .stage.stage-plan_approval::before { border-color: var(--accent); }
-    .stage.stage-executor::before { border-color: var(--green); }
-    .stage.stage-validation::before { border-color: var(--cyan); }
-    .stage.stage-reviewer::before { border-color: var(--violet); }
-    .stage.stage-delivery::before { border-color: var(--text-dim); }
-
-    /* ===== Alerts & Sections ===== */
-    .alert {
-      padding: 12px 14px; border-left: 3px solid var(--amber); background: var(--amber-light);
-      margin-bottom: 18px; overflow-wrap: anywhere; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-      font-size: 13px; color: var(--amber);
-    }
-    .alert.error { border-color: var(--red); background: var(--red-light); color: var(--red); }
-    .path-field { display: grid; gap: 6px; font-size: 13px; font-weight: 500; }
-    .path-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; }
-    .path-picker .cmd { min-height: 38px; white-space: nowrap; }
-    .directory-controls { display: grid; grid-template-columns: 100px minmax(0, 1fr) auto; gap: 8px; }
-    .directory-list { min-height: 280px; max-height: min(52vh, 520px); padding: 6px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
-    .directory-entry { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 5px; color: var(--text); background: transparent; text-align: left; font: inherit; cursor: pointer; }
-    .directory-entry:hover, .directory-entry:focus-visible { background: var(--surface-hover); color: var(--accent); }
-    .directory-empty { padding: 28px 16px; color: var(--text-muted); text-align: center; }
-    .directory-note { min-height: 18px; color: var(--text-muted); font-size: 12px; }
-    .section {
-      padding: 20px 22px; background: var(--bg-elevated); border: 1px solid var(--border);
-      border-radius: var(--radius); margin-bottom: 14px; box-shadow: var(--shadow-xs);
-    }
-    .section:first-of-type { margin-top: 0; }
-    .section h3 {
-      font-size: 14px; margin: 0 0 14px; font-weight: 600; letter-spacing: -.01em;
+    .card > h3 {
+      font-size: 13.5px; margin: 0 0 12px; font-weight: 600; letter-spacing: -.01em;
       display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text);
     }
-    .section h3 span {
-      font-size: 11px; font-weight: 600; color: var(--text-muted); background: var(--surface);
-      padding: 3px 9px; border-radius: 999px;
+    .card > h3 span { font-size: 11px; font-weight: 600; color: var(--text-muted); background: var(--surface); padding: 3px 9px; border-radius: 999px; }
+    .card h4 { font-size: 11px; margin: 14px 0 7px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 600; }
+    .card.collapsible { padding: 0; }
+    .card.collapsible > summary {
+      list-style: none; cursor: pointer; padding: 13px 18px; display: flex; align-items: center; gap: 8px;
+      font-size: 13.5px; font-weight: 600; color: var(--text); user-select: none;
     }
-    .section h4 {
-      font-size: 11px; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: .06em;
-      color: var(--text-dim); font-weight: 600;
+    .card.collapsible > summary::-webkit-details-marker { display: none; }
+    .card.collapsible > summary::after { content: "▾"; margin-left: 0; color: var(--text-dim); transition: transform .15s; }
+    .card.collapsible[open] > summary::after { transform: rotate(180deg); }
+    .card.collapsible > .card-inner { padding: 0 18px 16px; }
+    .card.collapsible > summary .badge {
+      margin-left: auto; font-size: 11px; font-weight: 600; color: var(--text-muted);
+      background: var(--surface); padding: 3px 9px; border-radius: 999px;
     }
-    .kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 10px 16px; margin: 0; }
-    .kv dt { color: var(--text-muted); font-size: 13px; }
-    .kv dd { margin: 0; overflow-wrap: anywhere; font-size: 13px; color: var(--text); }
-    .kv code, code {
-      font: 12px var(--mono); background: var(--surface); padding: 2px 6px; border-radius: 4px;
-      color: var(--accent-bright);
-    }
-    .compact-list { margin: 0; padding-left: 18px; color: var(--text-2); }
-    .compact-list li { margin: 3px 0; }
-    details summary { cursor: pointer; color: var(--accent-bright); font-weight: 600; font-size: 13px; margin: 8px 0; }
-    details summary:hover { text-decoration: underline; }
 
-    /* ===== Code & Tables ===== */
+    .kv { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 8px 14px; margin: 0; }
+    .kv dt { color: var(--text-muted); font-size: 12.5px; }
+    .kv dd { margin: 0; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text); }
+    .kv code, code { font: 11.5px var(--mono); background: var(--surface); padding: 2px 6px; border-radius: 4px; color: var(--accent-bright); }
+    .compact-list { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 12.5px; }
+    .compact-list li { margin: 3px 0; }
+
+    .alert {
+      padding: 11px 14px; border-left: 3px solid var(--amber); background: var(--amber-light);
+      overflow-wrap: anywhere; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; font-size: 13px; color: var(--amber);
+    }
+    .alert.error { border-color: var(--red); background: var(--red-light); color: var(--red); }
+
     pre {
-      margin: 0; padding: 14px 16px; overflow: auto; max-height: 460px;
-      background: #0f1117; color: #d4d7de; border-radius: var(--radius-sm); font: 12.5px/1.6 var(--mono);
+      margin: 0; padding: 12px 14px; overflow: auto; max-height: 420px;
+      background: #0f1117; color: #d4d7de; border-radius: var(--radius-sm); font: 12px/1.6 var(--mono);
       white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #1e222b;
     }
     .diff-add { color: #4ade80; } .diff-del { color: #f87171; } .diff-head { color: #60a5fa; }
-    table {
-      width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid var(--border);
-      border-radius: var(--radius-sm); overflow: hidden;
-    }
-    th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-    th { background: var(--surface); color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+    th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+    th { background: var(--surface); color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
     tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: var(--surface-hover); }
     .pass { color: var(--green); font-weight: 700; } .fail { color: var(--red); font-weight: 700; }
 
-    /* ===== Events timeline ===== */
-    .event-list { display: grid; gap: 0; border-left: 2px solid var(--border); margin-left: 8px; }
-    .event {
-      position: relative; display: grid; grid-template-columns: 100px 120px minmax(0, 1fr);
-      gap: 12px; padding: 8px 12px 8px 18px; font-size: 12px;
-    }
-    .event::before {
-      content: ""; position: absolute; left: -7px; top: 14px; width: 12px; height: 12px;
-      border-radius: 50%; background: var(--bg-elevated); border: 2px solid var(--violet);
-    }
+    .event-list { display: grid; gap: 0; border-left: 2px solid var(--border); margin-left: 6px; }
+    .event { position: relative; display: grid; grid-template-columns: 86px minmax(0,1fr); gap: 8px; padding: 5px 8px 5px 14px; font-size: 11.5px; }
+    .event::before { content: ""; position: absolute; left: -6px; top: 11px; width: 9px; height: 9px; border-radius: 50%; background: var(--bg-elevated); border: 2px solid var(--text-dim); }
     .event small { color: var(--text-dim); }
-    .event strong { color: var(--text); font-weight: 600; }
-    .event span { color: var(--text-2); }
+    .event strong { color: var(--text-2); font-weight: 600; }
+    .event span { color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+    .actions-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .cmd {
+      min-height: 32px; padding: 6px 13px; border-radius: var(--radius-sm); font-size: 12.5px;
+      font-weight: 500; border: 1px solid transparent; transition: all .15s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+    .primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); color: #fff; }
+    .danger { background: var(--red); color: #fff; border: 1px solid var(--red); }
+    .danger:hover { filter: brightness(1.08); }
+    .quiet { background: transparent; border: 1px solid var(--border-strong); color: var(--text-2); }
+    .quiet:hover { background: var(--surface-hover); color: var(--text); }
+    .resolution {
+      max-width: 420px; padding: 10px 13px; border-left: 3px solid var(--amber);
+      background: var(--amber-light); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    }
+    .resolution strong { display: block; font-size: 12.5px; color: var(--amber); }
+    .resolution span { margin-top: 3px; color: var(--amber); font-size: 12px; opacity: .85; }
+    .ai-meta { color: var(--text-dim); font-size: 11.5px; overflow-wrap: anywhere; }
+
+    /* ===== Empty state ===== */
+    .empty-state { max-width: 768px; margin: 0 auto; padding: 9vh 20px 40px; text-align: center; }
+    .empty-state h2 { font-size: 26px; font-weight: 650; letter-spacing: -.02em; margin: 0 0 10px; }
+    .empty-state p { color: var(--text-muted); margin: 0 0 22px; font-size: 14px; }
+    .suggestions { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); max-width: 640px; margin: 0 auto; }
+    .suggestion {
+      text-align: left; padding: 13px 15px; border: 1px solid var(--border); border-radius: var(--radius);
+      font-size: 13px; color: var(--text-2); background: transparent; transition: all .15s;
+    }
+    .suggestion:hover { background: var(--surface-hover); color: var(--text); border-color: var(--border-strong); }
+    .suggestion strong { display: block; color: var(--text); font-weight: 600; margin-bottom: 3px; font-size: 12.5px; }
+    .setup-first {
+      display: inline-flex; align-items: center; gap: 8px; margin-top: 26px; padding: 10px 16px;
+      border: 1px solid var(--amber); color: var(--amber); border-radius: 999px; font-size: 13px;
+    }
+    .setup-first:hover { background: var(--amber-light); }
+
+    /* ===== Composer ===== */
+    .composer-zone { shrink: 0; padding: 0 20px 14px; background: linear-gradient(to bottom, transparent, var(--bg) 26px); }
+    .composer {
+      max-width: 768px; margin: 0 auto; border: 1px solid var(--border-strong); border-radius: 26px;
+      background: var(--bg-elevated); box-shadow: var(--shadow-sm); padding: 6px 8px 8px 16px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .composer:focus-within { border-color: var(--text-dim); box-shadow: var(--shadow-md); }
+    .composer textarea {
+      width: 100%; border: 0; background: transparent; resize: none; outline: none; padding: 10px 0 4px;
+      max-height: 200px; font-size: 14px; line-height: 1.55;
+    }
+    .composer textarea::placeholder { color: var(--text-dim); }
+    .composer-row { display: flex; align-items: center; gap: 8px; }
+    .pill-select {
+      width: auto; max-width: 180px; border: 1px solid var(--border); border-radius: 999px;
+      padding: 4px 10px; font-size: 11.5px; color: var(--text-2); background: transparent;
+    }
+    .pill-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); outline: none; }
+    .composer-hint { flex: 1; min-width: 0; color: var(--text-dim); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .send-btn {
+      width: 36px; height: 36px; border-radius: 50%; background: var(--text); color: var(--bg);
+      display: grid; place-items: center; font-size: 15px; flex: none; transition: opacity .15s, transform .1s;
+    }
+    .send-btn:hover { opacity: .85; }
+    .send-btn:active { transform: scale(.94); }
+    .send-btn:disabled { opacity: .3; cursor: default; }
+    .composer-note { max-width: 768px; margin: 8px auto 0; text-align: center; color: var(--text-dim); font-size: 11px; }
 
     /* ===== Dialogs ===== */
     dialog {
@@ -344,12 +354,16 @@
       padding: 0; box-shadow: var(--shadow-xl); background: var(--bg-elevated); color: var(--text);
     }
     dialog::backdrop { background: rgba(8,8,12,.55); backdrop-filter: blur(4px); }
-    .dialog-head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 18px 22px; border-bottom: 1px solid var(--border);
-    }
+    .dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--border); }
     .dialog-head h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
     .dialog-body { padding: 22px; display: grid; gap: 14px; }
+    .project-create-hint { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--accent-light); color: var(--text-2); font-size: 12px; }
+    .project-advanced { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 12px; }
+    .project-advanced summary { cursor: pointer; color: var(--text-muted); font-size: 12.5px; }
+    .project-advanced[open] summary { margin-bottom: 12px; }
+    .protocol-options { display: flex; gap: 14px; flex-wrap: wrap; margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .protocol-options legend { padding: 0 5px; color: var(--text-muted); font-size: 11px; }
+    .protocol-options label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px; border-top: 1px solid var(--border); }
     label { display: grid; gap: 6px; font-weight: 500; font-size: 13px; color: var(--text); }
     label span { font-size: 12px; color: var(--text-muted); font-weight: 400; }
@@ -361,9 +375,40 @@
     input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
     textarea { min-height: 100px; resize: vertical; }
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .text-muted { color: var(--text-muted); }
+    .path-field { display: grid; gap: 6px; font-size: 13px; font-weight: 500; }
+    .path-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; }
+    .path-picker .cmd { min-height: 38px; white-space: nowrap; }
+    .directory-controls { display: grid; grid-template-columns: 100px minmax(0, 1fr) auto; gap: 8px; }
+    .directory-list { min-height: 280px; max-height: min(52vh, 520px); padding: 6px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+    .directory-entry { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 5px; color: var(--text); background: transparent; text-align: left; font: inherit; cursor: pointer; }
+    .directory-entry:hover, .directory-entry:focus-visible { background: var(--surface-hover); color: var(--accent); }
+    .directory-empty { padding: 28px 16px; color: var(--text-muted); text-align: center; }
+    .directory-note { min-height: 18px; color: var(--text-muted); font-size: 12px; }
     .runtime-grid { display: grid; grid-template-columns: 110px 1fr 1fr; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
     .runtime-grid > div { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
     .runtime-grid > div:nth-last-child(-n+3) { border-bottom: 0; }
+    .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); margin-right: 6px; }
+    .health-dot.ok { background: var(--green); } .health-dot.bad { background: var(--red); }
+    .admin-section-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+    .admin-section-head strong { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
+    .admin-section-head .cmd { min-height: 28px; padding: 4px 12px; font-size: 12px; }
+    .provider-grid { display: grid; gap: 10px; }
+    .provider-card { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+    .provider-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .provider-card-head strong { font-size: 13.5px; }
+    .provider-card-head .cmd { min-height: 26px; padding: 3px 10px; font-size: 11.5px; margin-left: auto; }
+    .provider-card-head .cmd + .cmd { margin-left: 0; }
+    .provider-card small { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+    .model-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .model-table th, .model-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+    .model-table th { color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+    .model-table .cmd { min-height: 24px; padding: 2px 9px; font-size: 11px; }
+    .role-binding-row { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
+    .role-binding-row:last-child { border-bottom: 0; }
+    .role-binding-row > strong { font-size: 13px; text-transform: capitalize; }
+    .role-binding-row select { padding: 6px 10px; font-size: 12.5px; }
+    .admin-empty { padding: 18px 14px; color: var(--text-muted); text-align: center; font-size: 12.5px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
     .workflow-list { display: grid; border-top: 1px solid var(--border); margin-bottom: 4px; }
     .workflow-section-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
     .workflow-section-head strong { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
@@ -374,7 +419,7 @@
     .workflow-row span { color: var(--text-muted); font-size: 12px; }
     .workflow-row .cmd { min-height: 28px; padding: 4px 12px; font-size: 12px; }
     .node-list { display: grid; gap: 8px; }
-    .node-row { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; display: grid; gap: 8px; background: var(--surface); transition: border-color .15s, box-shadow .15s; }
+    .node-row { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; display: grid; gap: 8px; background: var(--bg-elevated); transition: border-color .15s, box-shadow .15s; }
     .node-row:hover { border-color: var(--border-strong); }
     .node-row.dragging { opacity: .5; border-style: dashed; }
     .node-row.drag-over { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
@@ -396,8 +441,6 @@
     .node-row textarea { min-height: 48px; font-size: 12px; }
     .node-add-zone { display: flex; justify-content: center; padding: 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
     .node-add-zone button { gap: 6px; }
-    .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); margin-right: 6px; }
-    .health-dot.ok { background: var(--green); } .health-dot.bad { background: var(--red); }
     .composition-list { display: grid; gap: 0; border-top: 1px solid var(--border); }
     .composition-item { display: grid; grid-template-columns: 28px minmax(150px,1.4fr) minmax(140px,1fr) minmax(90px,.7fr); gap: 12px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--border); }
     .composition-index { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; font-size: 11px; color: var(--text-muted); }
@@ -447,6 +490,7 @@
     .graph-hint { min-height: 18px; color: var(--text-muted); font-size: 12px; }
     .graph-hint.active { color: var(--green); font-weight: 600; }
     @media (max-width: 700px) { .composition-item { grid-template-columns: 28px 1fr; } .composition-item > :nth-child(n+3) { grid-column: 2; } }
+    @media (max-width: 768px) { .dialog-body { padding: 16px; } }
 
     /* ===== Toast & utilities ===== */
     .toast {
@@ -455,42 +499,22 @@
       border: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: 50; font-size: 13px;
     }
     .hidden { display: none !important; }
-
-    /* ===== Skip link ===== */
     .skip-link {
       position: fixed; left: 12px; top: -60px; z-index: 100; padding: 8px 12px;
       background: var(--bg-elevated); color: var(--text); border-radius: var(--radius-sm); box-shadow: var(--shadow-lg);
     }
     .skip-link:focus { top: 10px; }
 
-    /* ===== Theme toggle ===== */
-    .theme-toggle {
-      width: 34px; height: 34px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
-      background: var(--bg-elevated); display: grid; place-items: center; font-size: 16px;
-      transition: all .15s; color: var(--text-2);
-    }
-    .theme-toggle:hover { background: var(--surface-hover); color: var(--text); border-color: var(--text-dim); }
-
     /* ===== Responsive ===== */
     @media (max-width: 900px) {
-      .sidebar { width: 220px; }
-      .sidebar-metrics { grid-template-columns: 1fr 1fr; }
-    }
-    @media (max-width: 768px) {
-      .app-shell { flex-direction: column; }
-      .sidebar { width: 100%; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--border); }
-      .sidebar-metrics { grid-template-columns: repeat(4, 1fr); }
-      .metric { padding: 6px 8px; }
-      .metric-value { font-size: 14px; }
-      .task-list { max-height: none; }
-      .app-shell.has-selection .sidebar { display: none; }
-      .mobile-back { display: inline-flex; align-items: center; align-self: start; }
-      .detail { padding: 16px 14px 60px; }
-      .detail-head { display: grid; }
-      .actions { justify-content: flex-start; }
-      .pipeline { overflow-x: auto; }
+      .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow-xl); }
+      body.sidebar-open .sidebar { transform: translateX(0); }
+      body.sidebar-open .backdrop { display: block; position: fixed; inset: 0; z-index: 39; background: rgba(0,0,0,.4); }
+      .sidebar-close { display: block; }
+      .menu-button { display: grid; place-items: center; }
+      .thread { padding: 18px 16px 40px; }
+      .composer-zone { padding: 0 12px 10px; }
       .kv { grid-template-columns: 1fr; gap: 3px; } .kv dd { margin-bottom: 7px; }
-      .event { grid-template-columns: 90px 1fr; } .event > :last-child { grid-column: 1 / -1; }
       .form-grid { grid-template-columns: 1fr; }
       .runtime-grid { grid-template-columns: 90px 1fr; }
       .runtime-grid > div:nth-child(3n) { grid-column: 2; }
@@ -505,112 +529,104 @@
   <a class="skip-link" href="#workspace">跳到任务详情</a>
 
   <div class="app-shell" id="app">
-    <!-- ===== Sidebar ===== -->
-    <aside class="sidebar">
-      <div class="sidebar-brand">
+    <!-- ===== Sidebar: conversations ===== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
         <div class="brand-mark" aria-hidden="true">W</div>
-        <div>
-          <strong>Workloop</strong>
-          <span>任务操作台</span>
-        </div>
+        <strong>Workloop</strong>
+        <button class="sidebar-close" id="sidebarClose" type="button" aria-label="收起侧栏">×</button>
       </div>
 
-      <div class="sidebar-metrics" id="metrics" role="status" aria-live="polite" aria-label="运行指标">
-        <div class="metric">
-          <span class="metric-label">运行</span>
-          <span class="metric-value" id="metricRunning">0</span>
-        </div>
-        <div class="metric attention">
-          <span class="metric-label">待处理</span>
-          <span class="metric-value" id="metricWaiting">0</span>
-        </div>
-        <div class="metric problem">
-          <span class="metric-label">异常</span>
-          <span class="metric-value" id="metricProblems">0</span>
-        </div>
-        <div class="metric ready">
-          <span class="metric-label">待交付</span>
-          <span class="metric-value" id="metricReady">0</span>
-        </div>
+      <button class="new-task" id="newTaskButton" type="button">＋ 新任务</button>
+
+      <div class="filter-tabs" role="group" aria-label="任务筛选">
+        <button type="button" data-filter="all" aria-pressed="true" class="active">全部</button>
+        <button type="button" data-filter="attention" aria-pressed="false">待处理</button>
+        <button type="button" data-filter="ready" aria-pressed="false">待交付</button>
       </div>
 
-      <div class="side-head">
-        <div class="side-title">
-          <h1>任务</h1>
-          <button class="icon-btn quiet" id="projectButton" type="button" title="注册项目" aria-label="注册项目" style="min-height:28px;width:28px;font-size:14px;">＋</button>
-        </div>
-        <div class="filter-tabs" role="group" aria-label="任务筛选">
-          <button type="button" data-filter="all" aria-pressed="true" class="active">全部</button>
-          <button type="button" data-filter="attention" aria-pressed="false">待处理</button>
-          <button type="button" data-filter="ready" aria-pressed="false">待交付</button>
-        </div>
-      </div>
+      <nav class="conv-list" id="taskList" aria-label="任务列表" aria-live="polite"></nav>
 
-      <div class="task-list" id="taskList" aria-live="polite"></div>
+      <div class="sidebar-stats" id="metrics" role="status" aria-live="polite" aria-label="运行指标">
+        运行 <b id="metricRunning">0</b> 待处理 <b id="metricWaiting">0</b>
+        异常 <b id="metricProblems">0</b> 待交付 <b id="metricReady">0</b>
+      </div>
 
       <div class="sidebar-footer">
-        <div class="status-card">
-          <span class="pulse-dot"></span>
-          <span>本地运行中</span>
-          <small>v1.0</small>
+        <button class="model-chip" id="modelChip" type="button">
+          <span class="pulse-dot" id="modelChipDot"></span>
+          <span class="chip-label" id="modelChipLabel">检查模型接入…</span>
+        </button>
+        <div class="foot-links">
+          <button id="modelAdminButton" type="button">模型管理</button>
+          <button id="runtimeButton" type="button">运行时</button>
+          <button id="workflowButton" type="button">推进策略</button>
+          <button id="projectButton" type="button">新建项目</button>
         </div>
       </div>
     </aside>
+    <div class="backdrop" id="sidebarBackdrop"></div>
 
-    <!-- ===== Main Area ===== -->
+    <!-- ===== Main chat ===== -->
     <div class="main-area">
-      <header class="main-header">
-        <button class="top-btn" id="runtimeButton" type="button">运行时</button>
-        <button class="top-btn" id="workflowButton" type="button">推进策略</button>
-        <div class="header-spacer"></div>
-        <button class="theme-toggle" id="themeToggle" type="button" title="切换主题" aria-label="切换主题">🌙</button>
-        <button class="icon-btn" id="refreshButton" type="button" title="刷新" aria-label="刷新任务">↻</button>
-        <button class="top-btn primary" id="newTaskButton" type="button">新建任务</button>
+      <header class="chat-topbar">
+        <button class="menu-button" id="menuButton" type="button" aria-label="打开任务列表">☰</button>
+        <div class="topbar-title" id="topbarTitle">Workloop</div>
+        <div class="topbar-actions">
+          <button class="icon-ghost" id="refreshButton" type="button" title="刷新" aria-label="刷新任务">↻</button>
+          <button class="icon-ghost" id="themeToggle" type="button" title="切换主题" aria-label="切换主题">🌙</button>
+        </div>
       </header>
-      <section class="workspace" id="workspace" aria-live="polite"><div class="empty">暂无任务</div></section>
+
+      <div class="thread-scroll" id="workspace">
+        <div class="empty-state" id="emptyState">
+          <h2>今天要做点什么？</h2>
+          <p>描述一个开发任务，Workloop 会自动规划、执行、验证并审核，交付前由你确认。</p>
+          <div class="suggestions">
+            <button class="suggestion" type="button" aria-label="写代码：实现一个函数或小工具" data-suggest="写一个 Python 脚本 hello.py，实现 greet(name) 函数，返回中文问候语"><strong>写代码</strong>实现一个函数或小工具</button>
+            <button class="suggestion" type="button" aria-label="补测试：为核心逻辑补单元测试" data-suggest="给现有项目补充一个单元测试，覆盖核心分支"><strong>补测试</strong>为核心逻辑补单元测试</button>
+            <button class="suggestion" type="button" aria-label="重构：改善结构且不改变行为" data-suggest="重构一个模块，保持外部行为不变，并说明收益"><strong>重构</strong>改善结构且不改变行为</button>
+          </div>
+          <button class="setup-first hidden" id="setupFirst" type="button">⚠ 尚未接入模型，点此配置</button>
+        </div>
+        <div class="thread hidden" id="thread" aria-live="polite"></div>
+      </div>
+
+      <div class="composer-zone">
+        <div class="composer">
+          <textarea id="composerInput" rows="1" placeholder="描述你的开发任务…（Enter 发送，Shift+Enter 换行）" aria-label="任务需求"></textarea>
+          <div class="composer-row">
+            <select class="pill-select" id="composerProject" aria-label="项目"></select>
+            <select class="pill-select" id="composerWorkflow" aria-label="推进策略"></select>
+            <span class="composer-hint" id="composerHint"></span>
+            <button class="send-btn" id="composerSend" type="button" aria-label="发送任务" title="发送">➤</button>
+          </div>
+        </div>
+        <p class="composer-note">由 Workloop 规划 → 执行 → 验证 → 审核，最终交付由你一键确认。</p>
+      </div>
     </div>
   </div>
 
   <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
 
   <!-- ===== Dialogs ===== -->
-  <dialog id="taskDialog" aria-labelledby="taskDialogTitle">
-    <form method="dialog" id="taskForm">
-      <div class="dialog-head"><h2 id="taskDialogTitle">新建任务</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
-      <div class="dialog-body">
-        <label>项目<select id="taskProject" required></select></label>
-        <label>推进策略<span>quick 为默认：无审批门禁，交付一处确认</span><select id="taskWorkflow" required></select></label>
-        <label>标题<input id="taskTitle" required maxlength="160"></label>
-        <label>需求<textarea id="taskRequirement" required></textarea></label>
-        <details><summary>预算</summary><div class="form-grid" style="margin-top:12px">
-          <label>总时长（秒）<input id="taskTotal" type="number" min="1" value="7200"></label>
-          <label>单次调用（秒）<input id="taskCall" type="number" min="1" value="1800"></label>
-          <label>无事件（秒）<input id="taskIdle" type="number" min="1" value="120"></label>
-          <label>最大轮次<input id="taskRounds" type="number" min="1" value="3"></label>
-          <label>总 Token 上限<input id="taskTokens" type="number" min="1" placeholder="不限制"></label>
-          <label>输入 Token 上限<input id="taskInputTokens" type="number" min="1" placeholder="不限制"></label>
-          <label>输出 Token 上限<input id="taskOutputTokens" type="number" min="1" placeholder="不限制"></label>
-        </div></details>
-      </div>
-      <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd primary" type="submit" value="default">创建</button></div>
-    </form>
-  </dialog>
-
   <dialog id="projectDialog" aria-labelledby="projectDialogTitle">
     <form method="dialog" id="projectForm">
-      <div class="dialog-head"><h2 id="projectDialogTitle">注册项目</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="projectDialogTitle">新建项目</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body">
-        <label>名称<input id="projectName" required maxlength="120"></label>
+        <div class="project-create-hint">项目会保存目录和长期指令，新任务自动继承这些上下文。</div>
+        <label>项目名称<input id="projectName" required maxlength="120" placeholder="选择目录后自动填写，也可以修改"></label>
         <div class="path-field"><label for="projectPath">项目目录</label><div class="path-picker"><input id="projectPath" required placeholder="选择或粘贴任意本地项目目录"><button class="cmd quiet" id="browseProjectPath" type="button" aria-label="选择项目目录">选择…</button></div></div>
-        <div class="form-grid"><label>目标分支<span>Git 项目留空则自动检测</span><input id="projectBranch" placeholder="自动检测；普通目录默认 main"></label><label>项目配置<span>普通目录缺失时自动生成安全默认值</span><input id="projectConfig" value=".workloop/project.toml"></label></div>
+        <label>项目指令<span>长期有效的约束、风格和背景；任务会自动带上</span><textarea id="projectInstructions" maxlength="8000" rows="4" placeholder="例如：使用中文回复；优先修改 src/；提交前运行项目测试"></textarea></label>
+        <details class="project-advanced"><summary>高级设置</summary><div class="form-grid"><label>目标分支<span>Git 项目留空则自动检测</span><input id="projectBranch" placeholder="自动检测；普通目录默认 main"></label><label>项目配置<span>普通目录缺失时自动生成安全默认值</span><input id="projectConfig" value=".workloop/project.toml"></label></div></details>
         <div class="directory-note">支持普通文件夹。Workloop 会在外部数据目录维护隔离快照，不会在源目录中创建 <code>.git</code>。</div>
       </div>
-      <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd primary" type="submit" value="default">注册</button></div>
+      <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd primary" type="submit" value="default">创建项目</button></div>
     </form>
   </dialog>
 
   <dialog id="directoryDialog" aria-labelledby="directoryDialogTitle" style="width:min(760px,calc(100vw - 28px));">
-    <div class="dialog-head"><h2 id="directoryDialogTitle">选择项目目录</h2><button class="icon-btn quiet" data-close="directoryDialog" aria-label="关闭">×</button></div>
+    <div class="dialog-head"><h2 id="directoryDialogTitle">选择项目目录</h2><button class="icon-ghost" data-close="directoryDialog" aria-label="关闭" style="width:30px;height:30px">×</button></div>
     <div class="dialog-body">
       <div class="directory-controls"><select id="directoryRoot" aria-label="磁盘或根目录"></select><input id="directoryCurrentPath" aria-label="当前目录"><button class="cmd quiet" id="directoryGo" type="button">打开</button></div>
       <div class="directory-note" id="directoryNote"></div>
@@ -620,13 +636,106 @@
   </dialog>
 
   <dialog id="runtimeDialog" aria-labelledby="runtimeDialogTitle">
-    <div class="dialog-head"><h2 id="runtimeDialogTitle">运行时</h2><button class="icon-btn quiet" data-close="runtimeDialog" aria-label="关闭">×</button></div>
+    <div class="dialog-head"><h2 id="runtimeDialogTitle">运行时</h2><button class="icon-ghost" data-close="runtimeDialog" aria-label="关闭" style="width:30px;height:30px">×</button></div>
     <div class="dialog-body" id="runtimeBody"></div>
+  </dialog>
+
+  <dialog id="nativeDialog" aria-labelledby="nativeDialogTitle">
+    <form method="dialog" id="nativeForm">
+      <div class="dialog-head"><h2 id="nativeDialogTitle">接入模型</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
+      <div class="dialog-body">
+        <p class="text-muted" style="margin:0 0 12px">配置一个 OpenAI 兼容接口，规划、执行、审核全部由 Workloop 内置 Harness 直接调用模型，无需安装 Claude / Codex CLI。</p>
+        <div class="form-grid">
+          <label>预设<select id="nativePreset">
+            <option value="deepseek">DeepSeek 官方</option>
+            <option value="custom">自定义 OpenAI 兼容</option>
+          </select></label>
+          <label>思考强度<select id="nativeThinking">
+            <option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option>
+            <option value="medium" selected>medium</option><option value="high">high</option><option value="max">max</option>
+          </select></label>
+        </div>
+        <label>Base URL<span>OpenAI 兼容接口地址，以 /v1 结尾</span><input id="nativeBase" required placeholder="https://api.deepseek.com/v1"></label>
+        <label>模型<span>该接口提供的模型名</span><input id="nativeModel" required placeholder="deepseek-chat"></label>
+        <label>API Key<span id="nativeKeyHint">只保存在本机数据目录，不进入任务状态或日志</span><input id="nativeKey" type="password" autocomplete="new-password" placeholder="sk-…"></label>
+        <label>网络代理（可选）<span>需要代理才能访问接口时填写</span><input id="nativeProxy" placeholder="http://127.0.0.1:7897"></label>
+        <div class="alert hidden" id="nativeTestResult" role="status"></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="cmd quiet" value="cancel" type="button">取消</button>
+        <button class="cmd quiet" type="button" id="nativeTestButton">测试连接</button>
+        <button class="cmd primary" type="submit" value="default">保存并启用</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modelAdminDialog" aria-labelledby="modelAdminDialogTitle" style="width:min(860px,calc(100vw - 28px));max-height:calc(100vh - 56px);overflow-y:auto;">
+    <div class="dialog-head">
+      <h2 id="modelAdminDialogTitle">模型管理</h2>
+      <button class="icon-ghost" data-close="modelAdminDialog" aria-label="关闭" style="width:30px;height:30px">×</button>
+    </div>
+    <div class="dialog-body" id="modelAdminBody"></div>
+    <div class="dialog-actions">
+      <span class="text-muted" id="modelAdminSummary" style="margin-right:auto;font-size:12px;"></span>
+      <button class="cmd quiet" type="button" data-close="modelAdminDialog" aria-label="关闭模型管理">关闭</button>
+    </div>
+  </dialog>
+
+  <dialog id="providerDialog" aria-labelledby="providerDialogTitle">
+    <form method="dialog" id="providerForm">
+      <div class="dialog-head"><h2 id="providerDialogTitle">供应商</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <label>名称<input id="providerLabel" required maxlength="60" placeholder="例如 OpenAI / Anthropic"></label>
+          <label>网络代理（可选）<input id="providerProxy" placeholder="http://127.0.0.1:7897"></label>
+        </div>
+        <label>Base URL<span>供应商 API 根地址；系统会按协议追加 /responses 或 /messages</span><input id="providerBase" required placeholder="https://api.openai.com/v1"></label>
+        <fieldset class="protocol-options"><legend>支持的协议</legend><label><input type="checkbox" id="providerProtocolCodex" value="codex"> Codex（Responses API）</label><label><input type="checkbox" id="providerProtocolClaude" value="claude"> Claude（Messages API）</label></fieldset>
+        <label>API Key<span id="providerKeyHint">只保存在本机数据目录，不进入任务状态或日志</span><input id="providerKey" type="password" autocomplete="new-password" placeholder="sk-…"></label>
+      </div>
+      <div class="dialog-actions"><button class="cmd quiet" value="cancel" type="button">取消</button><button class="cmd primary" type="submit" value="default">保存供应商</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="modelEntryDialog" aria-labelledby="modelEntryDialogTitle">
+    <form method="dialog" id="modelEntryForm">
+      <div class="dialog-head"><h2 id="modelEntryDialogTitle">模型</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <label>标识<span>小写字母开头，仅小写字母/数字/-/_</span><input id="modelProfileId" required maxlength="64" pattern="[a-z][a-z0-9_-]{1,63}"></label>
+          <label>显示名<input id="modelLabel" maxlength="100" placeholder="例如 DeepSeek Chat"></label>
+        </div>
+        <div class="form-grid">
+          <input id="modelRuntime" type="hidden" value="native">
+          <label>供应商<span id="modelProviderHint">模型连接到供应商的 API</span><select id="modelProvider"></select></label>
+          <label>协议<select id="modelProtocol"><option value="codex">Codex（Responses）</option><option value="claude">Claude（Messages）</option></select></label>
+        </div>
+        <div class="form-grid">
+          <label>模型名<span>接口提供的模型名</span><input id="modelName" required maxlength="200" placeholder="deepseek-chat"></label>
+          <label>权限<select id="modelAccess">
+            <option value="read_only">只读（规划 / 审核）</option>
+            <option value="workspace_write">可写（执行）</option>
+          </select></label>
+        </div>
+        <div class="form-grid">
+          <label>思考强度<select id="modelThinking">
+            <option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option>
+            <option value="medium" selected>medium</option><option value="high">high</option><option value="max">max</option>
+          </select></label>
+          <label>质量评级<span>影响编排时的自动选择</span><select id="modelQuality">
+            <option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option>
+            <option value="4" selected>Q4</option><option value="5">Q5</option>
+          </select></label>
+        </div>
+        <label>能力标签<span>按空格或逗号分隔，如 implementation frontend backend testing planning review general</span><input id="modelCapabilities" placeholder="implementation, general"></label>
+      </div>
+      <div class="dialog-actions"><button class="cmd quiet" value="cancel" type="button">取消</button><button class="cmd primary" type="submit" value="default">保存模型</button></div>
+    </form>
   </dialog>
 
   <dialog id="workflowDialog" aria-labelledby="workflowDialogTitle" style="width:min(720px,calc(100vw - 28px));max-height:calc(100vh - 56px);overflow-y:auto;">
     <form method="dialog" id="workflowForm">
-      <div class="dialog-head"><h2 id="workflowDialogTitle">工作流</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="workflowDialogTitle">工作流</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body">
         <div class="workflow-section-head"><strong>已有工作流</strong><button class="cmd primary" id="newWorkflowBtn" type="button">+ 新建</button></div>
         <div class="workflow-list" id="workflowList"></div>
@@ -645,7 +754,7 @@
 
   <dialog id="compositionDialog" aria-labelledby="compositionDialogTitle" style="width:min(1180px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow-y:auto;">
     <form method="dialog" id="compositionForm">
-      <div class="dialog-head"><h2 id="compositionDialogTitle">调整任务编排</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="compositionDialogTitle">调整任务编排</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body" id="compositionEditor"></div>
       <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd primary" type="submit" value="default">保存编排</button></div>
     </form>
@@ -653,7 +762,7 @@
 
   <dialog id="budgetDialog" aria-labelledby="budgetDialogTitle">
     <form method="dialog" id="budgetForm">
-      <div class="dialog-head"><h2 id="budgetDialogTitle">调整预算</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="budgetDialogTitle">调整预算</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body form-grid">
         <label>总时长（秒）<input id="budgetTotal" type="number" min="1" required></label>
         <label>单次调用（秒）<input id="budgetCall" type="number" min="1" required></label>
@@ -670,7 +779,7 @@
 
   <dialog id="clarificationDialog" aria-labelledby="clarificationDialogTitle">
     <form method="dialog" id="clarificationForm">
-      <div class="dialog-head"><h2 id="clarificationDialogTitle">回答澄清</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="clarificationDialogTitle">回答澄清</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body" id="clarificationQuestions"></div>
       <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd primary" type="submit" value="default">提交全部答复</button></div>
     </form>
@@ -678,14 +787,14 @@
 
   <dialog id="deliveryDialog" aria-labelledby="deliveryDialogTitle">
     <form method="dialog" id="deliveryForm">
-      <div class="dialog-head"><h2 id="deliveryDialogTitle">确认交付</h2><button class="icon-btn quiet" value="cancel" aria-label="关闭">×</button></div>
+      <div class="dialog-head"><h2 id="deliveryDialogTitle">确认交付</h2><button class="icon-ghost" value="cancel" aria-label="关闭" style="width:30px;height:30px">×</button></div>
       <div class="dialog-body"><label>策略<span>确认时会自动生成交付报告并合并到目标分支</span><select id="deliveryStrategy"><option value="merge">Merge</option><option value="cherry-pick">Cherry-pick</option></select></label></div>
       <div class="dialog-actions"><button class="cmd quiet" value="cancel">取消</button><button class="cmd danger" type="submit" value="default">确认交付</button></div>
     </form>
   </dialog>
 
   <script>
-    const state = { tasks: [], projects: [], workflows: [], selected: null, detail: null, filter: "all", editingNodes: null, editingGraph: null };
+    const state = { tasks: [], projects: [], workflows: [], modelCatalog: [], selected: null, detail: null, filter: "all", editingNodes: null, editingGraph: null, native: {configured:false} };
     const $ = id => document.getElementById(id);
     const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     const labels = {
@@ -704,49 +813,110 @@
     function toast(message) { const el=$("toast"); el.textContent=message; el.classList.remove("hidden"); clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.classList.add("hidden"),3600); }
     function filteredTasks() { if (state.filter === "attention") return state.tasks.filter(t => human.has(t.status) || ["failed","blocked"].includes(t.status)); if (state.filter === "ready") return state.tasks.filter(t => t.status === "ready_to_deliver"); return state.tasks; }
     function taskKey(t){return t.task_key||t.task_id;}
-    function renderTasks() { const list=filteredTasks(); $("taskList").innerHTML=list.length ? list.map(t=>`<button type="button" class="task-row ${taskKey(t)===state.selected?"selected":""}" data-task="${esc(taskKey(t))}"><span class="task-row-top"><span class="task-row-title">${esc(t.title)}</span><span class="status ${statusClass(t.status)}">${esc(labels[t.status]||t.status)}</span></span><span class="task-meta"><span>${esc(t.read_only?"历史 · 只读":t.project_name||t.project_id)}</span><span>${t.queue_position?`队列 ${t.queue_position}`:fmtTime(t.updated_at)}</span></span></button>`).join("") : `<div class="empty" style="height:180px">当前筛选无任务</div>`; document.querySelectorAll("[data-task]").forEach(el=>el.onclick=()=>{const task=state.tasks.find(t=>taskKey(t)===el.dataset.task);selectTask(el.dataset.task,task?.detail_url)}); }
-    async function loadProjects() { state.projects=await api("/api/agent/projects"); $("taskProject").innerHTML=state.projects.map(p=>`<option value="${esc(p.project_id)}">${esc(p.name)} · ${p.workspace_mode==="directory"?"普通目录":"Git"}</option>`).join(""); }
-    async function loadWorkflows() { state.workflows=await api("/api/agent/workflows"); $("taskWorkflow").innerHTML=state.workflows.map(w=>`<option value="${esc(w.workflow_id)}">${esc(w.label)}</option>`).join(""); if(state.workflows.some(w=>w.workflow_id==="quick"))$("taskWorkflow").value="quick"; renderWorkflowList(); }
+
+    /* ---- Sidebar conversation list ---- */
+    function renderTasks() {
+      const list=filteredTasks();
+      $("taskList").innerHTML=list.length ? list.map(t=>`<button type="button" class="conv-item ${taskKey(t)===state.selected?"active":""}" data-task="${esc(taskKey(t))}"><span class="conv-dot ${running.has(t.status)?"running":statusClass(t.status)}"></span><span class="conv-title">${esc(t.title)}</span><span class="conv-meta">${running.has(t.status)?"进行中":esc(t.read_only?"历史":fmtTime(t.updated_at))}</span></button>`).join("") : `<div class="conv-empty">还没有任务<br>在下方输入框描述你的第一个任务</div>`;
+      document.querySelectorAll("[data-task]").forEach(el=>el.onclick=()=>{const task=state.tasks.find(t=>taskKey(t)===el.dataset.task);selectTask(el.dataset.task,task?.detail_url);closeSidebar();});
+    }
+    async function loadProjects() { const loaded=await api("/api/agent/projects");const seen=new Set();state.projects=loaded.filter(p=>{const key=String(p.source_directory||p.repository||p.project_id).toLowerCase();if(seen.has(key))return false;seen.add(key);return true;});$("composerProject").innerHTML=state.projects.map(p=>`<option value="${esc(p.project_id)}">${esc(p.name)}</option>`).join(""); }
+    async function loadWorkflows() { state.workflows=await api("/api/agent/workflows"); try{const registry=await api("/api/agent/model-registry");state.modelCatalog=registry.models||[];}catch(_){state.modelCatalog=[];} $("composerWorkflow").innerHTML=state.workflows.map(w=>`<option value="${esc(w.workflow_id)}">${esc(w.label)}</option>`).join(""); if(state.workflows.some(w=>w.workflow_id==="quick"))$("composerWorkflow").value="quick"; renderWorkflowList(); }
+    function openProjectDialog(){$("projectForm").reset();$("projectConfig").value=".workloop/project.toml";$("projectDialog").showModal();}
     function renderMetrics(metrics) { const tasks=metrics.tasks||{}; $("metricRunning").textContent=tasks.running||0; $("metricWaiting").textContent=tasks.waiting_for_human||0; $("metricProblems").textContent=(tasks.failed||0)+(tasks.blocked||0); $("metricReady").textContent=tasks.ready_to_deliver||0; }
     async function loadTasks(refreshDetail=false) { const [active,history,metrics]=await Promise.all([api("/api/agent/tasks"),api("/api/agent/history"),api("/api/agent/metrics")]); state.tasks=[...active,...history]; renderTasks(); renderMetrics(metrics); if (state.selected && refreshDetail){const task=state.tasks.find(t=>taskKey(t)===state.selected);if(task)await loadDetail(state.selected,task.detail_url);} }
-    async function selectTask(key,detailUrl) { state.selected=key; location.hash=encodeURIComponent(key); $("app").classList.add("has-selection"); renderTasks(); await loadDetail(key,detailUrl); }
-    function workflowNodes(detail) { return detail.workflow?.nodes?.length ? detail.workflow.nodes : [{kind:"planner",label:"Claude 规划"},{kind:"plan_approval",label:"批准计划"},{kind:"executor",label:"Codex 执行"},{kind:"validation",label:"确定性验证"},{kind:"reviewer",label:"Claude 审核"},{kind:"delivery",label:"确认交付"}]; }
+    async function selectTask(key,detailUrl) { state.selected=key; location.hash=encodeURIComponent(key); renderTasks(); await loadDetail(key,detailUrl); }
+    function showEmptyState(){ state.selected=null; state.detail=null; location.hash=""; unsubscribeTaskEvents(); renderTasks(); $("thread").classList.add("hidden"); $("emptyState").classList.remove("hidden"); $("topbarTitle").textContent="Workloop"; }
+
+    /* ---- Chat thread rendering ---- */
+    function workflowNodes(detail) { return detail.workflow?.nodes?.length ? detail.workflow.nodes : [{kind:"planner",label:"规划"},{kind:"plan_approval",label:"批准计划"},{kind:"executor",label:"执行"},{kind:"validation",label:"验证"},{kind:"reviewer",label:"审核"},{kind:"delivery",label:"交付"}]; }
     function activeNode(detail,nodes) { if(detail.status==="delivered")return nodes.length; if(["draft","queued_for_analysis","analyzing","replanning"].includes(detail.status)){const planner=nodes.findIndex(n=>n.kind==="planner");return planner<0?0:planner;} if(Number.isInteger(detail.workflow_cursor)&&detail.workflow_cursor>0)return Math.min(detail.workflow_cursor,nodes.length-1); const kind={waiting_for_plan_approval:"plan_approval",queued_for_execution:"executor",executing:"executor",validating:"validation",integrating:"validation",reviewing:"reviewer",integration_required:"delivery",ready_to_deliver:"delivery"}[detail.status]||"planner"; const found=nodes.findIndex(n=>n.kind===kind); return found<0?0:found; }
-    function pipeline(detail) { const nodes=workflowNodes(detail), active=activeNode(detail,nodes); return `<div class="pipeline" style="grid-template-columns:repeat(${nodes.length},minmax(80px,1fr))" aria-label="任务阶段">${nodes.map((node,i)=>{const stage=i<active?"done":i===active?"current":"";return `<div class="stage stage-${esc(node.kind)} ${stage}"${stage==="current"?' aria-current="step"':""}><strong>${esc(node.label)}</strong><span>${esc(node.kind)}</span></div>`}).join("")}</div>`; }
+    function stageLine(detail) { const nodes=workflowNodes(detail),active=activeNode(detail,nodes); const done=nodes.slice(0,active).map(n=>n.label).join(" ✓ · "); const current=running.has(detail.status)?`正在${nodes[Math.min(active,nodes.length-1)]?.label||""}…`:""; return [done,current].filter(Boolean).join(" · "); }
+    function stageChips(detail) { const nodes=workflowNodes(detail),active=activeNode(detail,nodes); return `<div class="stage-chips" role="list" aria-label="任务阶段">${nodes.map((n,i)=>{const state=i<active?"done":i===active?"current":"";return `<span class="stage-chip ${state}" role="listitem"${state==="current"?' aria-current="step"':""}>${esc(n.label)}</span>`;}).join('<span class="stage-sep" aria-hidden="true">→</span>')}</div>`; }
     function actionButton(a) { if (a.manual) return `<div class="resolution"><strong>${esc(a.label)}</strong><span>${esc(a.description)}</span></div>`; const cls=a.requires_confirmation?"danger":a.id==="approve"||a.id==="clarify"?"primary":"quiet"; return `<button class="cmd ${cls}" data-action="${esc(a.id)}"${a.description?` title="${esc(a.description)}"`:""}>${esc(a.label)}</button>`; }
-    function renderPlan(plan,clarifications=[]) { if (!plan || plan.available===false) return ""; return `<section class="section"><h3>计划</h3><dl class="kv"><dt>需求理解</dt><dd>${esc(plan.requirement_understanding)}</dd><dt>实施步骤</dt><dd><ol class="compact-list">${(plan.steps||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ol></dd><dt>验收标准</dt><dd><ul class="compact-list">${(plan.acceptance_criteria||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul></dd><dt>必须测试</dt><dd>${(plan.required_tests||[]).map(esc).join("、")}</dd><dt>风险</dt><dd>${(plan.risks||[]).map(esc).join("；")||"无"}</dd>${plan.open_questions?.length?`<dt>待澄清</dt><dd>${plan.open_questions.map(esc).join("；")}</dd>`:""}${clarifications.length?`<dt>澄清记录</dt><dd>${clarifications.map(x=>`${esc(x.question)}<br><strong>${esc(x.answer)}</strong>`).join("<br>")}</dd>`:""}</dl></section>`; }
-    function renderComposition(d) { const graph=d.plan_graph,nodes=graph?.nodes||[]; if(!nodes.length)return""; const editable=d.status==="waiting_for_plan_approval"; const bindings=[graph.planning_model,graph.review_model]; const total=[...nodes.map(n=>n.model),...bindings].reduce((sum,m)=>sum+Number(m?.estimated_cost_usd||0),0); const phase=(label,m)=>`<div class="composition-item"><span class="composition-index">•</span><div><strong>${label}</strong><small>宿主强制阶段</small></div><div><strong>${esc(m?.profile_id||"兼容路由")}</strong><small>${esc(m?.model||"")}</small></div><div><strong>${m?.estimated_cost_usd?`$${Number(m.estimated_cost_usd).toFixed(4)}`:"-"}</strong></div></div>`; return `<section class="section"><h3>任务编排 <span>预计 $${total.toFixed(4)}</span>${editable?`<button class="cmd quiet" type="button" data-action="compose" style="float:right">调整</button>`:""}</h3><div class="composition-list">${phase("计划生成",graph.planning_model)}${nodes.map((n,i)=>`<div class="composition-item"><span class="composition-index">${i+1}</span><div><strong>${esc(n.title)}${n.enabled===false?"（停用）":""}</strong><small>${esc(n.kind)} · ${esc(n.capability||"implementation")} · ${esc(n.node_id)}</small></div><div><strong>${esc(n.model?.profile_id||"未选择")}</strong><small>${esc(n.model?.model||n.instructions||"")}</small></div><div><strong>${n.model?.estimated_cost_usd?`$${Number(n.model.estimated_cost_usd).toFixed(4)}`:"-"}</strong><small>${esc((n.depends_on||[]).length?`依赖 ${n.depends_on.join(", ")}`:"无依赖")}</small></div>${n.model?.selection_reason?`<small style="grid-column:2/-1">${esc(n.model.selection_reason)}</small>`:""}</div>`).join("")}${phase("独立审核",graph.review_model)}${["确定性验证","确认交付"].map(x=>`<div class="composition-item"><span class="composition-index">•</span><div><strong>${x}</strong><small>宿主强制门禁</small></div><div><strong>不由任务节点替换</strong></div></div>`).join("")}</div></section>`; }
+    function renderPlan(plan,clarifications=[]) { if (!plan || plan.available===false) return ""; return `<details class="card collapsible" ${state.detail?.status==="waiting_for_plan_approval"?"open":""}><summary>计划<span class="badge">ExecutionPlan</span></summary><div class="card-inner"><dl class="kv"><dt>需求理解</dt><dd>${esc(plan.requirement_understanding)}</dd><dt>实施步骤</dt><dd><ol class="compact-list">${(plan.steps||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ol></dd><dt>验收标准</dt><dd><ul class="compact-list">${(plan.acceptance_criteria||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul></dd><dt>必须测试</dt><dd>${(plan.required_tests||[]).map(esc).join("、")}</dd><dt>风险</dt><dd>${(plan.risks||[]).map(esc).join("；")||"无"}</dd>${plan.open_questions?.length?`<dt>待澄清</dt><dd>${plan.open_questions.map(esc).join("；")}</dd>`:""}${clarifications.length?`<dt>澄清记录</dt><dd>${clarifications.map(x=>`${esc(x.question)}<br><strong>${esc(x.answer)}</strong>`).join("<br>")}</dd>`:""}</dl></div></details>`; }
+    function renderComposition(d) { const graph=d.plan_graph,nodes=graph?.nodes||[]; if(!nodes.length)return""; const editable=d.status==="waiting_for_plan_approval"; const bindings=[graph.planning_model,graph.review_model]; const total=[...nodes.map(n=>n.model),...bindings].reduce((sum,m)=>sum+Number(m?.estimated_cost_usd||0),0); const phase=(label,m)=>`<div class="composition-item"><span class="composition-index">•</span><div><strong>${label}</strong><small>宿主强制阶段</small></div><div><strong>${esc(m?.profile_id||"兼容路由")}</strong><small>${esc(m?.model||"")}</small></div><div><strong>${m?.estimated_cost_usd?`$${Number(m.estimated_cost_usd).toFixed(4)}`:"-"}</strong></div></div>`; return `<details class="card collapsible"><summary>任务编排<span class="badge">预计 $${total.toFixed(4)}</span></summary><div class="card-inner"><div class="composition-list">${phase("计划生成",graph.planning_model)}${nodes.map((n,i)=>`<div class="composition-item"><span class="composition-index">${i+1}</span><div><strong>${esc(n.title)}${n.enabled===false?"（停用）":""}</strong><small>${esc(n.kind)} · ${esc(n.capability||"implementation")} · ${esc(n.node_id)}</small></div><div><strong>${esc(n.model?.profile_id||"未选择")}</strong><small>${esc(n.model?.model||n.instructions||"")}</small></div><div><strong>${n.model?.estimated_cost_usd?`$${Number(n.model.estimated_cost_usd).toFixed(4)}`:"-"}</strong><small>${esc((n.depends_on||[]).length?`依赖 ${n.depends_on.join(", ")}`:"无依赖")}</small></div>${n.model?.selection_reason?`<small style="grid-column:2/-1">${esc(n.model.selection_reason)}</small>`:""}</div>`).join("")}${phase("独立审核",graph.review_model)}${["确定性验证","确认交付"].map(x=>`<div class="composition-item"><span class="composition-index">•</span><div><strong>${x}</strong><small>宿主强制门禁</small></div><div><strong>不由任务节点替换</strong></div></div>`).join("")}</div>${editable?`<div class="actions-row" style="margin-top:12px"><button class="cmd quiet" type="button" data-action="compose">调整编排</button></div>`:""}</div></details>`; }
     function colorDiff(diff) { return esc(diff).split("\n").map(line=>`<span class="${line.startsWith("+")&&!line.startsWith("+++")?"diff-add":line.startsWith("-")&&!line.startsWith("---")?"diff-del":line.startsWith("@@")?"diff-head":""}">${line}</span>`).join("\n"); }
-    function renderRounds(rounds) { if (!rounds?.length) return ""; const latest=rounds[rounds.length-1]; let html=`<section class="section"><h3>变更与验证 <span>第 ${esc(latest.round)} 轮</span></h3>`; if(latest.diff) html+=`<h4>Diff</h4><pre>${colorDiff(latest.diff)}</pre>`; if(latest.validation) html+=`<h4>确定性验证</h4><table><thead><tr><th>检查</th><th>结果</th><th>输出</th></tr></thead><tbody>${(latest.validation.checks||[]).map(c=>`<tr><td>${esc(c.name||c.command)}</td><td class="${c.exit_code===0&&!c.error?"pass":"fail"}">${c.exit_code===0&&!c.error?"通过":"失败"}</td><td>${esc(c.error||c.stdout||"")}</td></tr>`).join("")}</tbody></table>`; if(latest.review) html+=`<h4>独立审核</h4><p><span class="status ${latest.review.verdict==="pass"?"ready":"human"}">${esc(latest.review.verdict)}</span> ${esc(latest.review.summary||"")}</p>${(latest.review.issues||[]).length?`<table><thead><tr><th>位置</th><th>问题</th><th>建议</th></tr></thead><tbody>${latest.review.issues.map(i=>`<tr><td>${esc(i.file)}:${esc(i.line)}</td><td>${esc(i.message)}</td><td>${esc(i.suggestion)}</td></tr>`).join("")}</tbody></table>`:""}`; if(rounds.length>1) html+=`<details><summary>历史轮次（${rounds.length-1}）</summary>${rounds.slice(0,-1).map(r=>`<h4>第 ${esc(r.round)} 轮 · ${esc(r.review?.verdict||(r.validation?.passed===false?"未通过":"完成"))}</h4>${r.diff?`<pre>${colorDiff(r.diff)}</pre>`:""}`).join("")}</details>`; return html+`</section>`; }
-    function renderEvents(runs) { const events=[]; (runs||[]).forEach(run=>(run.events||[]).forEach(e=>events.push({...e,run_role:run.role}))); if(!events.length) return ""; return `<section class="section"><h3>运行事件</h3><div class="event-list">${events.slice(-80).map(e=>`<div class="event"><small>${esc(fmtTime(e.at))}</small><strong>${esc(e.run_role||e.role)}</strong><span>${esc(e.event_type)}${e.raw_type?` · ${esc(e.raw_type)}`:""}</span></div>`).join("")}</div></section>`; }
-    function renderTaskEvents(events) { if(!events?.length) return ""; const typeLabels={task_created:"创建",task_changed:"状态",clarified:"澄清"}; return `<section class="section"><h3>任务事件流 <span>实时推送</span></h3><div class="event-list">${events.slice(-40).map(e=>{const detail=e.type==="clarified"?`回答 ${esc(e.count)} 个问题，等待重新规划`:e.status?`${esc(labels[e.status]||e.status)}${e.error?` · ${esc(e.error)}`:""}`:"";return `<div class="event"><small>${esc(fmtTime(e.at))}</small><strong>${esc(typeLabels[e.type]||e.type)}</strong><span>${detail}</span></div>`;}).join("")}</div></section>`; }
+    function renderRounds(rounds) { if (!rounds?.length) return ""; const latest=rounds[rounds.length-1]; let html=`<details class="card collapsible" open><summary>变更与验证<span class="badge">第 ${esc(latest.round)} 轮</span></summary><div class="card-inner">`; if(latest.diff) html+=`<h4>Diff</h4><pre>${colorDiff(latest.diff)}</pre>`; if(latest.validation) html+=`<h4>确定性验证</h4><table><thead><tr><th>检查</th><th>结果</th><th>输出</th></tr></thead><tbody>${(latest.validation.checks||[]).map(c=>`<tr><td>${esc(c.name||c.command)}</td><td class="${c.exit_code===0&&!c.error?"pass":"fail"}">${c.exit_code===0&&!c.error?"通过":"失败"}</td><td>${esc(c.error||c.stdout||"")}</td></tr>`).join("")}</tbody></table>`; if(latest.review) html+=`<h4>独立审核</h4><p><span class="status ${latest.review.verdict==="pass"?"ready":"human"}">${esc(latest.review.verdict)}</span> ${esc(latest.review.summary||"")}</p>${(latest.review.issues||[]).length?`<table><thead><tr><th>位置</th><th>问题</th><th>建议</th></tr></thead><tbody>${latest.review.issues.map(i=>`<tr><td>${esc(i.file)}:${esc(i.line)}</td><td>${esc(i.message)}</td><td>${esc(i.suggestion)}</td></tr>`).join("")}</tbody></table>`:""}`; html+=`</div></details>`; if(rounds.length>1) html+=`<details class="card collapsible" style="margin-top:10px"><summary>历史轮次<span class="badge">${rounds.length-1}</span></summary><div class="card-inner">${rounds.slice(0,-1).map(r=>`<h4>第 ${esc(r.round)} 轮 · ${esc(r.review?.verdict||(r.validation?.passed===false?"未通过":"完成"))}</h4>${r.diff?`<pre>${colorDiff(r.diff)}</pre>`:""}`).join("")}</div></details>`; return html; }
+    function renderEvents(runs) { const events=[]; (runs||[]).forEach(run=>(run.events||[]).forEach(e=>events.push({...e,run_role:run.role}))); if(!events.length) return ""; return `<details class="card collapsible"><summary>运行事件<span class="badge">${events.length}</span></summary><div class="card-inner"><div class="event-list">${events.slice(-60).map(e=>`<div class="event"><small>${esc(fmtTime(e.at))}</small><span><strong>${esc(e.run_role||e.role)}</strong> ${esc(e.event_type)}${e.raw_type?` · ${esc(e.raw_type)}`:""}</span></div>`).join("")}</div></div></details>`; }
+    function renderTaskEvents(events) { if(!events?.length) return ""; const typeLabels={task_created:"创建",task_changed:"状态",clarified:"澄清"}; return `<details class="card collapsible"><summary>任务事件流<span class="badge">实时 · ${events.length}</span></summary><div class="card-inner"><div class="event-list">${events.slice(-40).map(e=>{const detail=e.type==="clarified"?`回答 ${esc(e.count)} 个问题，等待重新规划`:e.status?`${esc(labels[e.status]||e.status)}${e.error?` · ${esc(e.error)}`:""}`:"";return `<div class="event"><small>${esc(fmtTime(e.at))}</small><span><strong>${esc(typeLabels[e.type]||e.type)}</strong> ${detail}</span></div>`;}).join("")}</div></div></details>`; }
     let taskEventSource=null,detailRefreshTimer=null;
     function unsubscribeTaskEvents(){if(taskEventSource){taskEventSource.close();taskEventSource=null;}}
     function subscribeTaskEvents(taskId){unsubscribeTaskEvents();if(!taskId||typeof EventSource==="undefined")return;try{taskEventSource=new EventSource(`/api/agent/tasks/${encodeURIComponent(taskId)}/events`);taskEventSource.onmessage=()=>{clearTimeout(detailRefreshTimer);detailRefreshTimer=setTimeout(()=>{if(state.selected===taskId&&state.detail&&!state.detail.read_only)loadDetail(state.selected,state.detail.detail_url).catch(()=>{});},300);};}catch(_){/* 无 SSE 时回退到周期轮询 */}}
-    function renderReport(r) { if(!r || r.available===false) return ""; return `<section class="section"><h3>DeliveryReport</h3><dl class="kv"><dt>任务提交</dt><dd><code>${esc(r.task_commit)}</code></dd><dt>目标提交</dt><dd><code>${esc(r.target_commit)}</code></dd><dt>修改文件</dt><dd>${(r.modified_files||[]).map(esc).join("、")}</dd><dt>审核</dt><dd>${esc(r.review_summary)}</dd><dt>已知风险</dt><dd>${(r.known_risks||[]).map(esc).join("；")||"无"}</dd><dt>人工后续</dt><dd>${(r.human_next_steps||[]).map(esc).join("；")}</dd></dl></section>`; }
-    function renderBudget(d) { const b=d.budget||{}; const used=Number(b.consumed_input_tokens||0)+Number(b.consumed_output_tokens||0); return `<section class="section"><h3>运行身份与预算</h3><dl class="kv"><dt>任务分支</dt><dd><code>${esc(d.task_branch)}</code></dd><dt>基线</dt><dd><code>${esc(d.base_commit)}</code></dd><dt>节点 Session</dt><dd>${Object.entries(d.sessions||{}).filter(([k])=>k.startsWith("node:")).map(([k,v])=>`${esc(k)}: <code>${esc(v)}</code>`).join("<br>")||"无"}</dd><dt>活动时间</dt><dd>${Number(b.consumed_active_seconds||0).toFixed(2)} / ${esc(b.total_timeout_seconds)} 秒</dd><dt>费用</dt><dd>$${Number(b.consumed_cost_usd||0).toFixed(4)}${b.max_cost_usd!=null?` / $${esc(b.max_cost_usd)}`:""}</dd><dt>Token</dt><dd>${used}${b.max_total_tokens!=null?` / ${esc(b.max_total_tokens)}`:""}（输入 ${esc(b.consumed_input_tokens||0)}，输出 ${esc(b.consumed_output_tokens||0)}，缓存命中 ${esc(b.consumed_cached_input_tokens||0)}）</dd><dt>轮次</dt><dd>${esc(d.plan_iteration)} / ${esc(b.max_iterations)}</dd></dl></section>`; }
-    function renderLegacyArtifact(name,item){if(!item?.available)return `<dt>${esc(name)}</dt><dd class="fail">${esc(item?.error||"不可用")}</dd>`;const content=typeof item.content==="string"?item.content:JSON.stringify(item.content,null,2);return `<dt>${esc(name)}</dt><dd><pre>${esc(content)}</pre></dd>`;}
-    function renderLegacy(d){const artifacts=Object.entries(d.artifacts||{}).map(([name,item])=>renderLegacyArtifact(name,item)).join("");const plan=renderLegacyArtifact("计划",d.plan);return `<article class="detail"><div class="detail-head"><button class="cmd quiet mobile-back" id="backButton" type="button">← 任务</button><div class="detail-title"><h2>${esc(d.title)}</h2><p>历史工作流 · 只读 · <span class="status">${esc(d.status)}</span></p></div><div class="actions"><button class="cmd danger" data-action="delete" title="删除任务">删除</button></div></div><div class="alert">此任务由 legacy-v1 工作流创建，仅保留只读审计视图。新执行请创建 Agent Runtime 任务。</div><section class="section"><h3>历史任务</h3><dl class="kv"><dt>目标</dt><dd>${esc(d.goal)}</dd><dt>迭代</dt><dd>${esc(d.iteration)}</dd>${plan}${artifacts}</dl></section></article>`;}
-    async function loadDetail(key,detailUrl) { try { const d=await api(detailUrl||`/api/agent/tasks/${encodeURIComponent(key)}`); state.detail=d; if(d.read_only){unsubscribeTaskEvents();$("workspace").innerHTML=renderLegacy(d);}else{const alert=d.error?`<div class="alert ${["failed","blocked"].includes(d.status)?"error":""}" role="alert">${esc(d.error)}</div>`:""; $("workspace").innerHTML=`<article class="detail"><div class="detail-head"><button class="cmd quiet mobile-back" id="backButton" type="button">← 任务</button><div class="detail-title"><h2>${esc(d.title)}</h2><p>${esc(d.project_name)} · ${esc(d.workflow?.label||"快速")} · <span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span></p></div><div class="actions" aria-label="当前可用操作">${(d.actions||[]).map(actionButton).join("")}<button class="cmd danger" data-action="delete" title="删除任务">删除</button></div></div>${pipeline(d)}${alert}${renderPlan(d.plan,d.clarifications)}${renderComposition(d)}${renderRounds(d.rounds)}${renderEvents(d.runs)}${renderTaskEvents(d.task_events)}${renderReport(d.delivery_report)}${renderBudget(d)}</article>`;subscribeTaskEvents(d.task_id||key);} $("backButton").onclick=()=>{$("app").classList.remove("has-selection");state.selected=null;location.hash="";unsubscribeTaskEvents();renderTasks();}; document.querySelectorAll("[data-action]").forEach(b=>b.onclick=()=>runAction(b.dataset.action)); } catch(e){ toast(e.message); } }
-    async function runAction(action) { const id=state.selected; try { if(action==="approve") await post(`/api/agent/tasks/${id}/approve`); else if(action==="compose") return openComposition(); else if(action==="clarify") return openClarification(); else if(action==="resume"||action==="rerun") await post(`/api/agent/tasks/${id}/${action}`); else if(action==="terminate"){if(!confirm("确认终止任务？"))return;await post(`/api/agent/tasks/${id}/terminate`);} else if(action==="prepare_delivery") await post(`/api/agent/tasks/${id}/prepare-delivery`); else if(action==="integrate") await post(`/api/agent/tasks/${id}/integrate`); else if(action==="update_budget") return openBudget(); else if(action==="deliver") return $("deliveryDialog").showModal(); else if(action==="delete"){if(!confirm("确认删除该任务？此操作不可撤销。"))return;const d=state.detail||{};const rid=d.task_id||id;await post(d.read_only?`/api/agent/history/${encodeURIComponent(rid)}/delete`:`/api/agent/tasks/${encodeURIComponent(rid)}/delete`);toast("任务已删除");state.selected=null;state.detail=null;unsubscribeTaskEvents();location.hash="";$("app").classList.remove("has-selection");$("workspace").innerHTML='<div class="empty">暂无任务</div>';await loadTasks();return;} toast("操作已提交"); await loadTasks(true); } catch(e){toast(e.message);} }
+    function renderReport(r) { if(!r || r.available===false) return ""; return `<details class="card collapsible" ${state.detail?.status==="delivered"?"open":""}><summary>交付报告<span class="badge">DeliveryReport</span></summary><div class="card-inner"><dl class="kv"><dt>任务提交</dt><dd><code>${esc(r.task_commit)}</code></dd><dt>目标提交</dt><dd><code>${esc(r.target_commit)}</code></dd><dt>修改文件</dt><dd>${(r.modified_files||[]).map(esc).join("、")}</dd><dt>审核</dt><dd>${esc(r.review_summary)}</dd><dt>已知风险</dt><dd>${(r.known_risks||[]).map(esc).join("；")||"无"}</dd><dt>人工后续</dt><dd>${(r.human_next_steps||[]).map(esc).join("；")}</dd></dl></div></details>`; }
+    function renderBudget(d) { const b=d.budget||{}; const used=Number(b.consumed_input_tokens||0)+Number(b.consumed_output_tokens||0); return `<div class="ai-meta">${esc(d.project_name||"")} · 分支 <code>${esc(d.task_branch)}</code> · Token ${used}${b.max_total_tokens!=null?` / ${esc(b.max_total_tokens)}`:""} · 活动时间 ${Number(b.consumed_active_seconds||0).toFixed(1)}s · 轮次 ${esc(d.plan_iteration)} / ${esc(b.max_iterations)}</div>`; }
+    function renderLegacy(d){const artifacts=Object.entries(d.artifacts||{}).map(([name,item])=>item?.available?`<h4>${esc(name)}</h4><pre>${esc(typeof item.content==="string"?item.content:JSON.stringify(item.content,null,2))}</pre>`:"").join("");const plan=d.plan?.available?`<h4>计划</h4><pre>${esc(typeof d.plan.content==="string"?d.plan.content:JSON.stringify(d.plan.content,null,2))}</pre>`:"";return `<div class="msg user"><div class="bubble"><strong>${esc(d.title)}</strong><p>${esc(d.goal||"")}</p></div></div><div class="msg"><div class="avatar" aria-hidden="true">W</div><div class="msg-body"><div class="ai-status"><span class="status">${esc(d.status)}</span><span class="ai-stage">legacy-v1 · 只读</span></div><div class="alert">此任务由 legacy-v1 工作流创建，仅保留只读审计视图。</div><div class="actions-row"><button class="cmd danger" data-action="delete">删除</button></div><details class="card collapsible"><summary>历史任务<span class="badge">迭代 ${esc(d.iteration)}</span></summary><div class="card-inner">${plan}${artifacts}</div></details></div></div>`;}
+    async function loadDetail(key,detailUrl) {
+      try {
+        const d=await api(detailUrl||`/api/agent/tasks/${encodeURIComponent(key)}`);
+        state.detail=d;
+        const nearBottom = (()=>{const el=$("workspace");return el.scrollHeight-el.scrollTop-el.clientHeight<160;})();
+        if(d.read_only){unsubscribeTaskEvents();$("thread").innerHTML=renderLegacy(d);}
+        else{
+          const isRun=running.has(d.status);
+          const alert=d.error?`<div class="alert ${["failed","blocked"].includes(d.status)?"error":""}" role="alert">${esc(d.error)}</div>`:"";
+          const typing=isRun?`<span class="typing" aria-label="进行中"><i></i><i></i><i></i></span>`:"";
+          const actions=(d.actions||[]).map(actionButton).join("");
+          $("thread").innerHTML=`
+            <div class="msg user"><div class="bubble"><strong>${esc(d.title)}</strong><p>${esc(d.requirement||"")}</p></div></div>
+            <div class="msg"><div class="avatar" aria-hidden="true">W</div><div class="msg-body">
+              <div class="ai-status"><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span><span class="ai-stage">${esc(stageLine(d))}</span>${typing}</div>
+              ${stageChips(d)}
+              ${alert}${renderPlan(d.plan,d.clarifications)}${renderComposition(d)}${renderRounds(d.rounds)}${renderReport(d.delivery_report)}${renderEvents(d.runs)}${renderTaskEvents(d.task_events)}
+              ${actions?`<div class="actions-row" aria-label="当前可用操作">${actions}<button class="cmd quiet" data-action="delete" title="删除任务">删除</button></div>`:`<div class="actions-row"><button class="cmd quiet" data-action="delete" title="删除任务">删除</button></div>`}
+              ${renderBudget(d)}
+            </div></div>`;
+          subscribeTaskEvents(d.task_id||key);
+        }
+        $("emptyState").classList.add("hidden");$("thread").classList.remove("hidden");
+        $("topbarTitle").textContent=d.title||"任务";
+        document.querySelectorAll("[data-action]").forEach(b=>b.onclick=()=>runAction(b.dataset.action));
+        if(nearBottom)$("workspace").scrollTop=$("workspace").scrollHeight;
+      } catch(e){ toast(e.message); }
+    }
+    async function runAction(action) { const id=state.selected; try { if(action==="approve") await post(`/api/agent/tasks/${id}/approve`); else if(action==="compose") return openComposition(); else if(action==="clarify") return openClarification(); else if(action==="resume"||action==="rerun") await post(`/api/agent/tasks/${id}/${action}`); else if(action==="terminate"){if(!confirm("确认终止任务？"))return;await post(`/api/agent/tasks/${id}/terminate`);} else if(action==="prepare_delivery") await post(`/api/agent/tasks/${id}/prepare-delivery`); else if(action==="integrate") await post(`/api/agent/tasks/${id}/integrate`); else if(action==="update_budget") return openBudget(); else if(action==="deliver") return $("deliveryDialog").showModal(); else if(action==="delete"){if(!confirm("确认删除该任务？此操作不可撤销。"))return;const d=state.detail||{};const rid=d.task_id||id;await post(d.read_only?`/api/agent/history/${encodeURIComponent(rid)}/delete`:`/api/agent/tasks/${encodeURIComponent(rid)}/delete`);toast("任务已删除");showEmptyState();await loadTasks();return;} toast("操作已提交"); await loadTasks(true); } catch(e){toast(e.message);} }
     const COMPOSE_CAPABILITIES=["implementation","frontend","backend","security","testing","migration","documentation","architecture","research","general"];
     function compatibleCompositionModels(n){return(state.detail.model_catalog||[]).filter(m=>{const caps=m.capabilities||[];const access=m.access===n.access;const base=n.access!=="workspace_write"||caps.includes("implementation")||caps.includes("general");const specialized=caps.includes(n.capability)||caps.includes("general");const quality=!(["security","migration","architecture"].includes(n.capability))||Number(m.quality)>=4;return access&&base&&specialized&&quality;});}
     function modelBinding(m,prior,reason){return{profile_id:m.profile_id,runtime:m.runtime,provider:m.provider||"",model:m.model,thinking:m.thinking||"medium",estimated_cost_usd:prior?.profile_id===m.profile_id?Number(prior.estimated_cost_usd||0):0,selection_reason:prior?.profile_id===m.profile_id?prior.selection_reason:reason};}
     function openClarification(){const questions=(state.detail.plan?.open_questions||[]).slice();const box=$("clarificationQuestions");box.innerHTML=questions.length?questions.map(q=>`<label>${esc(q)}<textarea class="clarify-answer" data-question="${esc(q)}" required></textarea></label>`).join(""):'<p>当前计划没有待澄清问题。</p>';$("clarificationDialog").showModal();const first=box.querySelector("textarea");if(first)first.focus();}
     function openBudget(){const b=state.detail.budget;$("budgetTotal").value=b.total_timeout_seconds;$("budgetCall").value=b.call_timeout_seconds;$("budgetIdle").value=b.idle_timeout_seconds;$("budgetRounds").value=b.max_iterations;$("budgetCost").value=b.max_cost_usd??"";$("budgetTokens").value=b.max_total_tokens??"";$("budgetInputTokens").value=b.max_input_tokens??"";$("budgetOutputTokens").value=b.max_output_tokens??"";$("budgetDialog").showModal();}
     async function showRuntime(){ $("runtimeDialog").showModal(); $("runtimeBody").innerHTML="加载中"; try{const d=await api("/api/agent/runtime-health");const health=d.health||{};$("runtimeBody").innerHTML=`<div class="runtime-grid"><div><strong>角色</strong></div><div><strong>Runtime / Model</strong></div><div><strong>状态</strong></div>${Object.entries(d.profiles||{}).map(([role,p])=>{const h=health[role]||health;const ok=h.available===true;return `<div>${esc(role)}</div><div>${esc(p.runtime)} · ${esc(p.model||"default")}</div><div><span class="health-dot ${ok?"ok":"bad"}"></span>${ok?"可用":esc(h.error||"不可用")}</div>`}).join("")}</div>${d.worker_error?`<div class="alert error">${esc(d.worker_error)}</div>`:""}`;}catch(e){$("runtimeBody").textContent=e.message;} }
-    const NODE_KINDS=[{kind:"planner",label:"规划",defaultLabel:"Claude 规划"},{kind:"plan_approval",label:"审批",defaultLabel:"批准计划"},{kind:"executor",label:"执行",defaultLabel:"Codex 执行"},{kind:"validation",label:"验证",defaultLabel:"确定性验证"},{kind:"reviewer",label:"审核",defaultLabel:"Claude 审核"},{kind:"delivery",label:"交付",defaultLabel:"确认交付"}];
+    const NODE_KINDS=[{kind:"planner",label:"规划",defaultLabel:"规划"},{kind:"plan_approval",label:"审批",defaultLabel:"批准计划"},{kind:"executor",label:"执行",defaultLabel:"执行"},{kind:"validation",label:"验证",defaultLabel:"确定性验证"},{kind:"reviewer",label:"审核",defaultLabel:"审核"},{kind:"delivery",label:"交付",defaultLabel:"确认交付"}];
     const kindLabels=Object.fromEntries(NODE_KINDS.map(k=>[k.kind,k.label]));
     const kindDefaultLabels=Object.fromEntries(NODE_KINDS.map(k=>[k.kind,k.defaultLabel]));
-    function defaultWorkflowNodes(approval){const nodes=[{node_id:"plan",kind:"planner",label:"Claude 规划",instructions:""}];if(approval)nodes.push({node_id:"approve",kind:"plan_approval",label:"批准计划",instructions:""});nodes.push({node_id:"execute",kind:"executor",label:"Codex 执行",instructions:""},{node_id:"validate",kind:"validation",label:"确定性验证",instructions:""},{node_id:"review",kind:"reviewer",label:"Claude 审核",instructions:""},{node_id:"deliver",kind:"delivery",label:"确认交付",instructions:""});return nodes;}
+    function defaultWorkflowNodes(approval){const nodes=[{node_id:"plan",kind:"planner",label:"规划",instructions:"",model_profile_id:""}];if(approval)nodes.push({node_id:"approve",kind:"plan_approval",label:"批准计划",instructions:"",model_profile_id:""});nodes.push({node_id:"execute",kind:"executor",label:"执行",instructions:"",model_profile_id:""},{node_id:"validate",kind:"validation",label:"确定性验证",instructions:"",model_profile_id:""},{node_id:"review",kind:"reviewer",label:"审核",instructions:"",model_profile_id:""},{node_id:"deliver",kind:"delivery",label:"确认交付",instructions:"",model_profile_id:""});return nodes;}
+    function workflowModelOptions(node){if(!["planner","executor","reviewer"].includes(node.kind))return"";const access=node.kind==="executor"?"workspace_write":"read_only";const models=state.modelCatalog.filter(m=>m.access===access);return`<label>阶段模型<span>留空则按当前多模型角色自动选择</span><select class="node-model" data-node-index="${node.__index}"><option value="">自动路由</option>${models.map(m=>`<option value="${esc(m.profile_id)}"${m.profile_id===node.model_profile_id?" selected":""}>${esc(m.label)} · ${esc(m.model)} · ${esc(protocolLabel(m.protocol))}</option>`).join("")}</select></label>`;}
     function generateNodeId(kind,index){return`${kind}_${Date.now().toString(36)}_${index}`;}
-    function renderNodeEditor(){const container=$("workflowNodes");if(!state.editingNodes||!state.editingNodes.length){container.innerHTML='<div class="node-add-zone" style="border-style:dashed;padding:16px;color:var(--text-dim);">还没有节点，点击下方按钮添加</div>';return;}container.innerHTML=state.editingNodes.map((n,i)=>{const kindOpts=NODE_KINDS.map(k=>`<option value="${k.kind}"${k.kind===n.kind?" selected":""}>${k.label}</option>`).join("");const canMoveUp=i>0;const canMoveDown=i<state.editingNodes.length-1;const canDelete=state.editingNodes.length>2;return `<div class="node-row" data-node-index="${i}" draggable="true"><div class="node-row-head"><span class="drag-handle" title="拖拽排序">⠿</span><span class="node-kind kind-${esc(n.kind)}">${esc(kindLabels[n.kind]||n.kind)}</span><select class="node-kind-select" data-node-index="${i}" title="节点类型">${kindOpts}</select><input class="node-label" data-node-index="${i}" value="${esc(n.label)}" maxlength="80" placeholder="节点名称"><div class="node-actions"><button class="cmd quiet" type="button" data-move-up="${i}"${canMoveUp?"":" disabled"} title="上移">▲</button><button class="cmd quiet" type="button" data-move-down="${i}"${canMoveDown?"":" disabled"} title="下移">▼</button><button class="cmd danger" type="button" data-remove-node="${i}"${canDelete?"":" disabled"} title="删除节点">✕</button></div></div><label>附加指令<span>可选，为该节点添加额外执行要求</span><textarea class="node-instr" data-node-index="${i}" maxlength="4000" placeholder="例如：只修改 src/ 目录下的文件，不要触碰测试文件">${esc(n.instructions||"")}</textarea></label></div>`;}).join("");container.querySelectorAll(".node-kind-select").forEach(sel=>{sel.onchange=e=>{const idx=+e.target.dataset.nodeIndex;const newKind=e.target.value;state.editingNodes[idx].kind=newKind;const badge=e.target.closest(".node-row").querySelector(".node-kind");badge.className=`node-kind kind-${newKind}`;badge.textContent=kindLabels[newKind]||newKind;};});container.querySelectorAll("[data-move-up]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.moveUp;gatherNodeValues();const tmp=state.editingNodes[idx-1];state.editingNodes[idx-1]=state.editingNodes[idx];state.editingNodes[idx]=tmp;renderNodeEditor();};});container.querySelectorAll("[data-move-down]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.moveDown;gatherNodeValues();const tmp=state.editingNodes[idx+1];state.editingNodes[idx+1]=state.editingNodes[idx];state.editingNodes[idx]=tmp;renderNodeEditor();};});container.querySelectorAll("[data-remove-node]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.removeNode;gatherNodeValues();state.editingNodes.splice(idx,1);renderNodeEditor();};});let dragSrcIdx=null;container.querySelectorAll(".node-row").forEach(row=>{row.addEventListener("dragstart",e=>{dragSrcIdx=+row.dataset.nodeIndex;row.classList.add("dragging");e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",String(dragSrcIdx));});row.addEventListener("dragend",()=>{row.classList.remove("dragging");container.querySelectorAll(".node-row").forEach(r=>r.classList.remove("drag-over"));});row.addEventListener("dragover",e=>{e.preventDefault();e.dataTransfer.dropEffect="move";row.classList.add("drag-over");});row.addEventListener("dragleave",()=>row.classList.remove("drag-over"));row.addEventListener("drop",e=>{e.preventDefault();const targetIdx=+row.dataset.nodeIndex;if(dragSrcIdx===null||dragSrcIdx===targetIdx)return;gatherNodeValues();const[moved]=state.editingNodes.splice(dragSrcIdx,1);state.editingNodes.splice(targetIdx,0,moved);renderNodeEditor();dragSrcIdx=null;});});}
-    function gatherNodeValues(){if(!state.editingNodes)return;document.querySelectorAll(".node-label").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].label=el.value;});document.querySelectorAll(".node-instr").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].instructions=el.value;});document.querySelectorAll(".node-kind-select").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].kind=el.value;});}
-    function addWorkflowNode(){gatherNodeValues();const insertIdx=state.editingNodes.length-1;const newKind="executor";const newId=generateNodeId(newKind,state.editingNodes.length);state.editingNodes.splice(insertIdx,0,{node_id:newId,kind:newKind,label:kindDefaultLabels[newKind],instructions:""});renderNodeEditor();}
+    function renderNodeEditor(){const container=$("workflowNodes");if(!state.editingNodes||!state.editingNodes.length){container.innerHTML='<div class="node-add-zone" style="border-style:dashed;padding:16px;color:var(--text-dim);">还没有节点，点击下方按钮添加</div>';return;}container.innerHTML=state.editingNodes.map((n,i)=>{n.__index=i;const kindOpts=NODE_KINDS.map(k=>`<option value="${k.kind}"${k.kind===n.kind?" selected":""}>${k.label}</option>`).join("");const canMoveUp=i>0;const canMoveDown=i<state.editingNodes.length-1;const canDelete=state.editingNodes.length>2;return `<div class="node-row" data-node-index="${i}" draggable="true"><div class="node-row-head"><span class="drag-handle" title="拖拽排序">⠿</span><span class="node-kind kind-${esc(n.kind)}">${esc(kindLabels[n.kind]||n.kind)}</span><select class="node-kind-select" data-node-index="${i}" title="节点类型">${kindOpts}</select><input class="node-label" data-node-index="${i}" value="${esc(n.label)}" maxlength="80" placeholder="节点名称"><div class="node-actions"><button class="cmd quiet" type="button" data-move-up="${i}"${canMoveUp?"":" disabled"} title="上移">▲</button><button class="cmd quiet" type="button" data-move-down="${i}"${canMoveDown?"":" disabled"} title="下移">▼</button><button class="cmd danger" type="button" data-remove-node="${i}"${canDelete?"":" disabled"} title="删除节点">✕</button></div></div>${workflowModelOptions(n)}<label>附加指令<span>可选，为该节点添加额外执行要求</span><textarea class="node-instr" data-node-index="${i}" maxlength="4000" placeholder="例如：只修改 src/ 目录下的文件，不要触碰测试文件">${esc(n.instructions||"")}</textarea></label></div>`;}).join("");container.querySelectorAll(".node-kind-select").forEach(sel=>{sel.onchange=e=>{const idx=+e.target.dataset.nodeIndex;state.editingNodes[idx].kind=e.target.value;renderNodeEditor();};});container.querySelectorAll(".node-model").forEach(sel=>sel.onchange=e=>{state.editingNodes[+e.target.dataset.nodeIndex].model_profile_id=e.target.value;});container.querySelectorAll("[data-move-up]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.moveUp;gatherNodeValues();const tmp=state.editingNodes[idx-1];state.editingNodes[idx-1]=state.editingNodes[idx];state.editingNodes[idx]=tmp;renderNodeEditor();};});container.querySelectorAll("[data-move-down]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.moveDown;gatherNodeValues();const tmp=state.editingNodes[idx+1];state.editingNodes[idx+1]=state.editingNodes[idx];state.editingNodes[idx]=tmp;renderNodeEditor();};});container.querySelectorAll("[data-remove-node]").forEach(btn=>{btn.onclick=()=>{const idx=+btn.dataset.removeNode;gatherNodeValues();state.editingNodes.splice(idx,1);renderNodeEditor();};});let dragSrcIdx=null;container.querySelectorAll(".node-row").forEach(row=>{row.addEventListener("dragstart",e=>{dragSrcIdx=+row.dataset.nodeIndex;row.classList.add("dragging");e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",String(dragSrcIdx));});row.addEventListener("dragend",()=>{row.classList.remove("dragging");container.querySelectorAll(".node-row").forEach(r=>r.classList.remove("drag-over"));});row.addEventListener("dragover",e=>{e.preventDefault();e.dataTransfer.dropEffect="move";row.classList.add("drag-over");});row.addEventListener("dragleave",()=>row.classList.remove("drag-over"));row.addEventListener("drop",e=>{e.preventDefault();const targetIdx=+row.dataset.nodeIndex;if(dragSrcIdx===null||dragSrcIdx===targetIdx)return;gatherNodeValues();const[moved]=state.editingNodes.splice(dragSrcIdx,1);state.editingNodes.splice(targetIdx,0,moved);renderNodeEditor();dragSrcIdx=null;});});}
+    const renderNodeEditorBase=renderNodeEditor;
+    renderNodeEditor=function(){
+      renderNodeEditorBase();
+      if(!state.editingNodes?.length)return;
+      const last=state.editingNodes.length-1;
+      const approval=state.editingNodes.findIndex(n=>n.kind==="plan_approval");
+      const firstMiddle=approval===1?2:1,lastMiddle=last-1;
+      const counts=state.editingNodes.reduce((all,n)=>(all[n.kind]=(all[n.kind]||0)+1,all),{});
+      document.querySelectorAll(".node-row").forEach(row=>{
+        const index=+row.dataset.nodeIndex,node=state.editingNodes[index];
+        const allowed=index===0?["planner"]:index===last?["delivery"]:index===approval?["plan_approval"]:["executor","validation","reviewer"];
+        const kind=row.querySelector(".node-kind-select");
+        [...kind.options].forEach(option=>option.disabled=!allowed.includes(option.value));
+        kind.onchange=e=>{gatherNodeValues();node.kind=e.target.value;node.model_profile_id="";renderNodeEditor();};
+        const canMoveUp=index>firstMiddle&&index<=lastMiddle;
+        const canMoveDown=index>=firstMiddle&&index<lastMiddle;
+        const canDelete=index>=firstMiddle&&index<=lastMiddle&&counts[node.kind]>1;
+        row.querySelector("[data-move-up]").disabled=!canMoveUp;
+        row.querySelector("[data-move-down]").disabled=!canMoveDown;
+        row.querySelector("[data-remove-node]").disabled=!canDelete;
+        row.draggable=canMoveUp||canMoveDown;
+      });
+    };
+    function gatherNodeValues(){if(!state.editingNodes)return;document.querySelectorAll(".node-label").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].label=el.value;});document.querySelectorAll(".node-instr").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].instructions=el.value;});document.querySelectorAll(".node-kind-select").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].kind=el.value;});document.querySelectorAll(".node-model").forEach(el=>{const idx=+el.dataset.nodeIndex;if(state.editingNodes[idx])state.editingNodes[idx].model_profile_id=el.value;});}
+    function addWorkflowNode(){gatherNodeValues();const insertIdx=state.editingNodes.length-1;const newKind="executor";const newId=generateNodeId(newKind,state.editingNodes.length);state.editingNodes.splice(insertIdx,0,{node_id:newId,kind:newKind,label:kindDefaultLabels[newKind],instructions:"",model_profile_id:""});renderNodeEditor();}
     function onWorkflowModeChange(){gatherNodeValues();const approval=$("workflowMode").value==="guarded";const hasApproval=state.editingNodes.some(n=>n.kind==="plan_approval");if(approval&&!hasApproval){const idx=state.editingNodes.findIndex(n=>n.kind==="planner");state.editingNodes.splice(idx+1,0,{node_id:"approve",kind:"plan_approval",label:"批准计划",instructions:""});}else if(!approval&&hasApproval){state.editingNodes=state.editingNodes.filter(n=>n.kind!=="plan_approval");}renderNodeEditor();}
     function openWorkflowDialog(workflowId){if(workflowId){const w=state.workflows.find(x=>x.workflow_id===workflowId);if(!w||w.builtin)return;$("workflowDialogTitle").textContent="编辑工作流";$("workflowId").value=w.workflow_id;$("workflowLabel").value=w.label;$("workflowDesc").value=w.description||"";$("workflowMode").value=w.nodes.some(n=>n.kind==="plan_approval")?"guarded":"quick";state.editingNodes=w.nodes.map(n=>({...n}));}else{$("workflowDialogTitle").textContent="新建工作流";$("workflowId").value="";$("workflowLabel").value="";$("workflowDesc").value="";$("workflowMode").value="quick";state.editingNodes=defaultWorkflowNodes(false);}renderNodeEditor();const dlg=$("workflowDialog");if(!dlg.open)dlg.showModal();}
     function renderWorkflowList(){if(!$("workflowList"))return;$("workflowList").innerHTML=state.workflows.map(w=>`<div class="workflow-row"><strong>${esc(w.label)}${w.builtin?' <small style="color:var(--text-dim);font-weight:400;font-size:11px;">内置</small>':""}</strong><span>${esc(w.nodes.map(n=>n.label).join(" → "))}</span><div style="display:flex;gap:4px;">${w.builtin?"":`<button class="cmd quiet" data-edit-workflow="${esc(w.workflow_id)}">编辑</button><button class="cmd danger" data-delete-workflow="${esc(w.workflow_id)}" title="删除工作流">删除</button>`}</div></div>`).join("");document.querySelectorAll("[data-edit-workflow]").forEach(b=>b.onclick=()=>openWorkflowDialog(b.dataset.editWorkflow));document.querySelectorAll("[data-delete-workflow]").forEach(b=>b.onclick=async()=>{if(!confirm("确认删除该工作流？此操作不可撤销。"))return;try{const res=await fetch(`/api/agent/workflows/${encodeURIComponent(b.dataset.deleteWorkflow)}`,{method:"DELETE"});if(!res.ok){const e=await res.json();throw new Error(e.error||"删除失败");}await loadWorkflows();toast("工作流已删除");}catch(e){toast(e.message);}});}
-    function workflowPayload(){gatherNodeValues();return{workflow_id:$("workflowId").value,label:$("workflowLabel").value,description:$("workflowDesc").value,nodes:state.editingNodes.map(n=>{const node={node_id:n.node_id,kind:n.kind,label:n.label};if(n.instructions)node.instructions=n.instructions;return node;})};}
+    function workflowPayload(){gatherNodeValues();return{workflow_id:$("workflowId").value,label:$("workflowLabel").value,description:$("workflowDesc").value,nodes:state.editingNodes.map(n=>{const node={node_id:n.node_id,kind:n.kind,label:n.label};if(n.instructions)node.instructions=n.instructions;if(n.model_profile_id&&["planner","executor","reviewer"].includes(n.kind))node.model_profile_id=n.model_profile_id;return node;})};}
 
     /* ---- Task graph canvas ---- */
     const GRAPH_NODE_WIDTH=210,GRAPH_NODE_HEIGHT=92,GRAPH_X_GAP=270,GRAPH_Y_GAP=132;
@@ -764,8 +934,8 @@
     function selectGraphNode(id,render=true){gatherGraphInspector();graphUi().selectedId=id;if(!render)return;const layer=$("graphLayer");if(!layer){renderGraphCanvas();renderGraphInspector();return;}layer.querySelectorAll("[data-graph-node]").forEach(card=>card.classList.toggle("selected",card.dataset.graphNode===id));renderGraphInspector();}
     function connectGraphNodes(sourceId,targetId){const source=graphNodeById(sourceId),target=graphNodeById(targetId);if(!source||!target)return;if(source.enabled===false&&target.enabled!==false){toast("启用节点不能依赖已停用节点");return;}if(graphWouldCycle(sourceId,targetId)){toast("该连线会形成循环依赖");return;}target.depends_on=[...new Set([...(target.depends_on||[]),sourceId])];graphUi().connectingId="";graphUi().selectedId=targetId;renderGraphCanvas();renderGraphInspector();}
     function gatherGraphInspector(){const form=$("graphInspectorForm");if(!form||!state.editingGraph)return;const node=graphNodeById(form.dataset.nodeId);if(!node)return;node.enabled=form.querySelector(".graph-field-enabled").checked;node.title=form.querySelector(".graph-field-title").value.trim();node.kind=form.querySelector(".graph-field-kind").value;node.access=form.querySelector(".graph-field-access").value;node.capability=form.querySelector(".graph-field-capability").value;node.instructions=form.querySelector(".graph-field-instructions").value;node.depends_on=[...form.querySelectorAll(".graph-dependency input:checked")].map(x=>x.value);const selectedModel=(state.detail.model_catalog||[]).find(m=>m.profile_id===form.querySelector(".graph-field-model").value);if(selectedModel)node.model=modelBinding(selectedModel,node.model,`用户为此节点选择 ${selectedModel.profile_id}`);if(node.kind==="implementation"||node.kind==="integration")node.access="workspace_write";if(!node.enabled)state.editingGraph.nodes.forEach(other=>{if(other.enabled!==false)other.depends_on=(other.depends_on||[]).filter(id=>id!==node.node_id);});}
-    function renderGraphInspector(){const inspector=$("graphInspector");if(!inspector||!state.editingGraph)return;const ui=graphUi(),node=graphNodeById(ui.selectedId);if(!node){inspector.innerHTML='<div class="graph-inspector-empty">选择画布中的节点以编辑属性和依赖关系。</div>';return;}const kinds=["implementation","integration","custom"].map(k=>`<option value="${k}"${k===node.kind?" selected":""}>${k}</option>`).join("");const accesses=["workspace_write","read_only"].map(a=>`<option value="${a}"${a===node.access?" selected":""}>${a}</option>`).join("");const capabilities=[...new Set([...COMPOSE_CAPABILITIES,node.capability||"implementation"])].map(c=>`<option value="${esc(c)}"${c===node.capability?" selected":""}>${esc(c)}</option>`).join("");const dependencies=state.editingGraph.nodes.filter(other=>other.node_id!==node.node_id).map(other=>{const cycle=graphWouldCycle(other.node_id,node.node_id),disabled=other.enabled===false&&node.enabled!==false;const inputId=`graph-dep-${node.node_id}-${other.node_id}`;return`<label class="graph-dependency" for="${esc(inputId)}"><input id="${esc(inputId)}" type="checkbox" value="${esc(other.node_id)}"${(node.depends_on||[]).includes(other.node_id)?" checked":""}${cycle||disabled?" disabled":""}><span>${esc(other.title)}${cycle?"（会形成环）":disabled?"（已停用）":""}</span></label>`;}).join("")||'<span class="text-muted">暂无其他节点</span>';const modelOptions=graphModelOptions(node);inspector.innerHTML=`<div class="graph-inspector-form" id="graphInspectorForm" data-node-id="${esc(node.node_id)}"><div class="workflow-section-head"><h3>节点属性</h3><button class="cmd danger" id="deleteGraphNode" type="button"${state.editingGraph.nodes.length<=1?" disabled":""}>删除</button></div><label class="compose-enabled-label"><input class="graph-field-enabled compose-enabled" type="checkbox"${node.enabled!==false?" checked":""}>启用此节点</label><label>节点标识<input value="${esc(node.node_id)}" disabled></label><label>标题<input class="graph-field-title" value="${esc(node.title)}" maxlength="160" required></label><div class="form-grid"><label>类型<select class="graph-field-kind">${kinds}</select></label><label>权限<select class="graph-field-access">${accesses}</select></label></div><label>专项能力<select class="graph-field-capability">${capabilities}</select></label><label>模型<select class="graph-field-model"${modelOptions?"":" disabled"}>${modelOptions||'<option value="">无兼容模型</option>'}</select></label><fieldset class="graph-dependency-field"><legend>前置依赖</legend><span>勾选后会在画布上建立连线</span><div class="graph-dependencies">${dependencies}</div></fieldset><label>节点指令<textarea class="graph-field-instructions" maxlength="8000">${esc(node.instructions||"")}</textarea></label></div>`;$("deleteGraphNode").onclick=deleteSelectedGraphNode;inspector.querySelectorAll(".graph-field-kind,.graph-field-access,.graph-field-capability,.graph-field-enabled").forEach(control=>control.onchange=()=>{gatherGraphInspector();renderGraphCanvas();renderGraphInspector();});inspector.querySelectorAll(".graph-dependency input").forEach(control=>control.onchange=()=>{gatherGraphInspector();renderGraphCanvas();renderGraphInspector();});inspector.querySelector(".graph-field-title").oninput=e=>{node.title=e.target.value;const title=$("graphLayer")?.querySelector(`[data-graph-node="${CSS.escape(node.node_id)}"] .graph-node-title`);if(title)title.textContent=node.title;};}
-    function addGraphNode(){gatherGraphInspector();const graph=state.editingGraph,models=state.detail.model_catalog||[];let index=graph.nodes.length+1,id=`node-${index}`;while(graph.nodes.some(n=>n.node_id===id))id=`node-${++index}`;const model=models.find(m=>m.access==="read_only"&&((m.capabilities||[]).includes("general")||(m.capabilities||[]).includes("research")));graph.nodes.push({node_id:id,title:"新任务节点",kind:"custom",capability:model&&(model.capabilities||[]).includes("research")?"research":"general",depends_on:[],instructions:"",model:model?modelBinding(model,null,`用户添加节点并选择 ${model.profile_id}`):{},terminal:{kind:"local",cwd:"",worktree:"task",network:"deny"},access:"read_only",inputs:[],outputs:[],on_failure:"human",enabled:true});const bounds=graphBounds();graph.layout[id]={x:Math.max(36,bounds.width-GRAPH_NODE_WIDTH-80),y:60};graphUi().selectedId=id;renderGraphCanvas();renderGraphInspector();}
+    function renderGraphInspector(){const inspector=$("graphInspector");if(!inspector||!state.editingGraph)return;const ui=graphUi(),node=graphNodeById(ui.selectedId);if(!node){inspector.innerHTML='<div class="graph-inspector-empty">选择画布中的节点以编辑属性和依赖关系。</div>';return;}const kinds=["implementation","integration","custom"].map(k=>`<option value="${k}"${k===node.kind?" selected":""}>${k}</option>`).join("");const accesses=["workspace_write","read_only"].map(a=>`<option value="${a}"${a===node.access?" selected":""}>${a}</option>`).join("");const capabilities=[...new Set([...COMPOSE_CAPABILITIES,node.capability||"implementation"])].map(c=>`<option value="${esc(c)}"${c===node.capability?" selected":""}>${esc(c)}</option>`).join("");const dependencies=state.editingGraph.nodes.filter(other=>other.node_id!==node.node_id).map(other=>{const cycle=graphWouldCycle(other.node_id,node.node_id),disabled=other.enabled===false&&node.enabled!==false;const inputId=`graph-dep-${node.node_id}-${other.node_id}`;return`<label class="graph-dependency" for="${esc(inputId)}"><input id="${esc(inputId)}" type="checkbox" value="${esc(other.node_id)}"${(node.depends_on||[]).includes(other.node_id)?" checked":""}${cycle||disabled?" disabled":""}><span>${esc(other.title)}${cycle?"（会形成环）":disabled?"（已停用）":""}</span></label>`;}).join("")||'<span class="text-muted">暂无其他节点</span>';const modelOptions=graphModelOptions(node);inspector.innerHTML=`<div class="graph-inspector-form" id="graphInspectorForm" data-node-id="${esc(node.node_id)}"><div class="workflow-section-head"><h3>节点属性</h3><button class="cmd danger" id="deleteGraphNode" type="button"${state.editingGraph.nodes.length<=1?" disabled":""}>删除</button></div><label class="compose-enabled-label"><input class="graph-field-enabled compose-enabled" type="checkbox"${node.enabled!==false?" checked":""}>启用此节点</label><label>节点标识<input value="${esc(node.node_id)}" disabled></label><label>标题<input class="graph-field-title" value="${esc(node.title)}" maxlength="160" required></label><div class="form-grid"><label>类型<select class="graph-field-kind">${kinds}</select></label><label>权限<select class="graph-field-access">${accesses}</select></label></div><label>专项能力<select class="graph-field-capability">${capabilities}</select></label><label>模型<select class="graph-field-model"${modelOptions?'':' disabled'}>${modelOptions}</select></label><fieldset class="graph-dependency-field"><legend>前置依赖</legend><span>勾选后会在画布上建立连线</span><div class="graph-dependencies">${dependencies}</div></fieldset><label>节点指令<textarea class="graph-field-instructions" maxlength="8000">${esc(node.instructions||"")}</textarea></label></div>`;$("deleteGraphNode").onclick=deleteSelectedGraphNode;inspector.querySelectorAll(".graph-field-kind,.graph-field-access,.graph-field-capability,.graph-field-enabled").forEach(control=>control.onchange=()=>{gatherGraphInspector();renderGraphCanvas();renderGraphInspector();});inspector.querySelectorAll(".graph-dependency input").forEach(control=>control.onchange=()=>{gatherGraphInspector();renderGraphCanvas();renderGraphInspector();});inspector.querySelector(".graph-field-title").oninput=e=>{node.title=e.target.value;const title=$("graphLayer")?.querySelector(`[data-graph-node="${CSS.escape(node.node_id)}"] .graph-node-title`);if(title)title.textContent=node.title;};}
+    function addGraphNode(){gatherGraphInspector();const graph=state.editingGraph,models=state.detail.model_catalog||[];let index=graph.nodes.length+1,id=`node-${index}`;while(graph.nodes.some(n=>n.node_id===id))id=`node-${++index}`;const model=models.find(m=>m.access==="read_only"&&((m.capabilities||[]).includes("general")||(m.capabilities||[]).includes("research")));graph.nodes.push({node_id:id,title:"新任务节点",kind:"custom",capability:model&&(model.capabilities||[]).includes("research")?"research":"general",depends_on:[],instructions:"",model:model?modelBinding(model,null,`用户添加节点并选择 ${model.profile_id}`):{},access:"read_only",inputs:[],outputs:[],on_failure:"human",enabled:true});const bounds=graphBounds();graph.layout[id]={x:Math.max(36,bounds.width-GRAPH_NODE_WIDTH-80),y:60};graphUi().selectedId=id;renderGraphCanvas();renderGraphInspector();}
     function deleteSelectedGraphNode(){gatherGraphInspector();const graph=state.editingGraph,id=graphUi().selectedId;if(!id||graph.nodes.length<=1)return;graph.nodes=graph.nodes.filter(n=>n.node_id!==id);graph.nodes.forEach(n=>n.depends_on=(n.depends_on||[]).filter(dep=>dep!==id));delete graph.layout[id];graphUi().selectedId=graph.nodes[0]?.node_id||"";graphUi().connectingId="";renderGraphCanvas();renderGraphInspector();}
     function setGraphZoom(next){graphUi().scale=Math.max(.6,Math.min(1.4,next));$("graphZoomValue").textContent=`${Math.round(graphUi().scale*100)}%`;renderGraphCanvas();}
     function renderCompositionEditor(){const graph=state.editingGraph,models=state.detail.model_catalog||[];const reviewModels=models.filter(m=>m.access==="read_only"&&((m.capabilities||[]).includes("review")||(m.capabilities||[]).includes("general")));const planning=graph.planning_model||{},review=graph.review_model||{};state.graphCanvas={selectedId:graph.nodes[0]?.node_id||"",connectingId:"",scale:1};ensureGraphLayout();$("compositionEditor").innerHTML=`<div class="graph-editor"><div class="graph-toolbar"><label class="graph-model-field">审核模型<span>计划模型：${esc(planning.profile_id||"兼容路由")} · ${esc(planning.model||"")}</span><select id="composeReviewModel">${reviewModels.map(m=>`<option value="${esc(m.profile_id)}"${m.profile_id===review.profile_id?" selected":""}>${esc(m.label)} · ${esc(m.model)} · Q${esc(m.quality)}</option>`).join("")}</select></label><button class="cmd primary" id="addCompositionNode" type="button">+ 添加节点</button><button class="cmd quiet" id="autoLayoutGraph" type="button">自动布局</button><button class="cmd quiet" id="zoomOutGraph" type="button" aria-label="缩小画布">−</button><span class="graph-zoom" id="graphZoomValue">100%</span><button class="cmd quiet" id="zoomInGraph" type="button" aria-label="放大画布">＋</button></div><div class="graph-hint" id="graphHint"></div><div class="graph-workbench"><div class="graph-viewport" id="graphViewport"><div class="graph-surface" id="graphSurface"></div></div><aside class="graph-inspector" id="graphInspector" aria-label="节点属性"></aside></div></div>`;$("addCompositionNode").onclick=addGraphNode;$("autoLayoutGraph").onclick=autoLayoutGraph;$("zoomOutGraph").onclick=()=>setGraphZoom(graphUi().scale-.1);$("zoomInGraph").onclick=()=>setGraphZoom(graphUi().scale+.1);$("composeReviewModel").onchange=e=>{const selected=models.find(m=>m.profile_id===e.target.value);if(selected)graph.review_model=modelBinding(selected,graph.review_model,`用户选择审核模型 ${selected.profile_id}`);};renderGraphCanvas();renderGraphInspector();}
@@ -775,7 +945,7 @@
 
     // Mouse and touch drag are delegated to the viewport so inspector refreshes cannot
     // replace the event target in the middle of a gesture.
-    function redrawGraphEdges(layer){const svg=layer?.querySelector(".graph-edges");if(svg)svg.innerHTML=`<defs><marker id="graphArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="graph-edge-arrow" d="M0,0 L8,4 L0,8 z"/></marker></defs>${graphEdgeMarkup()}`;}
+    function redrawGraphEdges(layer){const svg=layer?.querySelector(".graph-edges");if(svg)svg.innerHTML=`<defs><marker id="graphArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="graph-edge-arrow" d="M0,0 L8,4 L0,8 z"/></marker></defs>${graphEdgeMarkup()}</svg>`;}
     function startGraphDrag(card,clientX,clientY){const id=card.dataset.graphNode,p=state.editingGraph.layout[id];selectGraphNode(id);graphUi().mouseDrag={id,startX:clientX,startY:clientY,originX:Number(p.x),originY:Number(p.y),moved:false};}
     function moveGraphDrag(layer,clientX,clientY){const drag=graphUi().mouseDrag;if(!drag)return;const dx=(clientX-drag.startX)/graphUi().scale,dy=(clientY-drag.startY)/graphUi().scale;if(Math.abs(dx)+Math.abs(dy)>3)drag.moved=true;if(!drag.moved)return;const p=state.editingGraph.layout[drag.id],card=layer.querySelector(`[data-graph-node="${CSS.escape(drag.id)}"]`);p.x=Math.max(0,Math.min(10000,drag.originX+dx));p.y=Math.max(0,Math.min(10000,drag.originY+dy));if(card){card.style.left=`${p.x}px`;card.style.top=`${p.y}px`;}redrawGraphEdges(layer);}
     function finishGraphMouseDrag(){const ui=graphUi();if(!ui.mouseDrag)return;const moved=ui.mouseDrag.moved;ui.mouseDrag=null;if(moved)renderGraphCanvas();}
@@ -818,31 +988,118 @@
     }
     window.addEventListener("keydown",e=>{if(e.key==="Escape"&&state.graphCanvas?.connectingId){state.graphCanvas.connectingId="";renderGraphCanvas();}});
 
-    /* ---- Theme toggle ---- */
+    /* ---- Native model setup ---- */
+    const NATIVE_PRESETS={deepseek:{base:"https://api.deepseek.com/v1",model:"deepseek-chat"},custom:{base:"",model:""}};
+    async function loadNativeStatus(){try{state.native=await api("/api/agent/native-config");}catch(e){state.native={configured:false};}renderModelChip();}
+    function renderModelChip(){const n=state.native||{};const chip=$("modelChip"),label=$("modelChipLabel"),dot=$("modelChipDot"),setup=$("setupFirst");if(n.configured){chip.classList.remove("attention");dot.style.background="var(--green)";label.textContent=`多模型已就绪 · ${n.model}`;chip.title="打开模型管理";}else{chip.classList.add("attention");dot.style.background="var(--amber)";label.textContent="配置模型供应商";chip.title="使用 Codex / Claude API 协议，无需 CLI";}$("composerHint").textContent=n.configured?`执行模型 ${n.model}`:"未配置模型，任务将无法运行";if(setup)setup.classList.toggle("hidden",Boolean(n.configured));}
+    function openNativeDialog(){const n=state.native||{};$("nativePreset").value=n.base_url&&n.base_url!==NATIVE_PRESETS.deepseek.base?"custom":"deepseek";$("nativeBase").value=n.base_url||"";$("nativeModel").value=n.model||"";$("nativeThinking").value=n.thinking||"medium";$("nativeProxy").value=n.proxy||"";$("nativeKey").value="";$("nativeKey").placeholder=n.api_key_set?"已保存——留空则保持不变":"sk-…";$("nativeTestResult").classList.add("hidden");$("nativeDialog").showModal();}
+    $("nativePreset").onchange=e=>{const preset=NATIVE_PRESETS[e.target.value]||NATIVE_PRESETS.custom;if(preset.base&&!$("nativeBase").value)$("nativeBase").value=preset.base;if(preset.model&&!$("nativeModel").value)$("nativeModel").value=preset.model;};
+    $("nativeTestButton").onclick=async e=>{e.preventDefault();const button=e.target;const result=$("nativeTestResult");result.classList.remove("hidden","error");result.textContent="正在连接…";button.disabled=true;try{const res=await post("/api/agent/native-config/test",{base_url:$("nativeBase").value.trim(),model:$("nativeModel").value.trim(),api_key:$("nativeKey").value,proxy:$("nativeProxy").value.trim()});result.textContent=res.detail;}catch(err){result.classList.add("error");result.textContent=err.message;}finally{button.disabled=false;}};
+    $("nativeForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await post("/api/agent/native-config",{base_url:$("nativeBase").value.trim(),model:$("nativeModel").value.trim(),api_key:$("nativeKey").value,thinking:$("nativeThinking").value,proxy:$("nativeProxy").value.trim()});$("nativeDialog").close();toast("已启用内置 Harness 模型");await loadNativeStatus();}catch(err){toast(err.message);}};
+
+    /* ---- Model registry admin ---- */
+    let registryState=null, editingProviderId="", editingModelId="";
+    const protocolLabel=value=>({codex:"Codex · Responses",claude:"Claude · Messages",openai_chat:"旧版 Chat Completions"}[value]||value||"未设置");
+    async function openModelAdmin(){ $("modelAdminDialog").showModal(); await reloadRegistry(); }
+    async function reloadRegistry(){ try{ registryState=await api("/api/agent/model-registry"); state.modelCatalog=registryState.models||[]; }catch(e){ toast(e.message); return; } renderModelAdmin(); await loadNativeStatus(); }
+    function renderModelAdmin(){
+      const body=$("modelAdminBody"); if(!registryState)return;
+      const providers=registryState.providers||[];
+      const models=registryState.models||[];
+      const roles=registryState.roles||{};
+      const providerName=id=>{const p=providers.find(x=>x.id===id);return p?p.label:"—";};
+      body.innerHTML=`
+        <div class="admin-section-head"><strong>供应商 · ${providers.length}</strong><button class="cmd primary" type="button" id="addProviderBtn">+ 添加供应商</button></div>
+        <div class="provider-grid">${providers.length?providers.map(p=>`
+          <div class="provider-card" data-provider="${esc(p.id)}">
+            <div class="provider-card-head">
+              <span class="health-dot ${p.key_set?"ok":"bad"}"></span><strong>${esc(p.label)}</strong>
+              <button class="cmd quiet" type="button" data-edit-provider="${esc(p.id)}">编辑</button>
+              <button class="cmd quiet" type="button" data-test-provider="${esc(p.id)}">测试</button>
+              <button class="cmd danger" type="button" data-delete-provider="${esc(p.id)}">删除</button>
+            </div>
+            <small>${esc(p.base_url)} · ${(p.protocols||[]).map(protocolLabel).join(" / ")}${p.proxy?` · 代理 ${esc(p.proxy)}`:""} · ${p.key_set?"已配置 Key":"未配置 Key"} · ${p.model_count||0} 个模型</small>
+          </div>`).join(""):`<div class="admin-empty">还没有供应商。添加 API 地址和 Key，并选择 Codex / Claude 协议；一个供应商可以挂多个模型。</div>`}</div>
+        <div class="admin-section-head" style="margin-top:18px"><strong>模型 · ${models.length}</strong><button class="cmd primary" type="button" id="addModelBtn" ${providers.length?"":"disabled"}>+ 添加模型</button></div>
+        ${models.length?`<table class="model-table"><thead><tr><th>标识 / 名称</th><th>供应商 / 协议</th><th>模型名</th><th>权限</th><th>能力</th><th></th></tr></thead><tbody>
+          ${models.map(m=>`<tr><td><strong>${esc(m.profile_id)}</strong><br><small class="text-muted">${esc(m.label)}</small></td><td>${esc(providerName(m.provider_id))}<br><small class="text-muted">${esc(protocolLabel(m.protocol))}</small></td><td>${esc(m.model)}<br><small class="text-muted">${esc(m.thinking)} · Q${esc(m.quality)}</small></td><td>${m.access==="workspace_write"?"可写":"只读"}</td><td>${esc((m.capabilities||[]).join("、"))}</td><td><button class="cmd quiet" type="button" data-edit-model="${esc(m.profile_id)}">编辑</button> <button class="cmd danger" type="button" data-delete-model="${esc(m.profile_id)}">删除</button></td></tr>`).join("")}
+        </tbody></table>`:`<div class="admin-empty">还没有模型。模型挂在供应商下，设置能力与权限后即可绑定到角色。</div>`}
+        <div class="admin-section-head" style="margin-top:18px"><strong>角色绑定</strong><span class="text-muted" style="font-size:11.5px">规划 / 执行 / 审核各自使用哪个模型</span></div>
+        <div>${["planner","executor","reviewer"].map(role=>`
+          <div class="role-binding-row"><strong>${{planner:"规划",executor:"执行",reviewer:"审核"}[role]}</strong>
+          <select data-role-select="${role}">
+            <option value="">未绑定</option>
+            ${models.filter(m=>m.access===(role==="executor"?"workspace_write":"read_only")).map(m=>`<option value="${esc(m.profile_id)}"${(registryState.role_bindings||{})[role]===m.profile_id?" selected":""}>${esc(m.label)}（${esc(m.profile_id)} · ${protocolLabel(m.protocol)}）</option>`).join("")}
+          </select></div>`).join("")}</div>`;
+      $("modelAdminSummary").textContent=registryState.configured?"已就绪：三个角色均已绑定模型。":"尚未完成：请配置供应商 Key 并绑定全部角色。";
+      $("addProviderBtn").onclick=()=>openProviderDialog(null);
+      $("addModelBtn").onclick=()=>openModelDialog(null);
+      body.querySelectorAll("[data-edit-provider]").forEach(b=>b.onclick=()=>openProviderDialog(b.dataset.editProvider));
+      body.querySelectorAll("[data-test-provider]").forEach(b=>b.onclick=async()=>{const p=providers.find(x=>x.id===b.dataset.testProvider);if(!p)return;b.textContent="测试中…";try{const res=await post(`/api/agent/model-registry/providers/${encodeURIComponent(p.id)}/test`,{});toast(res.detail);}catch(e){toast(e.message);}finally{b.textContent="测试";}});
+      body.querySelectorAll("[data-delete-provider]").forEach(b=>b.onclick=async()=>{const p=providers.find(x=>x.id===b.dataset.deleteProvider);if(!p)return;if(!confirm(`确认删除供应商「${p.label}」？其下模型与相关角色绑定会一并删除。`))return;try{registryState=await api(`/api/agent/model-registry/providers/${encodeURIComponent(p.id)}`,{method:"DELETE"});renderModelAdmin();await loadNativeStatus();toast("供应商已删除");}catch(e){toast(e.message);}});
+      body.querySelectorAll("[data-edit-model]").forEach(b=>b.onclick=()=>openModelDialog(b.dataset.editModel));
+      body.querySelectorAll("[data-delete-model]").forEach(b=>b.onclick=async()=>{if(!confirm(`确认删除模型「${b.dataset.deleteModel}」？`))return;try{registryState=await api(`/api/agent/model-registry/models/${encodeURIComponent(b.dataset.deleteModel)}`,{method:"DELETE"});renderModelAdmin();await loadNativeStatus();toast("模型已删除");}catch(e){toast(e.message);}});
+      body.querySelectorAll("[data-role-select]").forEach(sel=>sel.onchange=async()=>{const next={...registryState.role_bindings,[sel.dataset.roleSelect]:sel.value};try{registryState=await post("/api/agent/model-registry/roles",next);renderModelAdmin();toast("角色绑定已更新");}catch(e){toast(e.message);await reloadRegistry();}});
+    }
+    function openProviderDialog(providerId){const p=(registryState?.providers||[]).find(x=>x.id===providerId);editingProviderId=providerId||"";$("providerDialogTitle").textContent=p?"编辑供应商":"添加供应商";$("providerLabel").value=p?p.label:"";$("providerBase").value=p?p.base_url:"";$("providerProxy").value=p?(p.proxy||""):"";$("providerProtocolCodex").checked=!p||(p.protocols||[]).includes("codex");$("providerProtocolClaude").checked=Boolean(p&&(p.protocols||[]).includes("claude"));$("providerKey").value="";$("providerKey").placeholder=p&&p.key_set?"已保存——留空则保持不变":"sk-…";$("providerDialog").showModal();}
+    $("providerForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();const protocols=[["providerProtocolCodex","codex"],["providerProtocolClaude","claude"]].filter(([id])=>$(id).checked).map(([,value])=>value);if(!protocols.length){toast("请至少选择一种协议");return;}try{registryState=await post("/api/agent/model-registry/providers",{id:editingProviderId,label:$("providerLabel").value,base_url:$("providerBase").value.trim(),proxy:$("providerProxy").value.trim(),protocols,api_key:$("providerKey").value});$("providerDialog").close();state.modelCatalog=registryState.models||[];renderModelAdmin();await loadNativeStatus();toast("供应商已保存");}catch(err){toast(err.message);}};
+    function openModelDialog(profileId){const m=(registryState?.models||[]).find(x=>x.profile_id===profileId);editingModelId=profileId||"";$("modelEntryDialogTitle").textContent=m?"编辑模型":"添加模型";$("modelProfileId").value=m?m.profile_id:"";$("modelProfileId").disabled=Boolean(m);$("modelLabel").value=m?m.label:"";$("modelRuntime").value=m?m.runtime:"native";$("modelProvider").innerHTML=(registryState?.providers||[]).map(p=>`<option value="${esc(p.id)}"${m&&m.provider_id===p.id?" selected":""}>${esc(p.label)}</option>`).join("")||'<option value="">请先添加供应商</option>';$("modelName").value=m?m.model:"";$("modelAccess").value=m?m.access:"read_only";$("modelThinking").value=m?m.thinking:"medium";$("modelQuality").value=m?String(m.quality):"4";$("modelCapabilities").value=m?(m.capabilities||[]).join(", "):"";syncRuntimeFields();$("modelEntryDialog").showModal();}
+    function syncRuntimeFields(){const provider=(registryState?.providers||[]).find(p=>p.id===$("modelProvider").value);const protocols=(provider?.protocols||[]).filter(p=>p==="codex"||p==="claude"||p==="openai_chat");const current=(registryState?.models||[]).find(m=>m.profile_id===editingModelId)?.protocol||"";$("modelProtocol").innerHTML=protocols.map(p=>`<option value="${p}">${protocolLabel(p)}</option>`).join("");if(current&&protocols.includes(current))$("modelProtocol").value=current;}
+    $("modelProvider").onchange=syncRuntimeFields;
+    $("modelEntryForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();const capabilities=$("modelCapabilities").value.split(/[\s,，]+/).map(s=>s.trim()).filter(Boolean);try{registryState=await post("/api/agent/model-registry/models",{profile_id:$("modelProfileId").value.trim(),label:$("modelLabel").value.trim(),runtime:"native",provider_id:$("modelProvider").value,protocol:$("modelProtocol").value,model:$("modelName").value.trim(),access:$("modelAccess").value,thinking:$("modelThinking").value,quality:+$("modelQuality").value,capabilities});$("modelEntryDialog").close();state.modelCatalog=registryState.models||[];renderModelAdmin();await loadNativeStatus();toast("模型已保存");}catch(err){toast(err.message);}};
+    $("modelAdminButton").onclick=openModelAdmin;
+
+    /* ---- Composer ---- */
+    function autoGrow(){const el=$("composerInput");el.style.height="auto";el.style.height=Math.min(el.scrollHeight,200)+"px";}
+    async function submitComposer(){
+      const text=$("composerInput").value.trim();
+      if(!text)return;
+      if(!state.projects.length){toast("请先创建一个项目");openProjectDialog();return;}
+      const title=text.split("\n")[0].slice(0,30)||"新任务";
+      const button=$("composerSend");button.disabled=true;
+      try{
+        const task=await post("/api/agent/tasks",{project_id:$("composerProject").value,workflow_id:$("composerWorkflow").value,title,requirement:text});
+        $("composerInput").value="";autoGrow();
+        await loadTasks();await selectTask(task.task_id);
+      }catch(e){toast(e.message);}finally{button.disabled=false;}
+    }
+    $("composerSend").onclick=submitComposer;
+    $("composerInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitComposer();}});
+    $("composerInput").addEventListener("input",autoGrow);
+    document.querySelectorAll("[data-suggest]").forEach(b=>b.onclick=()=>{$("composerInput").value=b.dataset.suggest;autoGrow();$("composerInput").focus();});
+
+    /* ---- Theme / shell ---- */
     function applyTheme(theme){document.documentElement.classList.toggle("dark",theme==="dark");$("themeToggle").textContent=theme==="dark"?"☀️":"🌙";}
     applyTheme(localStorage.getItem("workloop-theme")||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"));
     $("themeToggle").onclick=()=>{const next=document.documentElement.classList.contains("dark")?"light":"dark";localStorage.setItem("workloop-theme",next);applyTheme(next);};
+    function closeSidebar(){document.body.classList.remove("sidebar-open");}
+    $("menuButton").onclick=()=>document.body.classList.toggle("sidebar-open");
+    $("sidebarClose").onclick=closeSidebar;
+    $("sidebarBackdrop").onclick=closeSidebar;
 
     document.querySelectorAll("[data-filter]").forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;document.querySelectorAll("[data-filter]").forEach(x=>{x.classList.toggle("active",x===b);x.setAttribute("aria-pressed",x===b?"true":"false")});renderTasks();});
     document.querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>$(b.dataset.close).close());
     document.querySelectorAll('dialog button[value="cancel"]').forEach(b=>{b.type="button";b.onclick=()=>b.closest("dialog").close();});
-    $("refreshButton").onclick=()=>loadTasks(true).catch(e=>toast(e.message)); $("runtimeButton").onclick=showRuntime; $("workflowButton").onclick=()=>openWorkflowDialog(null); $("workflowMode").onchange=onWorkflowModeChange; $("newWorkflowBtn").onclick=()=>openWorkflowDialog(null); $("addNodeBtn").onclick=addWorkflowNode; $("projectButton").onclick=()=>$("projectDialog").showModal();
-    $("newTaskButton").onclick=async()=>{if(!state.projects.length){$("projectDialog").showModal();return;}$("taskDialog").showModal();};
+    $("refreshButton").onclick=()=>loadTasks(true).catch(e=>toast(e.message));
+    $("runtimeButton").onclick=showRuntime; $("workflowButton").onclick=()=>openWorkflowDialog(null); $("workflowMode").onchange=onWorkflowModeChange; $("newWorkflowBtn").onclick=()=>openWorkflowDialog(null); $("addNodeBtn").onclick=addWorkflowNode;
+    $("projectButton").onclick=openProjectDialog;
+    $("modelChip").onclick=openModelAdmin;
+    const setupFirst=$("setupFirst");if(setupFirst)setupFirst.onclick=openModelAdmin;
+    $("newTaskButton").onclick=()=>{showEmptyState();$("composerInput").focus();if(!state.projects.length){openProjectDialog();}closeSidebar();};
     async function loadDirectoryBrowser(path){const listing=await post("/api/agent/projects/browse-directories",{path:path||""});state.directoryBrowser=listing;$("directoryCurrentPath").value=listing.path;const roots=listing.roots||[];$("directoryRoot").innerHTML=roots.map(root=>`<option value="${esc(root)}"${listing.path.toLowerCase().startsWith(root.toLowerCase())?" selected":""}>${esc(root)}</option>`).join("");const entries=[];if(listing.parent)entries.push('<button class="directory-entry" id="directoryUp" type="button" role="listitem">↰ 上一级</button>');(listing.directories||[]).forEach((item,index)=>entries.push(`<button class="directory-entry" type="button" role="listitem" data-directory-index="${index}">📁 ${esc(item.name)}</button>`));$("directoryList").innerHTML=entries.join("")||'<div class="directory-empty">此目录没有子目录</div>';$("directoryNote").textContent=listing.truncated?"子目录较多，仅显示前 500 项。":"";if($("directoryUp"))$("directoryUp").onclick=()=>loadDirectoryBrowser(listing.parent).catch(err=>toast(err.message));document.querySelectorAll("[data-directory-index]").forEach(button=>button.onclick=()=>loadDirectoryBrowser(listing.directories[+button.dataset.directoryIndex].path).catch(err=>toast(err.message)));}
     $("browseProjectPath").onclick=async()=>{const button=$("browseProjectPath");button.disabled=true;try{await loadDirectoryBrowser($("projectPath").value);$("directoryDialog").showModal();}catch(err){toast(err.message);}finally{button.disabled=false;}};
     $("directoryGo").onclick=()=>loadDirectoryBrowser($("directoryCurrentPath").value).catch(err=>toast(err.message));
     $("directoryCurrentPath").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();$("directoryGo").click();}};
     $("directoryRoot").onchange=e=>loadDirectoryBrowser(e.target.value).catch(err=>toast(err.message));
     $("useDirectory").onclick=()=>{const selected=state.directoryBrowser?.path||"";if(!selected)return;$("projectPath").value=selected;if(!$("projectName").value.trim())$("projectName").value=selected.split(/[\\/]/).filter(Boolean).pop()||selected;$("directoryDialog").close();};
-    $("projectForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const project=await post("/api/agent/projects",{name:$("projectName").value,repository:$("projectPath").value,default_branch:$("projectBranch").value,config_path:$("projectConfig").value});$("projectDialog").close();await loadProjects();toast(project.workspace_mode==="directory"?"普通目录已注册，隔离快照由 Workloop 管理":"Git 项目已注册");}catch(err){toast(err.message);}};
-    $("taskForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const task=await post("/api/agent/tasks",{project_id:$("taskProject").value,workflow_id:$("taskWorkflow").value,title:$("taskTitle").value,requirement:$("taskRequirement").value,budget:{total_timeout_seconds:+$("taskTotal").value,call_timeout_seconds:+$("taskCall").value,idle_timeout_seconds:+$("taskIdle").value,max_iterations:+$("taskRounds").value,max_total_tokens:$("taskTokens").value?+$("taskTokens").value:null,max_input_tokens:$("taskInputTokens").value?+$("taskInputTokens").value:null,max_output_tokens:$("taskOutputTokens").value?+$("taskOutputTokens").value:null}});$("taskDialog").close();await loadTasks();await selectTask(task.task_id);}catch(err){toast(err.message);}};
-    $("workflowForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const saved=await post("/api/agent/workflows",workflowPayload());await loadWorkflows();$("taskWorkflow").value=saved.workflow_id;$("workflowDialog").close();toast("工作流已保存");}catch(err){toast(err.message);}};
+    $("projectForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const project=await post("/api/agent/projects",{name:$("projectName").value,repository:$("projectPath").value,default_branch:$("projectBranch").value,config_path:$("projectConfig").value,instructions:$("projectInstructions").value});$("projectDialog").close();await loadProjects();$("composerProject").value=project.project_id;$("projectForm").reset();$("projectConfig").value=".workloop/project.toml";toast(`项目「${project.name}」已创建，后续任务会继承项目指令`);}catch(err){toast(err.message);}};
+    $("workflowForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const saved=await post("/api/agent/workflows",workflowPayload());await loadWorkflows();$("composerWorkflow").value=saved.workflow_id;$("workflowDialog").close();toast("工作流已保存");}catch(err){toast(err.message);}};
     $("compositionForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await post(`/api/agent/tasks/${state.selected}/plan-graph`,gatherComposition());$("compositionDialog").close();await loadTasks(true);toast("任务编排已保存");}catch(err){toast(err.message);}};
     $("budgetForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await post(`/api/agent/tasks/${state.selected}/budget`,{total_timeout_seconds:+$("budgetTotal").value,call_timeout_seconds:+$("budgetCall").value,idle_timeout_seconds:+$("budgetIdle").value,max_iterations:+$("budgetRounds").value,max_cost_usd:$("budgetCost").value?+$("budgetCost").value:null,max_total_tokens:$("budgetTokens").value?+$("budgetTokens").value:null,max_input_tokens:$("budgetInputTokens").value?+$("budgetInputTokens").value:null,max_output_tokens:$("budgetOutputTokens").value?+$("budgetOutputTokens").value:null});$("budgetDialog").close();await loadTasks(true);}catch(err){toast(err.message);}};
     $("clarificationForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{const answers=[...document.querySelectorAll(".clarify-answer")].map(el=>({question:el.dataset.question||"",answer:el.value})).filter(x=>x.answer.trim());if(!answers.length){toast("请至少回答一个问题");return;}await post(`/api/agent/tasks/${state.selected}/clarify`,{answers});$("clarificationDialog").close();await loadTasks(true);toast("澄清已提交");}catch(err){toast(err.message);}};
     $("deliveryForm").onsubmit=async e=>{if(e.submitter?.value==="cancel")return;e.preventDefault();try{await post(`/api/agent/tasks/${state.selected}/deliver`,{strategy:$("deliveryStrategy").value,confirmed:true});$("deliveryDialog").close();await loadTasks(true);toast("交付完成");}catch(err){toast(err.message);}};
-    window.addEventListener("hashchange",()=>{const key=decodeURIComponent(location.hash.slice(1));if(key&&key!==state.selected){const task=state.tasks.find(t=>taskKey(t)===key);if(task)selectTask(key,task.detail_url);}});
-    async function init(){try{await Promise.all([loadProjects(),loadWorkflows(),loadTasks()]);const key=decodeURIComponent(location.hash.slice(1));const task=state.tasks.find(t=>taskKey(t)===key);if(task)await selectTask(key,task.detail_url);}catch(e){toast(e.message);}}
+    window.addEventListener("hashchange",()=>{const key=decodeURIComponent(location.hash.slice(1));if(key&&key!==state.selected){const task=state.tasks.find(t=>taskKey(t)===key);if(task)selectTask(key,task.detail_url);}else if(!key&&state.selected){showEmptyState();}});
+    async function init(){try{await Promise.all([loadProjects(),loadWorkflows(),loadTasks(),loadNativeStatus()]);const key=decodeURIComponent(location.hash.slice(1));const task=state.tasks.find(t=>taskKey(t)===key);if(task)await selectTask(key,task.detail_url);}catch(e){toast(e.message);}}
     init(); setInterval(()=>loadTasks(Boolean(state.selected)).catch(()=>{}),4000);
   </script>
 </body>

@@ -38,18 +38,19 @@ from app.agents.plan_graph import (
     PlanNodeAccess,
 )
 from app.agents.task_budget import agent_budget, task_budget_error
-from app.agents.workflow_config import WorkflowNode
+from app.agents.workflow_config import WorkflowNode, WorkflowNodeKind
 from app.core.contracts import utc_now
 from app.projects.contracts import ProjectPolicy
 from app.tools.workspace import FileChange, Workspace
 
 
 class GraphExecutionMixin:
-    @staticmethod
     def _node_request_fields(
+        self,
         task: AgentTask,
         kind: PlanNodeKind,
         role: str,
+        workflow_node: WorkflowNode | None = None,
     ) -> dict[str, str]:
         def fallback() -> dict[str, str]:
             phase_key = "node:review" if role == "reviewer" else role
@@ -61,6 +62,24 @@ class GraphExecutionMixin:
                 "provider": "",
                 "model": "",
                 "thinking": "",
+                "context_ref": task.artifacts.get("context_plan", ""),
+            }
+
+        capability = "review" if kind is PlanNodeKind.REVIEW else "implementation"
+        access = AgentAccess.READ_ONLY if role == "reviewer" else AgentAccess.WORKSPACE_WRITE
+        override = self._workflow_model_binding(
+            workflow_node, capability, access, task.requirement
+        )
+        if override.profile_id:
+            session_key = f"workflow:{workflow_node.node_id}" if workflow_node else role
+            return {
+                "model_profile_id": override.profile_id,
+                "session_key": session_key,
+                "session_id": task.sessions.get(session_key, task.sessions.get(role, "")),
+                "node_id": workflow_node.node_id if workflow_node else role,
+                "provider": override.provider,
+                "model": override.model,
+                "thinking": override.thinking,
                 "context_ref": task.artifacts.get("context_plan", ""),
             }
 
@@ -114,6 +133,49 @@ class GraphExecutionMixin:
             "provider": node.model.provider,
             "model": node.model.model,
             "thinking": node.model.thinking,
+            "context_ref": context_ref,
+        }
+
+    def _workflow_model_binding(
+        self,
+        workflow_node: WorkflowNode | None,
+        capability: str,
+        access: AgentAccess,
+        text: str,
+    ):
+        if workflow_node is None or not workflow_node.model_profile_id:
+            return type("EmptyBinding", (), {"profile_id": ""})()
+        resolver = getattr(self, "_binding_for_workflow_node", None)
+        if resolver is None:
+            return type("EmptyBinding", (), {"profile_id": ""})()
+        return resolver(workflow_node, capability, access, text)
+
+    def _workflow_node_fields(
+        self,
+        task: AgentTask,
+        workflow_node: WorkflowNode,
+        node: PlanNode,
+        context_ref: str,
+    ) -> dict[str, str]:
+        binding = self._workflow_model_binding(
+            workflow_node,
+            node.capability,
+            AgentAccess.WORKSPACE_WRITE
+            if node.access is PlanNodeAccess.WORKSPACE_WRITE
+            else AgentAccess.READ_ONLY,
+            node.instructions or node.title,
+        )
+        if not binding.profile_id:
+            return {}
+        key = f"workflow:{workflow_node.node_id}"
+        return {
+            "model_profile_id": binding.profile_id,
+            "session_key": key,
+            "session_id": task.sessions.get(key, task.sessions.get("executor", "")),
+            "node_id": workflow_node.node_id,
+            "provider": binding.provider,
+            "model": binding.model,
+            "thinking": binding.thinking,
             "context_ref": context_ref,
         }
 
@@ -377,7 +439,9 @@ class GraphExecutionMixin:
                 node,
                 context,
                 review_feedback,
-                workflow_node.instructions,
+                self._additional_instructions(
+                    task, workflow_node, WorkflowNodeKind.EXECUTOR
+                ),
                 self.store.task_dir(task.task_id),
             ),
             workspace=request_workspace,
@@ -391,7 +455,10 @@ class GraphExecutionMixin:
             artifact_root=self.store.task_dir(task.task_id),
             session_id=resumed_session,
             workflow_node_id=workflow_node.node_id,
-            **self._node_fields(node, context_ref),
+            **(
+                self._workflow_node_fields(task, workflow_node, node, context_ref)
+                or self._node_fields(node, context_ref)
+            ),
         )
 
         max_attempts = 2 if node.on_failure == "retry" else 1

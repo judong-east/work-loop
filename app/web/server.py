@@ -21,9 +21,28 @@ from app.agents.runtime_factory import build_runtime_stack, default_model_catalo
 from app.agents.scheduler import PersistentAgentScheduler
 from app.agents.status_groups import task_status_group, task_status_priority
 from app.agents.workflow import AgentWorkflow
-from app.agents.workflow_config import workflow_from_dict
+from app.agents.workflow_config import WorkflowNodeKind, workflow_from_dict
 from app.core.contracts import to_plain, utc_now
 from app.memory.experience_store import ExperienceStore
+from app.web.model_registry import (
+    agent_runtime_dir,
+    delete_model,
+    delete_provider,
+    ensure_registry,
+    provider_test_model,
+    registry_status,
+    save_model,
+    save_provider,
+    save_roles,
+    sync_catalog,
+)
+from app.web.native_setup import (
+    native_status,
+    save_native_config,
+    test_native_connection,
+)
+from app.application.workbench import WorkbenchService
+from app.domain.models import SessionMode, WorkflowDefinition, WorkflowNode
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
@@ -79,6 +98,13 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     GET_ROUTES = [
         (re.compile(r"^/$"), "handle_index"),
+        (re.compile(r"^/workbench/?$"), "handle_workbench"),
+        (re.compile(r"^/static/(workbench\.css|workbench\.js)$"), "handle_workbench_asset"),
+        (re.compile(r"^/api/v2/catalog$"), "handle_v2_catalog"),
+        (re.compile(r"^/api/v2/projects$"), "handle_v2_projects"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_v2_project_sessions"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_v2_session"),
+        (re.compile(r"^/api/v2/resources$"), "handle_v2_resources"),
         (re.compile(r"^/api/agent/projects$"), "handle_agent_projects"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_tasks"),
         (re.compile(r"^/api/agent/metrics$"), "handle_agent_metrics"),
@@ -87,17 +113,34 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/tasks/([\w-]+)$"), "handle_agent_task_detail"),
         (re.compile(r"^/api/agent/queue$"), "handle_agent_queue"),
         (re.compile(r"^/api/agent/runtime-health$"), "handle_agent_runtime_health"),
+        (re.compile(r"^/api/agent/native-config$"), "handle_agent_native_config"),
+        (re.compile(r"^/api/agent/model-registry$"), "handle_model_registry"),
         (re.compile(r"^/api/agent/workflows$"), "handle_agent_workflows"),
         (re.compile(r"^/api/agent/history$"), "handle_agent_history"),
         (re.compile(r"^/api/agent/history/([\w-]+)$"), "handle_agent_history_detail"),
     ]
     POST_ROUTES = [
+        (re.compile(r"^/api/v2/projects$"), "handle_v2_create_project"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_v2_create_session"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/messages$"), "handle_v2_message"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/run$"), "handle_v2_run"),
+        (re.compile(r"^/api/v2/resources/providers$"), "handle_v2_save_provider"),
+        (re.compile(r"^/api/v2/resources/providers/([\w-]+)/test$"), "handle_v2_test_provider"),
+        (re.compile(r"^/api/v2/resources/models$"), "handle_v2_save_model"),
+        (re.compile(r"^/api/v2/nodes$"), "handle_v2_save_node"),
+        (re.compile(r"^/api/v2/workflows$"), "handle_v2_save_workflow"),
         (re.compile(r"^/api/agent/projects/browse-directories$"), "handle_agent_browse_directories"),
         (re.compile(r"^/api/agent/projects$"), "handle_agent_register_project"),
         (re.compile(r"^/api/agent/workflows$"), "handle_agent_save_workflow"),
         (re.compile(r"^/api/agent/tasks$"), "handle_agent_create_task"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/plan-graph$"), "handle_agent_save_plan_graph"),
         (re.compile(r"^/api/agent/profiles/migrate$"), "handle_agent_migrate_profiles"),
+        (re.compile(r"^/api/agent/native-config$"), "handle_agent_save_native_config"),
+        (re.compile(r"^/api/agent/native-config/test$"), "handle_agent_test_native_config"),
+        (re.compile(r"^/api/agent/model-registry/providers$"), "handle_model_registry_save_provider"),
+        (re.compile(r"^/api/agent/model-registry/providers/([\w-]+)/test$"), "handle_model_registry_test_provider"),
+        (re.compile(r"^/api/agent/model-registry/models$"), "handle_model_registry_save_model"),
+        (re.compile(r"^/api/agent/model-registry/roles$"), "handle_model_registry_save_roles"),
         (re.compile(r"^/api/agent/queue/run-next$"), "handle_agent_run_next"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/approve$"), "handle_agent_approve"),
         (re.compile(r"^/api/agent/tasks/([\w-]+)/clarify$"), "handle_agent_clarify"),
@@ -111,7 +154,13 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/agent/history/([\w-]+)/delete$"), "handle_agent_delete_history"),
     ]
     DELETE_ROUTES = [
+        (re.compile(r"^/api/v2/resources/providers/([\w-]+)$"), "handle_v2_delete_provider"),
+        (re.compile(r"^/api/v2/resources/models/([\w-]+)$"), "handle_v2_delete_model"),
+        (re.compile(r"^/api/v2/nodes/([\w-]+)$"), "handle_v2_delete_node"),
+        (re.compile(r"^/api/v2/workflows/([\w-]+)$"), "handle_v2_delete_workflow"),
         (re.compile(r"^/api/agent/workflows/([\w-]+)$"), "handle_agent_delete_workflow"),
+        (re.compile(r"^/api/agent/model-registry/providers/([\w-]+)$"), "handle_model_registry_delete_provider"),
+        (re.compile(r"^/api/agent/model-registry/models/([\w-]+)$"), "handle_model_registry_delete_model"),
     ]
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - 基类签名
@@ -454,6 +503,192 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         projects = self._agent_workflow().projects.list_all()
         self._send_json(200, [to_plain(project) for project in projects])
 
+    # ---- Layered workbench API (v2) -------------------------------------
+
+    def handle_v2_catalog(self) -> None:
+        self._send_json(200, {
+            "schema_version": 1,
+            "nodes": self.server.workbench.list_node_types(),
+            "workflows": [self._v2_workflow_payload(item) for item in self.server.workbench.list_workflows()],
+        })
+
+    def handle_v2_projects(self) -> None:
+        self._send_json(200, [item.to_dict() for item in self.server.workbench.list_projects()])
+
+    def handle_v2_create_project(self, body: dict) -> None:
+        try:
+            project = self.server.workbench.create_project(
+                str(body.get("name", "")),
+                instructions=str(body.get("instructions", "")),
+                knowledge_refs=[str(item) for item in body.get("knowledge_refs", [])],
+                default_model=str(body.get("default_model", "")),
+            )
+        except (TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, project.to_dict())
+
+    def handle_v2_project_sessions(self, project_id: str) -> None:
+        try:
+            self.server.workbench.get_project(project_id)
+        except FileNotFoundError as error:
+            raise _HttpError(404, str(error)) from error
+        self._send_json(200, [item.to_dict() for item in self.server.workbench.list_sessions(project_id)])
+
+    def handle_v2_create_session(self, project_id: str, body: dict) -> None:
+        try:
+            mode = SessionMode(str(body.get("mode", SessionMode.CHAT.value)))
+            session = self.server.workbench.create_session(
+                project_id,
+                str(body.get("title", "未命名会话")),
+                mode=mode,
+                workflow_id=str(body.get("workflow_id", "")),
+            )
+        except (KeyError, TypeError, ValueError, FileNotFoundError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, session.to_dict())
+
+    def handle_v2_session(self, session_id: str) -> None:
+        self._send_json(200, self.server.workbench.get_session(session_id).to_dict())
+
+    def handle_v2_message(self, session_id: str, body: dict) -> None:
+        try:
+            session = self.server.workbench.send_message(session_id, str(body.get("content", "")))
+        except (TypeError, ValueError, FileNotFoundError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(200, session.to_dict())
+
+    def handle_v2_run(self, session_id: str, body: dict) -> None:
+        try:
+            workflow = self._v2_workflow_from_dict(body["workflow"]) if isinstance(body.get("workflow"), dict) else None
+            session = self.server.workbench.run_task(session_id, workflow)
+        except (TypeError, ValueError, KeyError, FileNotFoundError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(200, session.to_dict())
+
+    def handle_v2_resources(self) -> None:
+        self._send_json(200, self.server.workbench.resource_status())
+
+    def handle_v2_save_provider(self, body: dict) -> None:
+        try:
+            provider = self.server.workbench.save_provider(body)
+        except (KeyError, TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, provider.to_dict())
+
+    def handle_v2_save_model(self, body: dict) -> None:
+        try:
+            model = self.server.workbench.save_model(body)
+        except (KeyError, TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, model.to_dict())
+
+    def handle_v2_test_provider(self, provider_id: str, body: dict) -> None:
+        try:
+            result = self.server.workbench.test_provider(provider_id)
+        except KeyError as error:
+            raise _HttpError(404, f"provider not found: {provider_id}") from error
+        except (TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(200, result)
+
+    def handle_v2_delete_provider(self, provider_id: str) -> None:
+        try:
+            self.server.workbench.delete_provider(provider_id)
+        except KeyError as error:
+            raise _HttpError(404, f"provider not found: {provider_id}") from error
+        self._send_json(200, {"deleted": provider_id})
+
+    def handle_v2_delete_model(self, alias: str) -> None:
+        try:
+            self.server.workbench.delete_model(alias)
+        except KeyError as error:
+            raise _HttpError(404, f"model not found: {alias}") from error
+        self._send_json(200, {"deleted": alias})
+
+    def handle_v2_save_node(self, body: dict) -> None:
+        try:
+            node = self.server.workbench.save_node(body)
+        except (KeyError, TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, self._v2_node_payload(node))
+
+    def handle_v2_delete_node(self, node_type: str) -> None:
+        try:
+            self.server.workbench.delete_node(node_type)
+        except KeyError as error:
+            raise _HttpError(404, f"node not found: {node_type}") from error
+        self._send_json(200, {"deleted": node_type})
+
+    def handle_v2_save_workflow(self, body: dict) -> None:
+        try:
+            workflow = self.server.workbench.save_workflow(self._v2_workflow_from_dict(body))
+        except (KeyError, TypeError, ValueError) as error:
+            raise _HttpError(400, str(error)) from error
+        self._send_json(201, self._v2_workflow_payload(workflow))
+
+    def handle_v2_delete_workflow(self, workflow_id: str) -> None:
+        try:
+            self.server.workbench.delete_workflow(workflow_id)
+        except KeyError as error:
+            raise _HttpError(404, f"workflow not found: {workflow_id}") from error
+        self._send_json(200, {"deleted": workflow_id})
+
+    @staticmethod
+    def _v2_node_payload(node) -> dict:
+        return {
+            "node_type": node.node_type,
+            "label": node.label,
+            "description": node.description,
+            "input_fields": list(node.input_fields),
+            "output_fields": list(node.output_fields),
+            "capabilities": list(node.capabilities),
+            "default_model": node.default_model,
+            "builtin": node.builtin,
+        }
+
+    @staticmethod
+    def _v2_workflow_payload(workflow: WorkflowDefinition) -> dict:
+        return {
+            "workflow_id": workflow.workflow_id,
+            "label": workflow.label,
+            "description": workflow.description,
+            "builtin": workflow.builtin,
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "node_type": node.node_type,
+                    "depends_on": list(node.depends_on),
+                    "model_alias": node.model_alias,
+                    "prompt_template": node.prompt_template,
+                    "on_failure": node.on_failure,
+                    "config": dict(node.config),
+                    "position": list(node.position),
+                }
+                for node in workflow.nodes
+            ],
+        }
+
+    @staticmethod
+    def _v2_workflow_from_dict(value: dict) -> WorkflowDefinition:
+        return WorkflowDefinition(
+            workflow_id=str(value.get("workflow_id", "inline")),
+            label=str(value.get("label", "Inline workflow")),
+            description=str(value.get("description", "")),
+            nodes=[
+                WorkflowNode(
+                    node_id=str(item["node_id"]),
+                    node_type=str(item["node_type"]),
+                    depends_on=tuple(str(dep) for dep in item.get("depends_on", [])),
+                    model_alias=str(item.get("model_alias", "")),
+                    prompt_template=str(item.get("prompt_template", "")),
+                    on_failure=str(item.get("on_failure", "human")),
+                    config=dict(item.get("config", {})),
+                    position=tuple(float(coord) for coord in item.get("position", [0, 0]))[:2],
+                )
+                for item in value.get("nodes", [])
+            ],
+        )
+
     def handle_agent_workflows(self) -> None:
         workflows = self._agent_workflow().workflows.list_all()
         self._send_json(200, [to_plain(workflow) for workflow in workflows])
@@ -547,6 +782,100 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
                 "worker_error": self.server.agent_worker_error,
             },
         )
+
+    def handle_agent_native_config(self) -> None:
+        self._send_json(200, native_status(self.server.workloop_root))
+
+    def handle_agent_save_native_config(self, body: dict) -> None:
+        try:
+            save_native_config(self.server.workloop_root, body)
+        except ValueError as error:
+            raise _HttpError(400, str(error)) from error
+        self.server.reload_agent_profiles()
+        self._send_json(200, native_status(self.server.workloop_root))
+
+    def handle_agent_test_native_config(self, body: dict) -> None:
+        ok, detail = test_native_connection(self.server.workloop_root, body)
+        self._send_json(200 if ok else 400, {"ok": ok, "detail": detail})
+
+    # ---- 模型供应商 / 模型 / 角色绑定 ----
+
+    def handle_model_registry(self) -> None:
+        self._send_json(200, registry_status(self.server.workloop_root))
+
+    def handle_model_registry_save_provider(self, body: dict) -> None:
+        try:
+            provider = save_provider(self.server.workloop_root, body)
+            sync_catalog(self.server.workloop_root, ensure_registry(self.server.workloop_root))
+        except ValueError as error:
+            raise _HttpError(400, str(error)) from error
+        self.server.reload_agent_profiles()
+        self._send_json(200, registry_status(self.server.workloop_root))
+
+    def handle_model_registry_delete_provider(self, provider_id: str) -> None:
+        delete_provider(self.server.workloop_root, provider_id)
+        sync_catalog(self.server.workloop_root, ensure_registry(self.server.workloop_root))
+        self.server.reload_agent_profiles()
+        self._send_json(200, registry_status(self.server.workloop_root))
+
+    def handle_model_registry_test_provider(self, provider_id: str, body: dict) -> None:
+        registry = ensure_registry(self.server.workloop_root)
+        provider = next(
+            (p for p in registry["providers"] if p.get("id") == provider_id), None
+        )
+        if provider is None:
+            raise _HttpError(404, f"供应商 {provider_id} 不存在。")
+        model = str(body.get("model", "")).strip() or provider_test_model(
+            self.server.workloop_root, provider_id
+        )
+        if not model:
+            raise _HttpError(400, "请先为该供应商添加模型，或提供要测试的模型名。")
+        model_entry = next(
+            (
+                item for item in registry["models"]
+                if item.get("provider_id") == provider_id and item.get("model") == model
+            ),
+            None,
+        )
+        protocol = str(body.get("protocol", "")).strip() or str(
+            (model_entry or {}).get("protocol", "")
+        ) or str((provider.get("protocols") or ["codex"])[0])
+        ok, detail = test_native_connection(
+            self.server.workloop_root,
+            {
+                "base_url": str(provider.get("base_url", "")),
+                "model": model,
+                "api_key": str(body.get("api_key", "")),
+                "proxy": str(provider.get("proxy", "") or ""),
+                "provider_id": provider_id,
+                "protocol": protocol,
+            },
+        )
+        self._send_json(200 if ok else 400, {"ok": ok, "detail": detail})
+
+    def handle_model_registry_save_model(self, body: dict) -> None:
+        try:
+            save_model(self.server.workloop_root, body)
+            sync_catalog(self.server.workloop_root, ensure_registry(self.server.workloop_root))
+        except ValueError as error:
+            raise _HttpError(400, str(error)) from error
+        self.server.reload_agent_profiles()
+        self._send_json(200, registry_status(self.server.workloop_root))
+
+    def handle_model_registry_delete_model(self, profile_id: str) -> None:
+        delete_model(self.server.workloop_root, profile_id)
+        sync_catalog(self.server.workloop_root, ensure_registry(self.server.workloop_root))
+        self.server.reload_agent_profiles()
+        self._send_json(200, registry_status(self.server.workloop_root))
+
+    def handle_model_registry_save_roles(self, body: dict) -> None:
+        try:
+            save_roles(self.server.workloop_root, body)
+            sync_catalog(self.server.workloop_root, ensure_registry(self.server.workloop_root))
+        except ValueError as error:
+            raise _HttpError(400, str(error)) from error
+        self.server.reload_agent_profiles()
+        self._send_json(200, registry_status(self.server.workloop_root))
 
     def _legacy_summary(self, state: dict, task_id: str) -> dict:
         return {
@@ -655,10 +984,29 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     # ---- GET ----
 
     def handle_index(self) -> None:
-        page = STATIC_DIR / "index.html"
+        page = STATIC_DIR / "workbench.html"
         body = page.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_workbench(self) -> None:
+        self.send_response(308)
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def handle_workbench_asset(self, filename: str) -> None:
+        asset = STATIC_DIR / filename
+        if not asset.is_file():
+            raise _HttpError(404, "静态资源不存在。")
+        body = asset.read_bytes()
+        content_type = "text/css; charset=utf-8" if filename.endswith(".css") else "text/javascript; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -668,15 +1016,26 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         repository = str(body.get("repository", "")).strip()
         branch = str(body.get("default_branch", "")).strip()
         config_path = str(body.get("config_path", ".workloop/project.toml")).strip()
+        instructions = str(body.get("instructions", "")).strip()
+        if len(instructions) > 8000:
+            raise _HttpError(400, "项目说明不能超过 8000 个字符。")
         if not name or not repository:
             raise _HttpError(400, "name 和 repository 不能为空。")
         path = self._root_relative_path(repository)
+        resolved = path.resolve()
+        for existing in self._agent_workflow().projects.list_all():
+            source = Path(existing.source_directory or existing.repository).resolve()
+            if source == resolved:
+                self._send_json(200, to_plain(existing))
+                return
         project = self._agent_workflow().register_project(
             name,
             path,
             branch,
             config_path or ".workloop/project.toml",
         )
+        project.instructions = instructions
+        self._agent_workflow().projects.add(project)
         self._send_json(200, to_plain(project))
 
     def handle_agent_browse_directories(self, body: dict) -> None:
@@ -711,7 +1070,25 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         )
 
     def handle_agent_save_workflow(self, body: dict) -> None:
-        workflow = workflow_from_dict(body)
+        try:
+            workflow = workflow_from_dict(body)
+            registry = ensure_registry(self.server.workloop_root)
+            models = {item["profile_id"]: item for item in registry["models"]}
+            for node in workflow.nodes:
+                if not node.model_profile_id:
+                    continue
+                model = models.get(node.model_profile_id)
+                if model is None:
+                    raise ValueError(f"节点 {node.label} 绑定的模型不存在。")
+                expected = (
+                    "workspace_write"
+                    if node.kind is WorkflowNodeKind.EXECUTOR
+                    else "read_only"
+                )
+                if model.get("access") != expected:
+                    raise ValueError(f"节点 {node.label} 绑定的模型权限不匹配。")
+        except ValueError as error:
+            raise _HttpError(400, str(error)) from error
         saved = self._agent_workflow().workflows.save(workflow)
         self._send_json(200, to_plain(saved))
 
@@ -930,14 +1307,39 @@ class WorkloopServer(ThreadingHTTPServer):
     ):
         super().__init__(("127.0.0.1", port), WorkloopRequestHandler)
         self.workloop_root = Path(root).resolve()
+        # New three-layer workbench lives beside the compatibility agent runtime.
+        # Existing /api/agent routes remain stable while clients migrate to /api/v2.
+        self.workbench = WorkbenchService(self.workloop_root / "workbench")
         if agent_workflow is None:
             profile_path = self.workloop_root / "agent-profiles.json"
+            legacy_catalog = None
+            if profile_path.is_file():
+                try:
+                    legacy_catalog = load_model_catalog(profile_path)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    legacy_catalog = None
+            registry = ensure_registry(self.workloop_root)
+            # A roles-only CLI catalog has no managed API providers. Preserve
+            # that valid legacy stack instead of materializing an empty
+            # registry over agent-profiles.json during incremental migration.
             catalog = (
-                load_model_catalog(profile_path)
-                if profile_path.is_file()
-                else default_model_catalog()
+                sync_catalog(self.workloop_root, registry)
+                if registry.get("models")
+                else legacy_catalog
             )
-            runtime, composer = build_runtime_stack(catalog)
+            if catalog is None:
+                catalog = (
+                    load_model_catalog(profile_path)
+                    if profile_path.is_file()
+                    else default_model_catalog()
+                )
+                if any(option.runtime != "native" for option in catalog.list_all()):
+                    catalog = default_model_catalog()
+            runtime, composer = build_runtime_stack(
+                catalog,
+                role_bindings=registry.get("roles") or None,
+                key_root=agent_runtime_dir(self.workloop_root),
+            )
             agent_workflow = AgentWorkflow(
                 self.workloop_root / "agent-runtime",
                 runtime,
@@ -972,6 +1374,43 @@ class WorkloopServer(ThreadingHTTPServer):
                 "access": "role_defined",
             }
         return payload
+
+    def reload_agent_profiles(self) -> None:
+        """Re-read the model registry and swap the live runtime stack.
+
+        Scheduler and delivery keep their AgentWorkflow references, so the
+        catalog switch is an attribute swap; a task that is mid-flight keeps
+        the runtime object it already resolved.
+        """
+        profile_path = self.workloop_root / "agent-profiles.json"
+        legacy_catalog = None
+        if profile_path.is_file():
+            try:
+                legacy_catalog = load_model_catalog(profile_path)
+            except (OSError, json.JSONDecodeError, ValueError):
+                legacy_catalog = None
+        registry = ensure_registry(self.workloop_root)
+        catalog = (
+            sync_catalog(self.workloop_root, registry)
+            if registry.get("models")
+            else legacy_catalog
+        )
+        if catalog is None:
+            catalog = (
+                load_model_catalog(profile_path)
+                if profile_path.is_file()
+                else default_model_catalog()
+            )
+            if any(option.runtime != "native" for option in catalog.list_all()):
+                catalog = default_model_catalog()
+        runtime, composer = build_runtime_stack(
+            catalog,
+            role_bindings=registry.get("roles") or None,
+            key_root=agent_runtime_dir(self.workloop_root),
+        )
+        self.agent_workflow.runtime = runtime
+        self.agent_workflow.composer = composer
+        self.agent_profiles = self._agent_profile_payload()
 
     def kick_agent_worker(self) -> None:
         """Keep one drain thread alive per scheduler slot.

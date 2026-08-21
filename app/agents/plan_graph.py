@@ -32,6 +32,7 @@ class ModelBinding:
     provider: str = ""
     model: str = ""
     thinking: str = "medium"
+    protocol: str = ""
     estimated_cost_usd: float = 0.0
     selection_reason: str = ""
 
@@ -44,6 +45,8 @@ class ModelBinding:
             raise ValueError("model.provider is invalid")
         if self.thinking not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
             raise ValueError("model.thinking is invalid")
+        if self.protocol and self.protocol not in {"codex", "claude", "openai_chat"}:
+            raise ValueError("model.protocol is invalid")
         if len(self.model) > 200:
             raise ValueError("model.model is too long")
         if self.estimated_cost_usd < 0:
@@ -63,6 +66,7 @@ class ModelBinding:
             provider=str(data.get("provider", "")).strip(),
             model=str(data.get("model", "")).strip(),
             thinking=str(data.get("thinking", "medium")).strip() or "medium",
+            protocol=str(data.get("protocol", "")).strip(),
             estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
             selection_reason=str(data.get("selection_reason", "")).strip(),
         )
@@ -76,6 +80,7 @@ class ModelBinding:
             "provider": self.provider,
             "model": self.model,
             "thinking": self.thinking,
+            "protocol": self.protocol,
             "estimated_cost_usd": self.estimated_cost_usd,
             "selection_reason": self.selection_reason,
         }
@@ -191,7 +196,6 @@ class PlanNode:
             "depends_on": list(self.depends_on),
             "instructions": self.instructions,
             "model": self.model.to_dict(),
-            "terminal": self.terminal.to_dict(),
             "access": self.access.value,
             "inputs": list(self.inputs),
             "outputs": list(self.outputs),

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Workloop 工作台</title>
+  <link rel="stylesheet" href="/static/workbench.css">
+</head>
+<body>
+  <a class="skip-link" href="#conversation">跳到会话</a>
+  <div class="shell" id="shell">
+    <aside class="rail" id="rail">
+      <div class="brand"><span class="brand-mark">W</span><span>Workloop</span><small>WORKBENCH</small></div>
+      <button class="new-project" id="newProject" type="button"><span aria-hidden="true">＋</span> 新建项目</button>
+      <div class="rail-heading"><span>项目</span><button class="icon-button" id="refreshProjects" type="button" aria-label="刷新项目" title="刷新项目">↻</button></div>
+      <nav class="project-list" id="projectList" aria-label="项目列表"></nav>
+      <div class="rail-footer">
+        <button class="management-entry" data-open-management type="button"><span aria-hidden="true">⚙</span><span>管理中心</span></button>
+        <span id="resourceHint">尚未配置模型</span>
+      </div>
+    </aside>
+
+    <main class="workspace" id="conversation">
+      <header class="workspace-header">
+        <button class="mobile-menu icon-button" id="mobileMenu" type="button" aria-label="打开项目列表">☰</button>
+        <div class="session-heading"><span class="eyebrow" id="projectName">选择一个项目</span><h1 id="sessionTitle">新的会话</h1></div>
+        <div class="header-actions">
+          <button class="icon-button" data-open-management type="button" aria-label="打开管理中心" title="管理中心">⚙</button>
+          <button class="icon-button reopen-inspector" id="showInspector" type="button" aria-label="展开任务编排" title="展开任务编排">▤</button>
+          <button class="icon-button" id="refreshSession" type="button" aria-label="刷新会话" title="刷新会话">↻</button>
+          <button class="icon-button" id="themeToggle" type="button" aria-label="切换主题" title="切换主题">◐</button>
+        </div>
+      </header>
+      <section class="conversation" id="messageList" aria-live="polite">
+        <div class="welcome" id="welcome"><div class="welcome-mark">W</div><h2>从一个清晰的问题开始</h2><p>普通模式适合即时问答，任务模式会按选定工作流运行，并展示每个节点绑定的模型。</p><div class="starter-grid"><button type="button" data-starter="梳理这个项目的主要模块，并指出最值得先改进的地方"><strong>梳理项目</strong><span>快速建立代码库地图</span></button><button type="button" data-starter="设计一个可执行的重构计划，包含风险和验收标准"><strong>设计计划</strong><span>把模糊想法变成步骤</span></button><button type="button" data-starter="为核心逻辑补充边界测试，并说明覆盖范围"><strong>补充测试</strong><span>发现容易遗漏的边界</span></button></div></div>
+      </section>
+      <section class="composer-wrap" aria-label="输入区">
+        <div class="composer-meta">
+          <div class="mode-switch" role="group" aria-label="交互模式"><button type="button" data-mode="chat" class="active">普通对话</button><button type="button" data-mode="task">任务模式</button></div>
+          <label class="workflow-picker hidden" id="workflowPicker"><span>工作流</span><select id="workflowSelect" aria-label="任务工作流"></select></label>
+          <span class="model-label" id="modelLabel">尚未配置模型</span>
+        </div>
+        <div class="composer"><textarea id="messageInput" rows="1" placeholder="描述你想完成的事情…" aria-label="消息"></textarea><button class="send-button" id="sendMessage" type="button" aria-label="发送">↑</button></div>
+        <div class="composer-foot"><span id="composerHint">Enter 发送，Shift + Enter 换行</span><span>上下文会保存在当前会话</span></div>
+      </section>
+    </main>
+
+    <aside class="inspector" id="inspector">
+      <div class="inspector-head"><div><span class="eyebrow">ORCHESTRATION</span><h2>任务编排</h2></div><button class="icon-button" id="closeInspector" type="button" aria-label="收起编排面板" title="收起编排面板">×</button></div>
+      <div class="inspector-empty" id="inspectorEmpty"><span class="empty-icon">⌘</span><strong>任务模式尚未运行</strong><p>切换到任务模式后，节点、模型和上下文流转会显示在这里。</p></div>
+      <div class="flow-panel hidden" id="flowPanel"><div class="flow-summary"><span id="flowStatus" class="status-dot idle"></span><span id="flowStatusText">准备运行</span><span class="flow-count" id="flowCount">0 / 0</span></div><div class="flow-list" id="flowList"></div><details class="context-details"><summary>共享上下文</summary><pre id="contextView">{}</pre></details></div>
+      <div class="inspector-footer"><button class="text-button" data-open-management type="button">管理模型与节点 <span aria-hidden="true">→</span></button><span id="sessionModeLabel">普通对话</span></div>
+    </aside>
+  </div>
+
+  <dialog id="projectDialog" aria-labelledby="projectDialogTitle"><form method="dialog" id="projectForm"><div class="dialog-head"><div><span class="eyebrow">PROJECT</span><h2 id="projectDialogTitle">新建项目</h2></div><button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button></div><div class="dialog-body"><label>项目名称<input id="projectInput" required maxlength="120" placeholder="例如：电商重构"></label><label>全局指令<span>所有会话都会继承</span><textarea id="instructionsInput" rows="4" maxlength="50000" placeholder="编码风格、技术栈和长期约束"></textarea></label></div><div class="dialog-actions"><button class="button quiet" value="cancel">取消</button><button class="button primary" value="default">创建项目</button></div></form></dialog>
+
+  <dialog id="managementDialog" class="management-dialog" aria-labelledby="managementTitle">
+    <div class="dialog-head"><div><span class="eyebrow">MANAGEMENT</span><h2 id="managementTitle">管理中心</h2></div><button class="icon-button" data-close-management type="button" aria-label="关闭">×</button></div>
+    <div class="management-tabs" role="tablist" aria-label="管理类别">
+      <button class="active" type="button" role="tab" aria-selected="true" data-management-tab="models">模型</button>
+      <button type="button" role="tab" aria-selected="false" data-management-tab="nodes">自定义节点</button>
+      <button type="button" role="tab" aria-selected="false" data-management-tab="workflows">工作流</button>
+    </div>
+    <div class="management-body">
+      <section class="management-panel" data-management-panel="models">
+        <div class="manager-grid provider-manager">
+          <section class="manager-section"><div class="section-heading"><div><h3>供应商与模型</h3><p>每个供应商可维护多个模型，并独立选择 OpenAI 或 Claude 协议。</p></div><button class="button quiet" id="newProvider" type="button">＋ 添加供应商</button></div><div class="provider-groups" id="providerList"></div></section>
+          <form class="editor-form hidden" id="providerForm"><div class="section-heading"><div><h3 id="providerFormTitle">添加供应商</h3><p>认证密钥只保存在本机，不会返回到页面。</p></div></div><label>供应商 ID<input id="providerId" required pattern="[A-Za-z0-9_-]+" placeholder="anthropic"></label><label>显示名称<input id="providerLabel" required placeholder="Anthropic"></label><label>Base URL<input id="providerUrl" required type="url" placeholder="https://api.anthropic.com"></label><fieldset class="protocol-fieldset"><legend>支持的协议</legend><label class="check-label"><input id="providerProtocolOpenAI" type="checkbox" value="openai" checked><span>OpenAI · Chat Completions</span></label><label class="check-label"><input id="providerProtocolClaude" type="checkbox" value="claude"><span>Claude · Messages</span></label></fieldset><label>认证方式<select id="providerAuthType"><option value="bearer">Bearer Token</option><option value="api_key">API Key · x-api-key</option><option value="custom_header">自定义 Header</option><option value="none">无需认证</option></select></label><label class="hidden" id="providerAuthHeaderField">Header 名<input id="providerAuthHeader" placeholder="X-API-Key"></label><label class="hidden" id="providerAuthPrefixField">值前缀<span>例如 Token；可留空</span><input id="providerAuthPrefix" placeholder="Token"></label><label id="providerCredentialField">认证密钥<span>编辑时留空可保留原密钥</span><input id="providerKey" type="password" autocomplete="new-password"></label><div class="auth-preview" id="providerAuthPreview">Authorization: Bearer ••••••••</div><label class="check-label"><input id="providerEnabled" type="checkbox" checked><span>启用该供应商</span></label><div class="form-actions"><button class="button quiet" data-cancel-provider type="button">取消</button><button class="button primary" type="submit">保存供应商</button></div></form>
+          <form class="editor-form hidden" id="modelForm"><div class="section-heading"><div><h3 id="modelFormTitle">添加模型</h3><p>模型归属于当前供应商，工作流通过别名引用。</p></div></div><label>模型别名<input id="modelAlias" required pattern="[A-Za-z0-9_-]+" placeholder="claude-review"></label><label>所属供应商<select id="modelProvider" required disabled></select></label><label>协议<select id="modelProtocol" required></select></label><label>物理模型名<input id="modelName" required placeholder="claude-sonnet-4-5"></label><label>能力标签<span>使用英文逗号分隔</span><input id="modelCapabilities" value="general" placeholder="general, review, coding"></label><div class="split-fields"><label>温度<input id="modelTemperature" type="number" min="0" max="2" step="0.1" placeholder="默认"></label><label>最大 Token<span>Claude 留空默认 4096</span><input id="modelMaxTokens" type="number" min="1" step="1" placeholder="默认"></label></div><label class="check-label"><input id="modelEnabled" type="checkbox" checked><span>启用该模型</span></label><div class="form-actions"><button class="button quiet" data-cancel-model type="button">取消</button><button class="button primary" type="submit">保存模型</button></div></form>
+        </div>
+      </section>
+
+      <section class="management-panel hidden" data-management-panel="nodes">
+        <div class="manager-grid">
+          <section class="manager-section"><div class="section-heading"><div><h3>节点目录</h3><p>内置节点只读，自定义节点可持续复用。</p></div><button class="button quiet" id="newNode" type="button">＋ 新建节点</button></div><div class="data-list" id="nodeList"></div></section>
+          <form class="editor-form hidden" id="nodeForm"><div class="section-heading"><div><h3 id="nodeFormTitle">新建自定义节点</h3><p>节点定义只描述输入输出契约，不执行任意脚本。</p></div></div><label>节点类型<input id="nodeType" required pattern="[A-Za-z0-9_-]+" placeholder="security_review"></label><label>显示名称<input id="nodeLabel" required placeholder="安全审核"></label><label>说明<textarea id="nodeDescription" rows="2" placeholder="这个节点负责什么"></textarea></label><label>输入字段<span>使用英文逗号分隔</span><input id="nodeInputs" placeholder="changes, acceptance_criteria"></label><label>输出字段<span>使用英文逗号分隔</span><input id="nodeOutputs" placeholder="verdict, issues"></label><label>能力标签<input id="nodeCapabilities" value="general" placeholder="security, review"></label><label>默认模型<select id="nodeDefaultModel"></select></label><div class="form-actions"><button class="button quiet" data-cancel-node type="button">取消</button><button class="button primary" type="submit">保存节点</button></div></form>
+        </div>
+      </section>
+
+      <section class="management-panel hidden workflow-manager" data-management-panel="workflows">
+        <aside class="workflow-sidebar"><div class="section-heading"><div><h3>工作流</h3><p>选择一个流程进行编排。</p></div><button class="button quiet" id="newWorkflow" type="button">＋ 新建</button></div><div class="workflow-list" id="workflowList"></div></aside>
+        <form class="workflow-editor" id="workflowForm"><div class="workflow-editor-head"><div class="workflow-meta"><label>工作流 ID<input id="workflowId" required pattern="[A-Za-z0-9_-]+" placeholder="security-flow"></label><label>名称<input id="workflowLabel" required placeholder="安全交付流"></label></div><label>说明<input id="workflowDescription" placeholder="这个流程适合什么任务"></label><div class="workflow-actions"><button class="button danger hidden" id="deleteWorkflow" type="button">删除工作流</button><button class="button primary" type="submit">保存工作流</button></div></div><div class="node-editor-heading"><div><h3>节点与模型关联</h3><p>每一行明确指定节点类型、模型和依赖关系。</p></div><button class="button quiet" id="addWorkflowNode" type="button">＋ 添加节点</button></div><div class="workflow-node-list" id="workflowNodeList"></div></form>
+      </section>
+    </div>
+    <div class="dialog-actions"><span class="management-status" id="managementStatus"></span><button class="button quiet" data-close-management type="button">关闭</button></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/workbench.js" defer></script>
+</body>
+</html>

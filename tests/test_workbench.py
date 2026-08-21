@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+import json
+import io
+import tempfile
+import unittest
+import urllib.request
+import urllib.error
+from pathlib import Path
+from threading import Thread
+from unittest import mock
+
+from app.application.workbench import WorkbenchService
+from app.domain.models import NodeDefinition, SessionMode, WorkflowDefinition, WorkflowNode
+from app.domain.node_registry import NodeRegistry
+from app.domain.orchestrator import DagOrchestrator
+from app.infrastructure.resource_center import ResourceCenter
+from app.infrastructure.model_gateway import OpenAICompatibleGateway
+from app.web.server import make_server
+
+
+class RecordingGateway:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def complete(self, *, model_alias, node, context):
+        self.calls.append(node.node_id)
+        if node.node_type == "requirement":
+            return {"facts": {"understanding": node.node_id}, "acceptance_criteria": [], "open_questions": []}
+        if node.node_type == "planning":
+            return {"facts": {"steps": [node.node_id]}, "risks": [], "artifacts": {}}
+        if node.node_type == "implementation":
+            return {"facts": {"changes": node.node_id}, "artifacts": {}, "decisions": []}
+        if node.node_type == "review":
+            return {"facts": {"verdict": "pass"}, "issues": [], "decisions": []}
+        return {"facts": {"checks": []}, "risks": [], "decisions": []}
+
+
+class WorkbenchDomainTest(unittest.TestCase):
+    def test_registry_loads_custom_json_and_rejects_builtin_override(self):
+        registry = NodeRegistry()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nodes.json"
+            path.write_text(json.dumps({"nodes": [{
+                "node_type": "summarize", "label": "摘要", "output_fields": ["result"]
+            }]}), encoding="utf-8")
+            loaded = registry.load_file(path)
+        self.assertEqual(loaded[0].node_type, "summarize")
+        with self.assertRaises(ValueError):
+            registry.register(NodeDefinition("planning", "替换", "不允许"))
+
+    def test_orchestrator_persists_shared_context_and_topological_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp), gateway=RecordingGateway())
+            project = service.create_project("DAG")
+            session = service.create_session(project.project_id, "task", mode=SessionMode.TASK)
+            session.add_message("user", "build an app")
+            service.sessions.save(session, session.session_id)
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(service.gateway.calls, ["requirement", "planning", "implementation", "review", "testing"])
+            self.assertEqual(result.context.version, 8)
+            restored = service.get_session(session.session_id)
+            self.assertEqual(restored.status, "completed")
+            self.assertTrue(any(message.node_id == "review" for message in restored.messages))
+
+    def test_failure_policy_skip_allows_downstream_dag_to_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = NodeRegistry()
+            registry.register(NodeDefinition("broken", "坏节点", "", output_fields=("result",)))
+            registry.register_handler("broken", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+            registry.register(NodeDefinition("after", "后续", "", output_fields=("result",)))
+            registry.register_handler("after", lambda _: {"result": "ok"})
+            service = WorkbenchService(Path(tmp))
+            service.registry = registry
+            service.orchestrator = DagOrchestrator(registry, service.sessions, service.gateway)
+            project = service.create_project("DAG")
+            session = service.create_session(project.project_id, "task", mode=SessionMode.TASK)
+            workflow = WorkflowDefinition("failure", "failure", [
+                WorkflowNode("broken", "broken", on_failure="skip"),
+                WorkflowNode("after", "after", ("broken",)),
+            ])
+            result = service.orchestrator.run(session, workflow)
+            self.assertEqual(result.status, "completed")
+            self.assertIn("result", result.context.facts)
+
+    def test_resource_center_separates_credentials_from_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelAlias, ModelProvider
+            provider = center.save_provider(
+                ModelProvider("vendor", "Vendor", "https://example.test/v1"),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("fast-model", provider.provider_id, "fast-1"))
+            raw = (Path(tmp) / "providers.json").read_text(encoding="utf-8")
+            self.assertNotIn("secret-key-value", raw)
+            self.assertEqual(center.credential("vendor"), "secret-key-value")
+            center.save_provider(ModelProvider("vendor", "Vendor renamed", "https://example.test/v1"))
+            self.assertTrue(center.list_providers()[0].credential_ref)
+            self.assertEqual(center.credential("vendor"), "secret-key-value")
+            resolved_provider, resolved_model = center.resolve("fast-model")
+            self.assertEqual(resolved_provider.provider_id, "vendor")
+            self.assertEqual(resolved_model.model, "fast-1")
+
+    def test_provider_supports_multiple_protocol_models_and_auth_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelAlias, ModelProvider
+            provider = center.save_provider(
+                ModelProvider(
+                    "gateway", "Gateway", "https://gateway.test/v1",
+                    protocols=["openai", "claude"], auth_type="custom_header",
+                    auth_header="X-Workspace-Key", auth_prefix="Token",
+                ),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("chat-model", provider.provider_id, "gpt-5", protocol="openai"))
+            center.save_model(ModelAlias("claude-model", provider.provider_id, "claude-sonnet", protocol="claude"))
+            self.assertEqual([item.protocol for item in center.list_models()], ["openai", "claude"])
+            with self.assertRaisesRegex(ValueError, "still has models"):
+                center.save_provider(ModelProvider(
+                    "gateway", "Gateway", "https://gateway.test/v1", protocols=["openai"],
+                    auth_type="custom_header", auth_header="X-Workspace-Key", auth_prefix="Token",
+                ))
+            with self.assertRaisesRegex(ValueError, "does not support"):
+                other = center.save_provider(ModelProvider("openai-only", "OpenAI", "https://openai.test/v1"))
+                center.save_model(ModelAlias("wrong", other.provider_id, "claude", protocol="claude"))
+
+            no_auth = center.save_provider(ModelProvider(
+                "local", "Local", "http://127.0.0.1:11434/v1", auth_type="none",
+            ))
+            self.assertTrue(next(item for item in center.health() if item["provider_id"] == no_auth.provider_id)["configured"])
+
+    def test_openai_gateway_resolves_alias_and_parses_structured_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ContextState, ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider("vendor", "Vendor", "https://example.test/v1"),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("fast-model", "vendor", "fast-1", ["planning"]))
+
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self):
+                    return json.dumps({"choices": [{"message": {"content": json.dumps({
+                        "steps": ["one"], "risks": [], "artifacts": {}
+                    })}}]}).encode()
+
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as opener:
+                output = OpenAICompatibleGateway(center).complete(
+                    model_alias="",
+                    node=WorkflowNode("plan", "planning"),
+                    context=ContextState(inputs={"request": "build"}),
+                )
+            self.assertEqual(output["steps"], ["one"])
+            self.assertEqual(output["model"], "fast-model")
+            request = opener.call_args.args[0]
+            self.assertEqual(request.full_url, "https://example.test/v1/chat/completions")
+            self.assertEqual(request.headers["Authorization"], "Bearer secret-key-value")
+
+    def test_claude_gateway_uses_messages_protocol_and_api_key_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ContextState, ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider(
+                    "anthropic", "Anthropic", "https://api.anthropic.com",
+                    protocols=["claude"], auth_type="api_key", auth_prefix="",
+                ),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias(
+                "claude-model", "anthropic", "claude-sonnet", ["review"], protocol="claude",
+            ))
+
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self):
+                    return json.dumps({"content": [{"type": "text", "text": json.dumps({
+                        "verdict": "pass", "issues": [], "decisions": [],
+                    })}]}).encode()
+
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as opener:
+                output = OpenAICompatibleGateway(center).complete(
+                    model_alias="claude-model",
+                    node=WorkflowNode("review", "review"),
+                    context=ContextState(inputs={"request": "review"}),
+                )
+            self.assertEqual(output["verdict"], "pass")
+            request = opener.call_args.args[0]
+            self.assertEqual(request.full_url, "https://api.anthropic.com/v1/messages")
+            self.assertEqual(request.headers["X-api-key"], "secret-key-value")
+            self.assertEqual(request.headers["Anthropic-version"], "2023-06-01")
+            payload = json.loads(request.data.decode())
+            self.assertIn("system", payload)
+            self.assertEqual(payload["messages"][0]["role"], "user")
+            self.assertEqual(payload["max_tokens"], 4096)
+
+    def test_custom_header_auth_is_applied_without_leaking_credential(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ContextState, ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider(
+                    "custom", "Custom", "https://custom.test/v1",
+                    auth_type="custom_header", auth_header="X-Auth-Token", auth_prefix="Key",
+                ),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("custom-model", "custom", "model-1"))
+
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self):
+                    return json.dumps({"choices": [{"message": {"content": json.dumps({"result": "ok"})}}]}).encode()
+
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as opener:
+                OpenAICompatibleGateway(center).complete(
+                    model_alias="custom-model", node=WorkflowNode("tool", "tool"), context=ContextState(),
+                )
+            self.assertEqual(opener.call_args.args[0].headers["X-auth-token"], "Key secret-key-value")
+            raw = (Path(tmp) / "providers.json").read_text(encoding="utf-8")
+            self.assertNotIn("secret-key-value", raw)
+
+    def test_gateway_probe_supports_openai_and_claude_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider(
+                    "gateway", "Gateway", "https://gateway.test/v1",
+                    protocols=["openai", "claude"], auth_type="api_key", auth_prefix="",
+                ),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("chat", "gateway", "chat-1", protocol="openai"))
+            center.save_model(ModelAlias("claude", "gateway", "claude-1", protocol="claude"))
+
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self, *_): return b"{}"
+
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as opener:
+                openai_result = OpenAICompatibleGateway(center).probe("chat")
+                openai_request = opener.call_args.args[0]
+                claude_result = OpenAICompatibleGateway(center).probe("claude")
+                claude_request = opener.call_args.args[0]
+
+            self.assertTrue(openai_result["ok"])
+            self.assertEqual(openai_request.full_url, "https://gateway.test/v1/chat/completions")
+            self.assertEqual(openai_request.headers["X-api-key"], "secret-key-value")
+            self.assertEqual(json.loads(openai_request.data.decode())["model"], "chat-1")
+            self.assertTrue(claude_result["ok"])
+            self.assertEqual(claude_request.full_url, "https://gateway.test/v1/messages")
+            self.assertEqual(claude_request.headers["X-api-key"], "secret-key-value")
+            self.assertEqual(claude_request.headers["Anthropic-version"], "2023-06-01")
+
+    def test_gateway_probe_maps_authentication_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider("vendor", "Vendor", "https://example.test/v1"),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("model", "vendor", "model-1"))
+            response = urllib.error.HTTPError(
+                "https://example.test/v1/chat/completions", 401, "Unauthorized", None,
+                io.BytesIO(b'{"error":"bad key"}'),
+            )
+            with mock.patch("urllib.request.urlopen", side_effect=response):
+                result = OpenAICompatibleGateway(center).probe("model")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error_type"], "authentication_failed")
+            self.assertIn("HTTP 401", result["error"])
+
+    def test_provider_test_probes_one_model_per_protocol_and_persists_health(self):
+        class ProbeGateway:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, **_):
+                return {}
+
+            def probe(self, alias):
+                self.calls.append(alias)
+                protocol = "claude" if alias.startswith("claude") else "openai"
+                return {
+                    "ok": True, "alias": alias, "protocol": protocol,
+                    "error_type": "", "error": "", "latency_ms": 12,
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = ProbeGateway()
+            service = WorkbenchService(root, gateway=gateway)
+            service.save_provider({
+                "provider_id": "gateway", "label": "Gateway", "base_url": "https://gateway.test/v1",
+                "protocols": ["openai", "claude"], "auth_type": "none",
+            })
+            service.save_model({"alias": "chat-a", "provider_id": "gateway", "model": "chat-a", "protocol": "openai"})
+            service.save_model({"alias": "chat-b", "provider_id": "gateway", "model": "chat-b", "protocol": "openai"})
+            service.save_model({"alias": "claude-a", "provider_id": "gateway", "model": "claude-a", "protocol": "claude"})
+
+            result = service.test_provider("gateway")
+            self.assertTrue(result["ok"])
+            self.assertEqual(gateway.calls, ["chat-a", "claude-a"])
+            self.assertEqual(len(result["checks"]), 2)
+
+            restored = WorkbenchService(root).resource_status()
+            last_check = next(item for item in restored["health"] if item["provider_id"] == "gateway")["last_check"]
+            self.assertTrue(last_check["ok"])
+            self.assertTrue(last_check["checked_at"])
+            self.assertEqual(len(last_check["checks"]), 2)
+
+    def test_provider_test_reports_no_models_and_disabled_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp))
+            service.save_provider({
+                "provider_id": "empty", "label": "Empty", "base_url": "http://127.0.0.1:9/v1",
+                "auth_type": "none",
+            })
+            self.assertEqual(service.test_provider("empty")["error_type"], "no_models")
+            service.save_provider({
+                "provider_id": "empty", "label": "Empty", "base_url": "http://127.0.0.1:9/v1",
+                "auth_type": "none", "enabled": False,
+            })
+            self.assertEqual(service.test_provider("empty")["error_type"], "provider_disabled")
+            service.delete_provider("empty")
+            health = json.loads((Path(tmp) / "resources" / "health.json").read_text(encoding="utf-8"))
+            self.assertNotIn("empty", health["providers"])
+
+    def test_custom_node_output_contract_is_sent_to_the_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            center = ResourceCenter(root / "resources")
+            from app.domain.models import ModelAlias, ModelProvider
+            center.save_provider(ModelProvider("vendor", "Vendor", "https://example.test/v1"), api_key="secret-key-value")
+            center.save_model(ModelAlias("secure-model", "vendor", "secure-1"))
+
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self):
+                    return json.dumps({"choices": [{"message": {"content": json.dumps({
+                        "verdict": "pass", "issues": [],
+                    })}}]}).encode()
+
+            service = WorkbenchService(root / "workbench", gateway=OpenAICompatibleGateway(center))
+            service.save_node({
+                "node_type": "security_review", "label": "安全审核",
+                "output_fields": ["verdict", "issues"],
+            })
+            project = service.create_project("Secure")
+            session = service.create_session(project.project_id, "review", mode=SessionMode.TASK)
+            session.add_message("user", "review this")
+            service.sessions.save(session, session.session_id)
+            workflow = WorkflowDefinition("secure", "secure", [
+                WorkflowNode("security", "security_review", model_alias="secure-model"),
+            ])
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as opener:
+                result = service.run_task(session.session_id, workflow)
+            self.assertEqual(result.status, "completed")
+            body = json.loads(opener.call_args.args[0].data.decode())
+            system_prompt = body["messages"][0]["content"]
+            self.assertIn('"verdict": "any"', system_prompt)
+            self.assertIn('"issues": "any"', system_prompt)
+            user_payload = json.loads(body["messages"][1]["content"])
+            self.assertNotIn("_output_fields", user_payload["config"])
+
+    def test_workflow_rejects_a_dependency_cycle_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp))
+            workflow = WorkflowDefinition("cycle", "cycle", [
+                WorkflowNode("a", "tool", ("b",)),
+                WorkflowNode("b", "tool", ("a",)),
+            ])
+            with self.assertRaisesRegex(ValueError, "DAG"):
+                service.workflows.validate_dag(workflow)
+
+    def test_custom_nodes_persist_and_referenced_nodes_cannot_be_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = WorkbenchService(root)
+            saved = service.save_node({
+                "node_type": "security_review",
+                "label": "安全审核",
+                "description": "检查安全风险",
+                "input_fields": ["changes"],
+                "output_fields": ["verdict"],
+                "capabilities": ["security"],
+            })
+            self.assertEqual(saved.node_type, "security_review")
+            restored = WorkbenchService(root)
+            self.assertIn("security_review", restored.registry)
+            restored.save_workflow(WorkflowDefinition(
+                "secure-flow",
+                "安全工作流",
+                [WorkflowNode("security", "security_review")],
+            ))
+            with self.assertRaisesRegex(ValueError, "secure-flow"):
+                restored.delete_node("security_review")
+            with self.assertRaisesRegex(ValueError, "built-in"):
+                restored.delete_node("planning")
+
+    def test_workflow_persists_explicit_node_model_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = WorkbenchService(root)
+            service.save_provider({
+                "provider_id": "vendor",
+                "label": "Vendor",
+                "base_url": "https://example.test/v1",
+            })
+            service.save_model({"alias": "review-model", "provider_id": "vendor", "model": "review-1"})
+            service.save_workflow(WorkflowDefinition(
+                "bound-flow",
+                "绑定工作流",
+                [WorkflowNode("review", "review", model_alias="review-model")],
+            ))
+            restored = WorkbenchService(root).workflows.get("bound-flow")
+            self.assertEqual(restored.nodes[0].model_alias, "review-model")
+            with self.assertRaisesRegex(ValueError, "bound-flow"):
+                service.delete_model("review-model")
+
+    def test_v2_api_exposes_resource_catalog_projects_and_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server = make_server(root, 0, auto_run_agent=False)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def request(method, path, value=None):
+                data = json.dumps(value).encode() if value is not None else None
+                req = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode())
+
+            status, catalog = request("GET", "/api/v2/catalog")
+            self.assertEqual(status, 200)
+            self.assertTrue(any(node["node_type"] == "requirement" for node in catalog["nodes"]))
+            _, project = request("POST", "/api/v2/projects", {"name": "API project"})
+            status, session = request("POST", f"/api/v2/projects/{project['project_id']}/sessions", {"title": "Task", "mode": "task"})
+            self.assertEqual(status, 201)
+            self.assertEqual(session["mode"], "task")
+            status, detail = request("GET", f"/api/v2/sessions/{session['session_id']}")
+            self.assertEqual(status, 200)
+            self.assertEqual(detail["project_id"], project["project_id"])
+
+    def test_v2_management_api_and_root_workbench(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = make_server(Path(tmp), 0, auto_run_agent=False)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def request(method, path, value=None):
+                data = json.dumps(value).encode() if value is not None else None
+                req = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode())
+
+            with urllib.request.urlopen(base + "/", timeout=5) as response:
+                page = response.read().decode()
+            self.assertIn("Workloop 工作台", page)
+            self.assertNotIn("经典控制台", page)
+
+            request("POST", "/api/v2/resources/providers", {
+                "provider_id": "vendor", "label": "Vendor", "base_url": "https://example.test/v1",
+            })
+            request("POST", "/api/v2/resources/models", {
+                "alias": "secure-model", "provider_id": "vendor", "model": "secure-1",
+            })
+
+            class ProbeGateway:
+                def complete(self, **_): return {}
+                def probe(self, alias):
+                    return {
+                        "ok": True, "alias": alias, "protocol": "openai",
+                        "error_type": "", "error": "", "latency_ms": 7,
+                    }
+
+            server.workbench.gateway = ProbeGateway()
+            status, probe = request("POST", "/api/v2/resources/providers/vendor/test", {})
+            self.assertEqual(status, 200)
+            self.assertTrue(probe["ok"])
+            self.assertEqual(probe["checks"][0]["latency_ms"], 7)
+            _, resources = request("GET", "/api/v2/resources")
+            vendor_health = next(item for item in resources["health"] if item["provider_id"] == "vendor")
+            self.assertTrue(vendor_health["last_check"]["checked_at"])
+
+            request("POST", "/api/v2/nodes", {
+                "node_type": "security_review", "label": "安全审核", "output_fields": ["verdict"],
+                "default_model": "secure-model",
+            })
+            status, workflow = request("POST", "/api/v2/workflows", {
+                "workflow_id": "secure-flow", "label": "安全流", "nodes": [{
+                    "node_id": "security", "node_type": "security_review", "model_alias": "secure-model",
+                }],
+            })
+            self.assertEqual(status, 201)
+            self.assertEqual(workflow["nodes"][0]["model_alias"], "secure-model")
+            _, catalog = request("GET", "/api/v2/catalog")
+            self.assertTrue(any(item["node_type"] == "security_review" for item in catalog["nodes"]))
+
+            with self.assertRaises(urllib.error.HTTPError) as blocked:
+                request("DELETE", "/api/v2/resources/models/secure-model")
+            self.assertEqual(blocked.exception.code, 400)
+            request("DELETE", "/api/v2/workflows/secure-flow")
+            request("DELETE", "/api/v2/nodes/security_review")
+            request("DELETE", "/api/v2/resources/models/secure-model")
+            status, _ = request("DELETE", "/api/v2/resources/providers/vendor")
+            self.assertEqual(status, 200)
+
+
+if __name__ == "__main__":
+    unittest.main()

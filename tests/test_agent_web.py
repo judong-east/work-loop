@@ -52,6 +52,7 @@ class AccessibilityParser(HTMLParser):
         self.dialog_labels: list[str] = []
         self.ids: set[str] = set()
         self.buttons: list[dict[str, str]] = []
+        self._active_button: dict[str, str] | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
         values = dict(attrs)
@@ -61,6 +62,15 @@ class AccessibilityParser(HTMLParser):
             self.dialog_labels.append(values.get("aria-labelledby", ""))
         if tag == "button":
             self.buttons.append(values)
+            self._active_button = values
+
+    def handle_data(self, data: str) -> None:
+        if self._active_button is not None:
+            self._active_button["__text"] = self._active_button.get("__text", "") + data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "button":
+            self._active_button = None
 
 
 class PassingValidator:
@@ -567,27 +577,28 @@ class AgentWebApiTest(unittest.TestCase):
 
     def test_console_has_responsive_keyboard_and_accessibility_contracts(self) -> None:
         status, page = self.request_text("/")
+        css_status, css = self.request_text("/static/workbench.css")
+        js_status, javascript = self.request_text("/static/workbench.js")
 
         self.assertEqual(status, 200)
-        self.assertIn('@media (max-width: 900px)', page)
-        self.assertIn('@media (max-width: 768px)', page)
-        self.assertIn('Number.isInteger(detail.workflow_cursor)', page)
-        self.assertIn('id="metrics" role="status" aria-live="polite"', page)
-        self.assertIn('api("/api/agent/metrics")', page)
-        self.assertIn('class="skip-link" href="#workspace"', page)
-        self.assertIn(":focus-visible", page)
-        self.assertIn('aria-current="step"', page)
-        self.assertIn('class="graph-workbench"', page)
-        self.assertIn('data-graph-connect', page)
-        self.assertIn('自动布局', page)
-        self.assertIn('ArrowLeft', page)
-        self.assertIn('viewport.onmousedown', page)
-        self.assertIn('class="graph-dependency-field"', page)
-        self.assertIn('id="browseProjectPath"', page)
-        self.assertIn('id="directoryDialog"', page)
-        self.assertIn('/api/agent/projects/browse-directories', page)
-        self.assertNotIn("流程编排", page)
-        self.assertNotIn("经验记忆", page)
+        self.assertEqual(css_status, 200)
+        self.assertEqual(js_status, 200)
+        self.assertIn('@media (max-width: 1100px)', css)
+        self.assertIn('@media (max-width: 720px)', css)
+        self.assertIn(":focus-visible", css)
+        self.assertIn('class="skip-link" href="#conversation"', page)
+        self.assertIn('role="status" aria-live="polite"', page)
+        self.assertIn('role="tablist" aria-label="管理类别"', page)
+        self.assertIn('aria-label="任务工作流"', page)
+        self.assertIn('data-management-tab="models"', page)
+        self.assertIn('data-management-tab="nodes"', page)
+        self.assertIn('data-management-tab="workflows"', page)
+        self.assertIn('/api/v2/resources/models', javascript)
+        self.assertIn('/api/v2/nodes/', javascript)
+        self.assertIn('/api/v2/workflows', javascript)
+        self.assertIn('model_alias', javascript)
+        self.assertIn('event.key === "Enter"', javascript)
+        self.assertNotIn("经典控制台", page)
         self.assertNotIn("/api/models/config", page)
 
         parser = AccessibilityParser()
@@ -601,6 +612,7 @@ class AgentWebApiTest(unittest.TestCase):
                 or button.get("value")
                 or button.get("id")
                 or button.get("data-filter")
+                or button.get("__text", "").strip()
                 for button in parser.buttons
             )
         )

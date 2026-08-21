@@ -82,7 +82,7 @@ def main() -> None:
 
     should_open_browser = _is_frozen() and not args.no_browser
     server = make_server(root, args.port, open_browser=should_open_browser)
-    print(f"Workloop 控制台已启动：http://127.0.0.1:{server.server_address[1]}（Ctrl+C 停止）")
+    print(f"Workloop 工作台已启动：http://127.0.0.1:{server.server_address[1]}（Ctrl+C 停止）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

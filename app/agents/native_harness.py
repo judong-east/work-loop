@@ -2,7 +2,7 @@
 
 Instead of driving a vendor CLI subprocess (Claude Code, Codex CLI, Pi) whose
 fixed tool set and harness behavior constrain the model, this runtime talks
-directly to an OpenAI-compatible chat-completions endpoint and runs the
+directly to a provider API and runs the
 tool-calling loop in-process. The model decides autonomously which tools to
 use; Workloop implements the tools (see ``harness_tools``), confines file
 access to the task worktree, persists the message history as a resumable
@@ -42,6 +42,7 @@ from app.agents.runtime_common import (
 from app.core.atomic_files import write_json_atomic
 
 _THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+_PROTOCOLS = {"codex", "claude", "openai_chat"}
 _SESSION_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 # transport(payload, timeout_seconds) -> response dict. Injectable so tests
@@ -54,6 +55,9 @@ class NativeHarnessProfile:
     model: str
     base_url: str = ""
     api_key_env: str = "WORKLOOP_NATIVE_API_KEY"
+    api_key_file: str = ""
+    proxy: str = ""
+    protocol: str = "openai_chat"
     provider: str = ""
     thinking: str = "medium"
     request_timeout_seconds: float = 120.0
@@ -73,6 +77,8 @@ class NativeHarnessProfile:
             raise ValueError("Native harness max tool rounds must be positive")
         if self.max_tokens < 0:
             raise ValueError("Native harness max tokens cannot be negative")
+        if self.protocol not in _PROTOCOLS:
+            raise ValueError("Native harness protocol must be codex or claude")
 
 
 def _read_key_file(path_text: str) -> str:
@@ -101,34 +107,55 @@ def _read_key_file(path_text: str) -> str:
     return ""
 
 
-def resolve_api_key(api_key_env: str) -> str:
-    """Key from the named env var, else from WORKLOOP_NATIVE_KEY_FILE.
+def resolve_api_key(api_key_env: str, api_key_file: str = "") -> str:
+    """Key from the named env var, else the profile key file, else the global one.
 
     The key is never written to the catalog, task state, or logs; only the
-    env var name is recorded in runtime identity.
+    env var name / key-file path are recorded in runtime identity.
     """
-    key = os.environ.get(api_key_env, "").strip()
+    key = os.environ.get(api_key_env, "").strip() if api_key_env else ""
     if key:
         return key
+    if api_key_file:
+        key = _read_key_file(api_key_file)
+        if key:
+            return key
     key_file = os.environ.get("WORKLOOP_NATIVE_KEY_FILE", "").strip()
     return _read_key_file(key_file) if key_file else ""
 
 
-def urllib_transport(base_url: str, api_key: str) -> Transport:
-    url = base_url.rstrip("/") + "/chat/completions"
+def urllib_transport(
+    base_url: str,
+    api_key: str,
+    proxy: str = "",
+    protocol: str = "openai_chat",
+) -> Transport:
+    suffix = {
+        "codex": "/responses",
+        "claude": "/messages",
+        "openai_chat": "/chat/completions",
+    }.get(protocol)
+    if suffix is None:
+        raise ValueError("不支持的模型协议。")
+    url = base_url.rstrip("/") + suffix
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})
+    )
 
     def call(payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        headers = {"Content-Type": "application/json"}
+        if protocol == "claude":
+            headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(
             url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:1000]
@@ -144,6 +171,227 @@ def urllib_transport(base_url: str, api_key: str) -> Transport:
         return decoded
 
     return call
+
+
+def _function_definition(definition: dict[str, Any]) -> dict[str, Any]:
+    function = definition.get("function")
+    return function if isinstance(function, dict) else definition
+
+
+def _codex_payload(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    max_tokens: int,
+) -> dict[str, Any]:
+    instructions = "\n\n".join(
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "system"
+    )
+    input_items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role == "system":
+            continue
+        preserved = message.get("_codex_output")
+        if role == "assistant" and isinstance(preserved, list):
+            input_items.extend(item for item in preserved if isinstance(item, dict))
+            continue
+        if role == "tool":
+            input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id", "")),
+                    "output": str(message.get("content", "")),
+                }
+            )
+            continue
+        content = str(message.get("content", ""))
+        if content:
+            input_items.append({"role": role, "content": content})
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            input_items.append(
+                {
+                    "type": "function_call",
+                    "call_id": str(call.get("id", "")),
+                    "name": str(function.get("name", "")),
+                    "arguments": str(function.get("arguments", "")),
+                }
+            )
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": input_items,
+        "tools": [
+            {"type": "function", **_function_definition(definition)}
+            for definition in tools
+        ],
+    }
+    if instructions:
+        payload["instructions"] = instructions
+    if max_tokens > 0:
+        payload["max_output_tokens"] = max_tokens
+    return payload
+
+
+def _claude_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+
+    def append(role: str, content: Any) -> None:
+        if converted and converted[-1]["role"] == role:
+            previous = converted[-1]["content"]
+            if not isinstance(previous, list):
+                previous = [{"type": "text", "text": str(previous)}]
+            incoming = content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
+            previous.extend(incoming)
+            converted[-1]["content"] = previous
+        else:
+            converted.append({"role": role, "content": content})
+
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role == "system":
+            continue
+        if role == "tool":
+            append(
+                "user",
+                [{
+                    "type": "tool_result",
+                    "tool_use_id": str(message.get("tool_call_id", "")),
+                    "content": str(message.get("content", "")),
+                }],
+            )
+            continue
+        blocks: list[dict[str, Any]] = []
+        text = str(message.get("content", ""))
+        if text:
+            blocks.append({"type": "text", "text": text})
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = function.get("arguments", "{}")
+            try:
+                parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            except json.JSONDecodeError:
+                parsed = {}
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(call.get("id", "")),
+                    "name": str(function.get("name", "")),
+                    "input": parsed if isinstance(parsed, dict) else {},
+                }
+            )
+        append("assistant" if role == "assistant" else "user", blocks or [{"type": "text", "text": ""}])
+    return converted
+
+
+def _claude_payload(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    max_tokens: int,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "system": "\n\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "system"
+        ),
+        "messages": _claude_messages(messages),
+        "tools": [
+            {
+                "name": str(_function_definition(definition).get("name", "")),
+                "description": str(_function_definition(definition).get("description", "")),
+                "input_schema": _function_definition(definition).get("parameters", {}),
+            }
+            for definition in tools
+        ],
+        "max_tokens": max_tokens or 8192,
+    }
+    return payload
+
+
+def protocol_payload(
+    protocol: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    max_tokens: int = 0,
+) -> dict[str, Any]:
+    if protocol == "codex":
+        return _codex_payload(model, messages, tools, max_tokens)
+    if protocol == "claude":
+        return _claude_payload(model, messages, tools, max_tokens)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+    }
+    if max_tokens > 0:
+        payload["max_tokens"] = max_tokens
+    return payload
+
+
+def normalize_protocol_response(
+    protocol: str, response: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    if protocol == "codex":
+        output = response.get("output")
+        if not isinstance(output, list):
+            return None, str(response.get("status", ""))
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                calls.append(
+                    {
+                        "id": str(item.get("call_id") or item.get("id") or ""),
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("name", "")),
+                            "arguments": str(item.get("arguments", "{}")),
+                        },
+                    }
+                )
+            if item.get("type") == "message":
+                for block in item.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
+                        texts.append(str(block.get("text", "")))
+        incomplete = response.get("incomplete_details")
+        reason = str((incomplete or {}).get("reason", "")) if isinstance(incomplete, dict) else ""
+        finish = "length" if reason in {"max_output_tokens", "max_tokens"} else ("tool_calls" if calls else str(response.get("status", "")))
+        return {"content": "".join(texts), "tool_calls": calls, "_codex_output": output}, finish
+    if protocol == "claude":
+        content = response.get("content")
+        if not isinstance(content, list):
+            return None, str(response.get("stop_reason", ""))
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                texts.append(str(block.get("text", "")))
+            elif block.get("type") == "tool_use":
+                calls.append(
+                    {
+                        "id": str(block.get("id", "")),
+                        "type": "function",
+                        "function": {
+                            "name": str(block.get("name", "")),
+                            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                        },
+                    }
+                )
+        stop = str(response.get("stop_reason", ""))
+        finish = "length" if stop == "max_tokens" else ("tool_calls" if calls else stop)
+        return {"content": "".join(texts), "tool_calls": calls}, finish
+    return NativeHarnessRuntime._assistant_message(response)
 
 
 @dataclass
@@ -193,6 +441,7 @@ class NativeHarnessRuntime(AgentRuntime):
                 "provider": provider,
                 "model": model,
                 "thinking": str(getattr(request, "thinking", "") or self.profile.thinking),
+                "protocol": self.profile.protocol,
                 "base_url": base_url,
                 "api_key_env": self._api_key_env(),
                 "tools": [tool.name for tool in tools],
@@ -213,13 +462,13 @@ class NativeHarnessRuntime(AgentRuntime):
                 "runtime": "native-harness",
                 "error": "未配置 base_url（WORKLOOP_NATIVE_BASE_URL 或模型条目 base_url）。",
             }
-        if not resolve_api_key(self._api_key_env()):
+        if not resolve_api_key(self._api_key_env(), self.profile.api_key_file):
             return {
                 "available": False,
                 "runtime": "native-harness",
                 "error": (
-                    f"未配置 API key（环境变量 {self._api_key_env()} 或 "
-                    "WORKLOOP_NATIVE_KEY_FILE 指向的密钥文件）。"
+                    f"未配置 API key（环境变量 {self._api_key_env()}、"
+                    "模型条目密钥文件，或 WORKLOOP_NATIVE_KEY_FILE 指向的密钥文件）。"
                 ),
             }
         return {"available": True, "runtime": "native-harness", "error": ""}
@@ -243,17 +492,20 @@ class NativeHarnessRuntime(AgentRuntime):
                 "environment_missing",
                 identity,
             )
-        api_key = resolve_api_key(self._api_key_env())
+        api_key = resolve_api_key(self._api_key_env(), self.profile.api_key_file)
         if not api_key:
             return self._failure(
                 request,
-                f"原生 Harness 未配置 API key（环境变量 {self._api_key_env()} 或 WORKLOOP_NATIVE_KEY_FILE）。",
+                f"原生 Harness 未配置 API key（环境变量 {self._api_key_env()}、"
+                "模型条目密钥文件，或 WORKLOOP_NATIVE_KEY_FILE）。",
                 "environment_missing",
                 identity,
             )
         shell_allowed = self._shell_allowed(request)
         tools = tools_for(request.access, request.policy, shell_allowed)
-        transport = self.profile.transport or urllib_transport(base_url, api_key)
+        transport = self.profile.transport or urllib_transport(
+            base_url, api_key, self.profile.proxy, self.profile.protocol
+        )
 
         events: list[AgentEvent] = [AgentEvent(AgentEventType.SESSION_STARTED, request.role, {})]
         raw_events: list[dict[str, Any]] = []
@@ -295,14 +547,13 @@ class NativeHarnessRuntime(AgentRuntime):
                     identity, events, raw_events, usage_total,
                 )
 
-            payload: dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-                "tools": [tool.definition() for tool in tools],
-                "stream": False,
-            }
-            if self.profile.max_tokens > 0:
-                payload["max_tokens"] = self.profile.max_tokens
+            payload = protocol_payload(
+                self.profile.protocol,
+                model,
+                messages,
+                [tool.definition() for tool in tools],
+                self.profile.max_tokens,
+            )
             call_timeout = min(
                 self.profile.request_timeout_seconds,
                 max(1.0, total_deadline - time.monotonic()),
@@ -335,14 +586,17 @@ class NativeHarnessRuntime(AgentRuntime):
                     events, raw_events, usage_total,
                 )
             raw_events.append(response)
-            self._accumulate_usage(response, usage_total)
+            self._accumulate_usage(response, usage_total, self.profile.protocol)
             last_progress = time.monotonic()
 
-            message, finish_reason = self._assistant_message(response)
+            message, finish_reason = normalize_protocol_response(
+                self.profile.protocol, response
+            )
             if message is None:
                 return self._failure(
                     request,
-                    f"模型 API 响应缺少 choices[0].message（finish_reason={finish_reason}）。",
+                    f"模型 API 响应缺少有效消息（protocol={self.profile.protocol}, "
+                    f"finish_reason={finish_reason}）。",
                     "protocol_error", identity, events, raw_events, usage_total,
                 )
             if finish_reason == "length":
@@ -364,6 +618,8 @@ class NativeHarnessRuntime(AgentRuntime):
             assistant_entry: dict[str, Any] = {"role": "assistant", "content": text_content}
             if tool_calls:
                 assistant_entry["tool_calls"] = tool_calls
+            if isinstance(message.get("_codex_output"), list):
+                assistant_entry["_codex_output"] = message["_codex_output"]
             messages.append(assistant_entry)
             self._save_session(session_path, request, model, messages)
 
@@ -503,7 +759,13 @@ class NativeHarnessRuntime(AgentRuntime):
             except (OSError, json.JSONDecodeError):
                 break
             messages = data.get("messages") if isinstance(data, dict) else None
-            if isinstance(messages, list) and messages and all(isinstance(m, dict) for m in messages):
+            saved_protocol = str(data.get("protocol", "openai_chat")) if isinstance(data, dict) else ""
+            if (
+                saved_protocol == self.profile.protocol
+                and isinstance(messages, list)
+                and messages
+                and all(isinstance(m, dict) for m in messages)
+            ):
                 return candidate, list(messages), True
             break
         key = request.session_key or request.role
@@ -525,6 +787,7 @@ class NativeHarnessRuntime(AgentRuntime):
                 "task_id": request.task_id,
                 "role": request.role,
                 "model": model,
+                "protocol": self.profile.protocol,
                 "messages": messages,
             },
         )
@@ -540,7 +803,9 @@ class NativeHarnessRuntime(AgentRuntime):
         return message, str(choices[0].get("finish_reason", ""))
 
     @staticmethod
-    def _accumulate_usage(response: dict[str, Any], total: dict[str, int]) -> None:
+    def _accumulate_usage(
+        response: dict[str, Any], total: dict[str, int], protocol: str = "openai_chat"
+    ) -> None:
         usage = response.get("usage")
         if not isinstance(usage, dict):
             return
@@ -548,14 +813,18 @@ class NativeHarnessRuntime(AgentRuntime):
         def count(value: Any) -> int:
             return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
-        total["input_tokens"] += count(usage.get("prompt_tokens"))
-        total["output_tokens"] += count(usage.get("completion_tokens"))
+        input_tokens = count(usage.get("prompt_tokens")) or count(usage.get("input_tokens"))
+        output_tokens = count(usage.get("completion_tokens")) or count(usage.get("output_tokens"))
+        total["input_tokens"] += input_tokens
+        total["output_tokens"] += output_tokens
         total["total_tokens"] += count(usage.get("total_tokens")) or (
-            count(usage.get("prompt_tokens")) + count(usage.get("completion_tokens"))
+            input_tokens + output_tokens
         )
-        details = usage.get("prompt_tokens_details")
+        details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
         if isinstance(details, dict):
             total["cached_input_tokens"] += count(details.get("cached_tokens"))
+        if protocol == "claude":
+            total["cached_input_tokens"] += count(usage.get("cache_read_input_tokens"))
 
     @staticmethod
     def _cancelled(

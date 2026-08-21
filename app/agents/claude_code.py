@@ -33,6 +33,18 @@ _AUTH_ENV_KEYS = {
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
 }
+# The isolated launch (``--setting-sources ""``) also skips the proxy env a
+# user keeps in settings.json; without it the CLI cannot reach a custom
+# ANTHROPIC_BASE_URL through the local proxy and fails TLS verification.
+_NETWORK_ENV_KEYS = {
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+}
+_TRANSFERABLE_ENV_KEYS = _AUTH_ENV_KEYS | _NETWORK_ENV_KEYS
 
 
 @dataclass(frozen=True)
@@ -646,7 +658,7 @@ class ClaudeCodeRuntime(AgentRuntime):
     def _authentication_environment() -> dict[str, str]:
         selected = {
             key: value
-            for key in _AUTH_ENV_KEYS
+            for key in _TRANSFERABLE_ENV_KEYS
             if (value := os.environ.get(key))
         }
         settings_path = Path.home() / ".claude" / "settings.json"
@@ -657,7 +669,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         raw_environment = settings.get("env", {}) if isinstance(settings, dict) else {}
         if not isinstance(raw_environment, dict):
             return selected
-        for key in _AUTH_ENV_KEYS:
+        for key in _TRANSFERABLE_ENV_KEYS:
             value = raw_environment.get(key)
             if key not in selected and isinstance(value, str) and value:
                 selected[key] = value

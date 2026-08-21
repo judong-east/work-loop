@@ -221,6 +221,7 @@ class AgentWorkflow(GraphExecutionMixin):
                     config_path=config_path,
                     workspace_mode="git",
                     source_directory=str(repo_root),
+                    instructions="",
                 )
             )
 
@@ -231,6 +232,7 @@ class AgentWorkflow(GraphExecutionMixin):
             config_path=config_path,
             workspace_mode="directory",
             source_directory=str(requested),
+            instructions="",
         )
         project.repository = str(
             self.directory_projects.root / project.project_id / "repository"
@@ -823,7 +825,7 @@ class AgentWorkflow(GraphExecutionMixin):
                         budget=agent_budget(task),
                         workflow_node_id=node.node_id,
                         **self._node_request_fields(
-                            task, PlanNodeKind.IMPLEMENTATION, "executor"
+                            task, PlanNodeKind.IMPLEMENTATION, "executor", node
                         ),
                     )
                     execution = self._invoke_agent(task, executor_request)
@@ -972,7 +974,7 @@ class AgentWorkflow(GraphExecutionMixin):
                 budget=agent_budget(task),
                 artifact_root=self.store.task_dir(task.task_id),
                 workflow_node_id=node.node_id,
-                **self._node_request_fields(task, PlanNodeKind.REVIEW, "reviewer"),
+                **self._node_request_fields(task, PlanNodeKind.REVIEW, "reviewer", node),
             )
             review = self._invoke_agent(task, review_request)
             if not review.succeeded:
@@ -1328,6 +1330,16 @@ class AgentWorkflow(GraphExecutionMixin):
         self.store.save(task)
 
     def _planning_binding(self, task: AgentTask) -> ModelBinding:
+        workflow = self._task_workflow(task)
+        planner_node = next(
+            (node for node in workflow.nodes if node.kind is WorkflowNodeKind.PLANNER),
+            None,
+        )
+        selected = self._binding_for_workflow_node(
+            planner_node, "planning", AgentAccess.READ_ONLY, task.requirement
+        )
+        if selected.profile_id:
+            return selected
         if task.plan_graph:
             try:
                 binding = PlanGraph.from_dict(task.plan_graph).planning_model
@@ -1340,6 +1352,18 @@ class AgentWorkflow(GraphExecutionMixin):
                 "planning", AgentAccess.READ_ONLY, task.requirement
             )
         return ModelBinding()
+
+    def _binding_for_workflow_node(
+        self,
+        workflow_node: WorkflowNode | None,
+        capability: str,
+        access: AgentAccess,
+        text: str,
+    ) -> ModelBinding:
+        profile_id = str(getattr(workflow_node, "model_profile_id", "") or "").strip()
+        if not profile_id or self.composer is None:
+            return ModelBinding()
+        return self.composer.binding_for_profile(profile_id, capability, access, text)
 
     def _planning_request_fields(
         self,
@@ -1972,9 +1996,20 @@ class AgentWorkflow(GraphExecutionMixin):
         workflow_node: WorkflowNode | None,
         kind: WorkflowNodeKind,
     ) -> str:
-        if workflow_node is not None:
-            return workflow_node.instructions
-        return self._task_workflow(task).instructions_for(kind)
+        parts: list[str] = []
+        try:
+            project = self.projects.get(task.project_id)
+            if project.instructions.strip():
+                parts.append("项目级指令（适用于该项目的所有任务）：\n" + project.instructions.strip())
+        except (FileNotFoundError, ValueError):
+            pass
+        if workflow_node is not None and workflow_node.instructions.strip():
+            parts.append(workflow_node.instructions.strip())
+        elif workflow_node is None:
+            default = self._task_workflow(task).instructions_for(kind)
+            if default.strip():
+                parts.append(default.strip())
+        return "\n\n".join(parts)
 
     def _planner_instructions(
         self,

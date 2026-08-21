@@ -25,6 +25,8 @@ from app.agents.runtime import AgentRuntime, ProfileRoutedRuntime
 
 def build_runtime_stack(
     catalog: ModelCatalog,
+    role_bindings: dict[str, str] | None = None,
+    key_root: Path | None = None,
 ) -> tuple[ProfileRoutedRuntime, ExecutionComposer]:
     composer = ExecutionComposer(
         catalog,
@@ -34,23 +36,39 @@ def build_runtime_stack(
         ),
     )
     profile_runtimes = {
-        option.profile_id: build_runtime(option) for option in catalog.list_all()
+        option.profile_id: build_runtime(option, key_root)
+        for option in catalog.list_all()
     }
-    role_bindings = {
+    explicit = {
+        role: profile_id
+        for role, profile_id in (role_bindings or {}).items()
+        if profile_id and profile_id in profile_runtimes
+    }
+    auto = {
         "planner": composer.select_binding("planning", AgentAccess.READ_ONLY, "planning"),
         "executor": composer.select_binding(
             "implementation", AgentAccess.WORKSPACE_WRITE, "implementation"
         ),
         "reviewer": composer.select_binding("review", AgentAccess.READ_ONLY, "review"),
     }
+    bindings = {role: explicit.get(role) or auto[role].profile_id for role in auto}
     runtime = ProfileRoutedRuntime(
-        {role: profile_runtimes[binding.profile_id] for role, binding in role_bindings.items()},
+        {role: profile_runtimes[profile_id] for role, profile_id in bindings.items()},
         profile_runtimes,
     )
     return runtime, composer
 
 
-def build_runtime(option: ModelOption) -> AgentRuntime:
+def _resolve_key_file(api_key_file: str, key_root: Path | None) -> str:
+    if not api_key_file:
+        return ""
+    path = Path(api_key_file)
+    if path.is_absolute() or key_root is None:
+        return str(path)
+    return str((Path(key_root) / path).resolve())
+
+
+def build_runtime(option: ModelOption, key_root: Path | None = None) -> AgentRuntime:
     if option.runtime == "pi_rpc":
         return PiRpcRuntime(
             PiRpcProfile(
@@ -74,6 +92,9 @@ def build_runtime(option: ModelOption) -> AgentRuntime:
                 api_key_env=option.api_key_env
                 or os.environ.get("WORKLOOP_NATIVE_API_KEY_ENV", "").strip()
                 or "WORKLOOP_NATIVE_API_KEY",
+                api_key_file=_resolve_key_file(option.api_key_file, key_root),
+                proxy=option.proxy,
+                protocol=option.protocol,
                 provider=option.provider,
                 thinking=option.thinking,
                 max_tokens=option.max_tokens,
@@ -91,9 +112,62 @@ def build_runtime(option: ModelOption) -> AgentRuntime:
     return CodexCliRuntime(profile)
 
 
+_NATIVE_ROLE_SPECS = [
+    ("planner", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_PLANNER_MODEL"),
+    ("executor", AgentAccess.WORKSPACE_WRITE, "WORKLOOP_NATIVE_EXECUTOR_MODEL"),
+    ("reviewer", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_REVIEWER_MODEL"),
+]
+_NATIVE_ROLE_CAPABILITIES = {
+    "planner": ["planning", "architecture", "general"],
+    "executor": [
+        "implementation", "frontend", "backend", "security",
+        "testing", "migration", "documentation",
+    ],
+    "reviewer": ["review", "security", "general"],
+}
+
+
+def native_catalog(
+    base_url: str,
+    model: str,
+    provider: str = "",
+    thinking: str = "medium",
+    max_tokens: int = 0,
+    api_key_env: str = "WORKLOOP_NATIVE_API_KEY",
+    role_models: dict[str, str] | None = None,
+    protocol: str = "openai_chat",
+) -> ModelCatalog:
+    """One endpoint, one model: every role runs through the native harness."""
+
+    def role_model(role: str) -> str:
+        override = (role_models or {}).get(role, "").strip()
+        return override or model
+
+    return ModelCatalog(
+        [
+            ModelOption(
+                profile_id=role,
+                label=role.title(),
+                runtime="native",
+                model=role_model(role),
+                access=access,
+                capabilities=_NATIVE_ROLE_CAPABILITIES[role],
+                quality=4,
+                input_cost_per_million=0.0,
+                output_cost_per_million=0.0,
+                provider=provider,
+                thinking=thinking,
+                base_url=base_url,
+                api_key_env=api_key_env,
+                protocol=protocol,
+                max_tokens=max_tokens,
+            )
+            for role, access, _model_env in _NATIVE_ROLE_SPECS
+        ]
+    )
+
+
 def default_model_catalog() -> ModelCatalog:
-    planner_model = os.environ.get("WORKLOOP_CLAUDE_MODEL", "sonnet")
-    executor_model = os.environ.get("WORKLOOP_CODEX_MODEL", "") or "gpt-5.2-codex"
     native_base_url = os.environ.get("WORKLOOP_NATIVE_BASE_URL", "").strip()
     native_model = os.environ.get("WORKLOOP_NATIVE_MODEL", "").strip()
     if native_base_url and native_model:
@@ -103,80 +177,26 @@ def default_model_catalog() -> ModelCatalog:
             os.environ.get("WORKLOOP_NATIVE_API_KEY_ENV", "").strip()
             or "WORKLOOP_NATIVE_API_KEY"
         )
-        native_provider = os.environ.get("WORKLOOP_NATIVE_PROVIDER", "").strip()
-        native_thinking = os.environ.get("WORKLOOP_NATIVE_THINKING", "medium").strip() or "medium"
-        native_max_tokens = int(os.environ.get("WORKLOOP_NATIVE_MAX_TOKENS", "0") or 0)
-        role_specs = [
-            ("planner", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_PLANNER_MODEL"),
-            ("executor", AgentAccess.WORKSPACE_WRITE, "WORKLOOP_NATIVE_EXECUTOR_MODEL"),
-            ("reviewer", AgentAccess.READ_ONLY, "WORKLOOP_NATIVE_REVIEWER_MODEL"),
-        ]
-        role_capabilities = {
-            "planner": ["planning", "architecture", "general"],
-            "executor": [
-                "implementation", "frontend", "backend", "security",
-                "testing", "migration", "documentation",
-            ],
-            "reviewer": ["review", "security", "general"],
-        }
-        return ModelCatalog(
-            [
-                ModelOption(
-                    profile_id=role,
-                    label=role.title(),
-                    runtime="native",
-                    model=os.environ.get(model_env, "").strip() or native_model,
-                    access=access,
-                    capabilities=role_capabilities[role],
-                    quality=4,
-                    input_cost_per_million=0.0,
-                    output_cost_per_million=0.0,
-                    provider=native_provider,
-                    thinking=native_thinking,
-                    base_url=native_base_url,
-                    api_key_env=api_key_env,
-                    max_tokens=native_max_tokens,
-                )
-                for role, access, model_env in role_specs
-            ]
+        return native_catalog(
+            native_base_url,
+            native_model,
+            provider=os.environ.get("WORKLOOP_NATIVE_PROVIDER", "").strip(),
+            thinking=os.environ.get("WORKLOOP_NATIVE_THINKING", "medium").strip() or "medium",
+            max_tokens=int(os.environ.get("WORKLOOP_NATIVE_MAX_TOKENS", "0") or 0),
+            api_key_env=api_key_env,
+            protocol=os.environ.get("WORKLOOP_NATIVE_PROTOCOL", "openai_chat").strip()
+            or "openai_chat",
+            role_models={
+                role: os.environ.get(model_env, "").strip()
+                for role, _access, model_env in _NATIVE_ROLE_SPECS
+            },
         )
-    return ModelCatalog(
-        [
-            ModelOption(
-                profile_id="planner",
-                label="Planner",
-                runtime="claude_code",
-                model=planner_model,
-                access=AgentAccess.READ_ONLY,
-                capabilities=["planning", "architecture", "general"],
-                quality=4,
-                input_cost_per_million=0.0,
-                output_cost_per_million=0.0,
-            ),
-            ModelOption(
-                profile_id="executor",
-                label="Executor",
-                runtime="codex_cli",
-                model=executor_model,
-                access=AgentAccess.WORKSPACE_WRITE,
-                capabilities=[
-                    "implementation", "frontend", "backend", "security",
-                    "testing", "migration", "documentation",
-                ],
-                quality=4,
-                input_cost_per_million=0.0,
-                output_cost_per_million=0.0,
-            ),
-            ModelOption(
-                profile_id="reviewer",
-                label="Reviewer",
-                runtime="claude_code",
-                model=planner_model,
-                access=AgentAccess.READ_ONLY,
-                capabilities=["review", "security", "general"],
-                quality=4,
-                input_cost_per_million=0.0,
-                output_cost_per_million=0.0,
-            ),
-        ]
+    # The console must be able to start before credentials are configured.
+    # Keep a native-only placeholder stack whose health check clearly reports
+    # the missing endpoint/key; never silently spend through installed CLIs.
+    return native_catalog(
+        "",
+        "unconfigured",
+        provider="unconfigured",
+        protocol="codex",
     )

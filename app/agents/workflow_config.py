@@ -47,6 +47,7 @@ class WorkflowNode:
     kind: WorkflowNodeKind
     label: str
     instructions: str = ""
+    model_profile_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,11 +85,11 @@ BUILTIN_WORKFLOWS: dict[str, WorkflowDefinition] = {
         description="计划经人工批准后执行，审核通过后等待确认交付。",
         builtin=True,
         nodes=[
-            _node("plan", WorkflowNodeKind.PLANNER, "Claude 规划"),
+            _node("plan", WorkflowNodeKind.PLANNER, "规划"),
             _node("approve", WorkflowNodeKind.PLAN_APPROVAL, "批准计划"),
-            _node("execute", WorkflowNodeKind.EXECUTOR, "Codex 执行"),
+            _node("execute", WorkflowNodeKind.EXECUTOR, "执行"),
             _node("validate", WorkflowNodeKind.VALIDATION, "确定性验证"),
-            _node("review", WorkflowNodeKind.REVIEWER, "Claude 审核"),
+            _node("review", WorkflowNodeKind.REVIEWER, "审核"),
             _node("deliver", WorkflowNodeKind.DELIVERY, "确认交付"),
         ],
     ),
@@ -99,10 +100,10 @@ BUILTIN_WORKFLOWS: dict[str, WorkflowDefinition] = {
         description="计划无待澄清问题时自动执行，完成后一键确认交付。",
         builtin=True,
         nodes=[
-            _node("plan", WorkflowNodeKind.PLANNER, "Claude 规划"),
-            _node("execute", WorkflowNodeKind.EXECUTOR, "Codex 执行"),
+            _node("plan", WorkflowNodeKind.PLANNER, "规划"),
+            _node("execute", WorkflowNodeKind.EXECUTOR, "执行"),
             _node("validate", WorkflowNodeKind.VALIDATION, "确定性验证"),
-            _node("review", WorkflowNodeKind.REVIEWER, "Claude 审核"),
+            _node("review", WorkflowNodeKind.REVIEWER, "审核"),
             _node("deliver", WorkflowNodeKind.DELIVERY, "确认交付"),
         ],
     ),
@@ -150,12 +151,18 @@ def workflow_from_dict(data: Any, *, builtin: bool = False) -> WorkflowDefinitio
         instructions = str(raw.get("instructions", "")).strip()
         if len(instructions) > 4000:
             raise ValueError(f"节点附加指令不能超过 4000 个字符：{node_id}。")
+        model_profile_id = str(raw.get("model_profile_id", "")).strip()
+        if model_profile_id and not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", model_profile_id):
+            raise ValueError(f"节点模型标识不合法：{node_id}。")
+        if model_profile_id and kind not in AGENT_NODE_KINDS:
+            raise ValueError(f"非模型节点不能绑定模型：{node_id}。")
         nodes.append(
             WorkflowNode(
                 node_id=node_id,
                 kind=kind,
                 label=node_label,
                 instructions=instructions,
+                model_profile_id=model_profile_id,
             )
         )
 

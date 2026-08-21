@@ -37,7 +37,7 @@ class WorkflowDefinitionTest(unittest.TestCase):
         self.assertFalse(BUILTIN_WORKFLOWS["quick"].requires_plan_approval)
         self.assertEqual(
             BUILTIN_WORKFLOWS["quick"].node(WorkflowNodeKind.EXECUTOR).label,
-            "Codex 执行",
+            "执行",
         )
 
     def test_legacy_autopilot_id_resolves_to_quick(self) -> None:
