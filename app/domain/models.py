@@ -421,6 +421,7 @@ class Session:
     project_id: str
     title: str
     mode: SessionMode = SessionMode.CHAT
+    purpose: str = "conversation"
     messages: list[SessionMessage] = field(default_factory=list)
     context: ContextState = field(default_factory=ContextState)
     workflow_id: str = ""
@@ -439,11 +440,12 @@ class Session:
         workflow_id: str = "",
         *,
         policy: TaskPolicy | dict[str, Any] | None = None,
+        purpose: str = "conversation",
     ) -> "Session":
         task_policy = policy if isinstance(policy, TaskPolicy) else TaskPolicy.from_dict(policy)
         return cls(
             new_id("SESSION"), project_id, title.strip() or "未命名会话", mode,
-            workflow_id=workflow_id, policy=task_policy,
+            purpose=purpose, workflow_id=workflow_id, policy=task_policy,
         )
 
     def add_message(self, role: str, content: str, *, node_id: str = "", metadata: dict[str, Any] | None = None) -> SessionMessage:
@@ -456,11 +458,14 @@ class Session:
     def to_dict(self) -> dict[str, Any]:
         if not self.project_id.strip():
             raise ValueError("session project_id is required")
+        if self.purpose not in {"conversation", "collaboration"}:
+            raise ValueError("unsupported session purpose")
         return {
             "session_id": self.session_id,
             "project_id": self.project_id,
             "title": self.title,
             "mode": self.mode.value,
+            "purpose": self.purpose,
             "messages": [item.to_dict() for item in self.messages],
             "context": self.context.to_dict(),
             "workflow_id": self.workflow_id,
@@ -478,6 +483,7 @@ class Session:
             project_id=str(value["project_id"]),
             title=str(value.get("title", "未命名会话")),
             mode=SessionMode(value.get("mode", SessionMode.CHAT.value)),
+            purpose=str(value.get("purpose", "conversation")),
             messages=[SessionMessage.from_dict(item) for item in value.get("messages", [])],
             context=ContextState.from_dict(dict(value.get("context", {}))),
             workflow_id=str(value.get("workflow_id", "")),

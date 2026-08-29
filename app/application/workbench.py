@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import json
+import threading
 from pathlib import Path
 from typing import Any
 
 from app.core.contracts import utc_now
-from app.domain.models import ModelAlias, ModelProvider, NodeDefinition, Project, Session, SessionMode, TaskPolicy, WorkflowDefinition, WorkflowNode
+from app.domain.collaboration import (
+    CollaborationTask,
+    Handoff,
+    RoleProfile,
+    TaskOutcome,
+    TaskStatus,
+    WorkspaceAccess,
+)
+from app.domain.models import (
+    ModelAlias,
+    ModelProvider,
+    NodeDefinition,
+    Project,
+    Session,
+    SessionMode,
+    TaskPolicy,
+    WorkflowDefinition,
+    WorkflowNode,
+)
 from app.domain.node_catalog import NodeCatalog
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator, ModelGateway, OrchestrationEvent
@@ -35,6 +55,7 @@ class WorkbenchService:
         self.sessions = JsonCollection(self.root / "sessions", Session.from_dict, lambda value: value.to_dict())
         self.workflows = WorkflowCatalog(self.root / "workflows.json", self.registry)
         self.events_path = self.root / "events.jsonl"
+        self._event_lock = threading.Lock()
         self.gateway = gateway or OpenAICompatibleGateway(self.resources)
         self.workspace_runtime = workspace_runtime or WorkspaceRuntime()
         self.registry.register_handler("testing", self.workspace_runtime.validate)
@@ -187,10 +208,17 @@ class WorkbenchService:
         session.status = "idle"
         return self.sessions.save(session, session.session_id)
 
-    def list_sessions(self, project_id: str = "") -> list[Session]:
+    def list_sessions(
+        self,
+        project_id: str = "",
+        *,
+        include_collaboration: bool = False,
+    ) -> list[Session]:
         sessions = self.sessions.list()
         if project_id:
             sessions = [session for session in sessions if session.project_id == project_id]
+        if not include_collaboration:
+            sessions = [session for session in sessions if session.purpose == "conversation"]
         return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
 
     def get_session(self, session_id: str) -> Session:
@@ -292,6 +320,70 @@ class WorkbenchService:
     def workspace_status(self, project_id: str) -> dict[str, Any]:
         return self.workspace_runtime.snapshot(self.get_project(project_id))
 
+    def validate_role(self, role: RoleProfile) -> None:
+        self.registry.get(role.node_type)
+        if role.model_alias and role.model_alias not in {item.alias for item in self.resources.list_models()}:
+            raise ValueError(f"unknown model alias: {role.model_alias}")
+        if role.node_type == "implementation" and role.workspace_access is not WorkspaceAccess.WRITE:
+            raise ValueError("implementation roles require write workspace access")
+        if role.node_type == "testing" and role.workspace_access is not WorkspaceAccess.VALIDATE:
+            raise ValueError("testing roles require validate workspace access")
+
+    def execute_role_task(
+        self,
+        task: CollaborationTask,
+        role: RoleProfile,
+        handoffs: list[Handoff],
+    ) -> TaskOutcome:
+        self.validate_role(role)
+        project = self.get_project(task.project_id)
+        policy = TaskPolicy.from_dict({
+            "task_type": role.node_type,
+            "strategy": infer_strategy(task.description),
+            "complexity": "M",
+            "risk": "medium",
+        })
+        session = Session.create(
+            project.project_id,
+            task.title,
+            SessionMode.TASK,
+            workflow_id=f"role-{role.role_id}",
+            policy=policy,
+            purpose="collaboration",
+        )
+        session.add_message("user", task.description, metadata={"task_id": task.task_id})
+        session.context = session.context.merge({"inputs": {
+            "request": task.description,
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+            "collaboration": {
+                "task": task.to_dict(),
+                "role": role.to_dict(),
+                "handoffs": [item.to_dict() for item in handoffs],
+            },
+        }})
+        self.sessions.save(session, session.session_id)
+        workflow = WorkflowDefinition(
+            workflow_id=f"role-{role.role_id}",
+            label=f"{role.label} · {task.title}",
+            description="由协同调度器生成的单角色执行单元。",
+            nodes=[WorkflowNode(
+                node_id=task.task_id,
+                node_type=role.node_type,
+                model_alias=role.model_alias,
+                prompt_template=role.instructions,
+                on_failure="human",
+            )],
+        )
+        result = self.orchestrator.run(session, workflow)
+        status = {
+            "completed": TaskStatus.COMPLETED,
+            "waiting_for_human": TaskStatus.BLOCKED,
+            "needs_replan": TaskStatus.BLOCKED,
+        }.get(result.status, TaskStatus.FAILED)
+        error = result.context.errors[-1] if result.context.errors else ""
+        return TaskOutcome(status, result.session_id, self._collaboration_result(result), error)
+
     def resource_status(self) -> dict[str, Any]:
         return {
             "providers": [item.to_dict() for item in self.resources.list_providers()],
@@ -351,8 +443,35 @@ class WorkbenchService:
 
     def _record_event(self, event: OrchestrationEvent) -> None:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8") as stream:
-            stream.write(__import__("json").dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        with self._event_lock, self.events_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _collaboration_result(session: Session) -> dict[str, Any]:
+        facts = dict(session.context.facts)
+        checks = facts.get("checks")
+        if isinstance(checks, list):
+            facts["checks"] = [
+                {
+                    key: value
+                    for key, value in check.items()
+                    if key not in {"stdout", "stderr"}
+                }
+                for check in checks
+                if isinstance(check, dict)
+            ]
+        result = {
+            "facts": facts,
+            "artifacts": dict(session.context.artifacts),
+            "decisions": list(session.context.decisions[-30:]),
+        }
+        if len(json.dumps(result, ensure_ascii=False)) > 200_000:
+            return {
+                "facts": {"available_fields": sorted(facts)},
+                "artifacts": dict(session.context.artifacts),
+                "decisions": list(session.context.decisions[-10:]),
+            }
+        return result
 
     @staticmethod
     def _project_context(project: Project) -> dict[str, Any]:

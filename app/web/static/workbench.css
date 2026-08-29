@@ -178,8 +178,8 @@ textarea { resize: vertical; }
 .data-row strong, .data-row span { min-width: 0; }
 .data-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .data-row div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
-.model-glyph, .node-glyph { display: grid; place-items: center; width: 20px; height: 20px; color: var(--accent); background: var(--accent-soft); border-radius: 4px; font: 10px var(--mono); }
-.data-row:has(.model-glyph), .data-row:has(.node-glyph) { grid-template-columns: 20px minmax(0,1fr) auto auto; }
+.model-glyph, .node-glyph, .role-glyph { display: grid; place-items: center; width: 20px; height: 20px; color: var(--accent); background: var(--accent-soft); border-radius: 4px; font: 10px var(--mono); }
+.data-row:has(.model-glyph), .data-row:has(.node-glyph), .data-row:has(.role-glyph) { grid-template-columns: 20px minmax(0,1fr) auto auto; }
 .state-tag, .readonly-tag { color: var(--faint); font-size: 10px; white-space: nowrap; }
 .readonly-tag { padding: 2px 6px; background: var(--panel-muted); border-radius: 3px; }
 .row-actions { display: flex; }
@@ -259,6 +259,30 @@ textarea { resize: vertical; }
 .node-row-secondary summary { color: var(--muted); cursor: pointer; font-size: 11px; }
 .node-row-secondary textarea { margin-top: 7px; font-size: 12px; }
 
+.section-actions { display: flex; gap: 8px; }
+.collaboration-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.collaboration-summary span { display: flex; align-items: baseline; gap: 4px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; }
+.collaboration-summary strong { color: var(--text); font: 600 13px var(--mono); }
+.task-board { display: grid; gap: 8px; }
+.task-card { display: grid; grid-template-columns: 54px minmax(0,1fr) auto; gap: 10px; align-items: start; padding: 12px; border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 6px; background: var(--panel); }
+.task-card.running { border-left-color: var(--blue); }
+.task-card.completed { border-left-color: var(--accent); }
+.task-card.blocked, .task-card.failed { border-left-color: var(--danger); }
+.task-status { padding: 3px 5px; border-radius: 3px; color: var(--muted); background: var(--panel-muted); text-align: center; font-size: 10px; }
+.task-copy { min-width: 0; }
+.task-copy strong, .task-copy > span, .task-copy small { display: block; }
+.task-copy strong { font-size: 12px; }
+.task-copy > span, .task-copy small { margin-top: 2px; color: var(--faint); font-size: 10px; overflow-wrap: anywhere; }
+.task-copy p { margin: 7px 0 0; color: var(--muted); font-size: 11px; white-space: pre-wrap; }
+.task-copy .task-result { margin-top: 6px; color: var(--accent); }
+.task-copy .task-error { color: var(--danger); }
+.handoff-panel { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+.handoff-panel summary { color: var(--muted); cursor: pointer; font-size: 11px; }
+.handoff-list { display: grid; gap: 7px; margin-top: 9px; }
+.handoff-row { padding: 8px 10px; border-left: 2px solid var(--accent); background: var(--panel-muted); }
+.handoff-row strong, .handoff-row span { display: block; font-size: 10px; }
+.handoff-row span { margin-top: 2px; color: var(--muted); }
+
 @media (max-width: 1100px) { .shell { grid-template-columns: 220px minmax(0, 1fr); } .inspector { display: none; } .node-row-fields { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 720px) {
   .shell { display: block; }
@@ -280,7 +304,7 @@ textarea { resize: vertical; }
   .manager-section, .editor-form { padding: 16px; }
   .editor-form { border-left: 0; border-top: 1px solid var(--line); }
   .data-row { grid-template-columns: 8px minmax(0,1fr) auto; }
-  .data-row:has(.model-glyph), .data-row:has(.node-glyph) { grid-template-columns: 20px minmax(0,1fr) auto; }
+  .data-row:has(.model-glyph), .data-row:has(.node-glyph), .data-row:has(.role-glyph) { grid-template-columns: 20px minmax(0,1fr) auto; }
   .data-row .state-tag { display: none; }
   .provider-group-head { grid-template-columns: 30px minmax(0,1fr) auto; }
   .provider-group-head > .state-tag { display: none; }
@@ -296,4 +320,7 @@ textarea { resize: vertical; }
   .workflow-meta, .node-row-fields, .node-row-secondary { grid-template-columns: 1fr; }
   .workflow-actions { justify-content: flex-end; }
   .workflow-node-row { grid-template-columns: 26px minmax(0,1fr) 28px; }
+  .section-heading { flex-direction: column; }
+  .task-card { grid-template-columns: minmax(0,1fr) auto; }
+  .task-card .task-status { grid-column: 1 / -1; justify-self: start; }
 }

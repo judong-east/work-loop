@@ -1,7 +1,7 @@
 # Workloop V2
 
-Workloop is a local multi-model development workbench. It has one runtime, one
-resource center, one project/session model, and one HTTP API (`/api/v2`).
+Workloop is a local multi-model collaborative development workbench. It has one
+V2 runtime, one resource center, and one HTTP API (`/api/v2`).
 
 ## What it does
 
@@ -11,6 +11,12 @@ resource center, one project/session model, and one HTTP API (`/api/v2`).
 - stores credentials outside provider/model catalog JSON;
 - defines reusable node contracts and editable DAG workflows;
 - binds every workflow node to an explicit model alias or capability default;
+- defines reusable roles with their own model, instructions, capabilities, and
+  workspace permission;
+- coordinates multiple role-owned tasks through a dependency DAG;
+- runs independent read-only tasks concurrently while serializing workspace
+  writes and validation;
+- persists task-to-task handoffs for downstream roles;
 - persists project, session, context, node run, strategy, and Gate state;
 - reads a configured local workspace into a bounded context snapshot;
 - applies model-proposed file writes atomically inside that workspace;
@@ -40,8 +46,10 @@ Open `http://127.0.0.1:8765/`.
 ["py", "-3.10", "-m", "unittest", "discover", "-s", "tests", "-q"]
 ```
 
-4. Use normal chat for direct model responses, or task mode for the selected
-   DAG workflow.
+4. Configure **管理中心 → 角色**. A role binds one responsibility node to one
+   model and an explicit workspace permission.
+5. Create dependency-aware work under **管理中心 → 协同任务**, then run the
+   coordinator. Use normal chat or task mode for one-off work.
 
 ## Default workflow
 
@@ -70,6 +78,19 @@ Workloop validates and publishes these writes atomically. The testing node then
 runs only the commands configured on the project. A failed command or non-pass
 review blocks the session with a `quality_review` Gate.
 
+## Collaborative development
+
+Collaboration adds a task graph above individual model workflows:
+
+```text
+需求分析师 -> 架构师 -> 开发者 -> 测试工程师 -> 审核员
+                  `-> independent read tasks may run in parallel
+```
+
+Each task owns a role, priority, dependencies, execution session, status, and
+compact result. Completing a task creates durable handoffs for its dependents.
+A failed task blocks downstream work instead of being silently skipped.
+
 ## Architecture
 
 ```text
@@ -81,6 +102,10 @@ Browser
         -> DagOrchestrator         order / retry / resume / Gate / context
            -> ModelGateway         OpenAI or Claude protocol
            -> WorkspaceRuntime     snapshot / atomic write / validation
+     -> CollaborationService
+        -> RoleProfile             responsibility / model / permission
+        -> CollaborationTask       owner / dependency / result
+        -> Handoff + TaskGraph     context transfer / coordination
 ```
 
 The implementation lives in:
@@ -102,6 +127,8 @@ Core read endpoints:
 - `GET /api/v2/projects`
 - `GET /api/v2/projects/{project_id}/workspace`
 - `GET /api/v2/projects/{project_id}/sessions`
+- `GET /api/v2/projects/{project_id}/collaboration`
+- `GET /api/v2/roles`
 - `GET /api/v2/sessions/{session_id}`
 
 Core write endpoints:
@@ -109,6 +136,10 @@ Core write endpoints:
 - `POST /api/v2/projects`
 - `POST /api/v2/projects/{project_id}`
 - `POST /api/v2/projects/{project_id}/sessions`
+- `POST /api/v2/projects/{project_id}/tasks`
+- `POST /api/v2/projects/{project_id}/coordinate`
+- `POST /api/v2/tasks/{task_id}/retry`
+- `POST /api/v2/roles`
 - `POST /api/v2/sessions/{session_id}/messages`
 - `POST /api/v2/sessions/{session_id}/run`
 - `POST /api/v2/sessions/{session_id}/policy`
@@ -127,6 +158,7 @@ remain in local secret files and are never returned through the API.
 ```powershell
 py -3.10 -m compileall -q app tests
 node --check app/web/static/workbench.js
+node --check app/web/static/collaboration.js
 py -3.10 -m unittest discover -s tests -v
 git diff --check
 ```

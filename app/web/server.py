@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from app.application.collaboration import CollaborationService
 from app.application.workbench import WorkbenchService
 from app.domain.models import SessionMode, WorkflowDefinition, WorkflowNode
 
@@ -33,12 +34,14 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     GET_ROUTES = [
         (re.compile(r"^/$"), "handle_index"),
         (re.compile(r"^/workbench/?$"), "handle_workbench"),
-        (re.compile(r"^/static/(workbench\.css|workbench\.js)$"), "handle_asset"),
+        (re.compile(r"^/static/(workbench\.css|workbench\.js|collaboration\.js)$"), "handle_asset"),
         (re.compile(r"^/api/v2/catalog$"), "handle_catalog"),
         (re.compile(r"^/api/v2/strategies$"), "handle_strategies"),
         (re.compile(r"^/api/v2/projects$"), "handle_projects"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_project_sessions"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/workspace$"), "handle_workspace"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/collaboration$"), "handle_collaboration"),
+        (re.compile(r"^/api/v2/roles$"), "handle_roles"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_session"),
         (re.compile(r"^/api/v2/resources$"), "handle_resources"),
     ]
@@ -46,6 +49,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects$"), "handle_create_project"),
         (re.compile(r"^/api/v2/projects/([\w-]+)$"), "handle_update_project"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_create_session"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/tasks$"), "handle_create_collaboration_task"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/coordinate$"), "handle_coordinate"),
+        (re.compile(r"^/api/v2/tasks/([\w-]+)/retry$"), "handle_retry_collaboration_task"),
+        (re.compile(r"^/api/v2/roles$"), "handle_save_role"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/messages$"), "handle_message"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/run$"), "handle_run"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/policy$"), "handle_update_policy"),
@@ -62,6 +69,8 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/resources/models/([\w-]+)$"), "handle_delete_model"),
         (re.compile(r"^/api/v2/nodes/([\w-]+)$"), "handle_delete_node"),
         (re.compile(r"^/api/v2/workflows/([\w-]+)$"), "handle_delete_workflow"),
+        (re.compile(r"^/api/v2/roles/([\w-]+)$"), "handle_delete_role"),
+        (re.compile(r"^/api/v2/tasks/([\w-]+)$"), "handle_delete_collaboration_task"),
     ]
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
@@ -200,6 +209,12 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_workspace(self, project_id: str) -> None:
         self._send_json(200, self.server.workbench.workspace_status(project_id))
 
+    def handle_collaboration(self, project_id: str) -> None:
+        self._send_json(200, self.server.collaboration.project_state(project_id))
+
+    def handle_roles(self) -> None:
+        self._send_json(200, [item.to_dict() for item in self.server.collaboration.list_roles()])
+
     def handle_create_session(self, project_id: str, body: dict) -> None:
         mode = SessionMode(str(body.get("mode", SessionMode.CHAT.value)))
         session = self.server.workbench.create_session(
@@ -210,6 +225,24 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             policy=body.get("policy") if isinstance(body.get("policy"), dict) else None,
         )
         self._send_json(201, session.to_dict())
+
+    def handle_create_collaboration_task(self, project_id: str, body: dict) -> None:
+        dependencies = body.get("depends_on", [])
+        if not isinstance(dependencies, list):
+            raise _HttpError(400, "depends_on 必须是数组。")
+        task = self.server.collaboration.create_task(project_id, body)
+        self._send_json(201, task.to_dict())
+
+    def handle_coordinate(self, project_id: str, body: dict) -> None:
+        del body
+        self._send_json(200, self.server.collaboration.coordinate(project_id))
+
+    def handle_retry_collaboration_task(self, task_id: str, body: dict) -> None:
+        del body
+        self._send_json(200, self.server.collaboration.retry_task(task_id).to_dict())
+
+    def handle_save_role(self, body: dict) -> None:
+        self._send_json(201, self.server.collaboration.save_role(body).to_dict())
 
     def handle_session(self, session_id: str) -> None:
         self._send_json(200, self.server.workbench.get_session(session_id).to_dict())
@@ -251,6 +284,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"deleted": provider_id})
 
     def handle_delete_model(self, alias: str) -> None:
+        role_references = self.server.collaboration.roles_using_model(alias)
+        if role_references:
+            raise ValueError(f"model is still used by roles: {', '.join(role_references)}")
         self.server.workbench.delete_model(alias)
         self._send_json(200, {"deleted": alias})
 
@@ -258,6 +294,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self._send_json(201, self._node_payload(self.server.workbench.save_node(body)))
 
     def handle_delete_node(self, node_type: str) -> None:
+        role_references = self.server.collaboration.roles_using_node(node_type)
+        if role_references:
+            raise ValueError(f"node is still used by roles: {', '.join(role_references)}")
         self.server.workbench.delete_node(node_type)
         self._send_json(200, {"deleted": node_type})
 
@@ -268,6 +307,14 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_delete_workflow(self, workflow_id: str) -> None:
         self.server.workbench.delete_workflow(workflow_id)
         self._send_json(200, {"deleted": workflow_id})
+
+    def handle_delete_role(self, role_id: str) -> None:
+        self.server.collaboration.delete_role(role_id)
+        self._send_json(200, {"deleted": role_id})
+
+    def handle_delete_collaboration_task(self, task_id: str) -> None:
+        self.server.collaboration.delete_task(task_id)
+        self._send_json(200, {"deleted": task_id})
 
     @staticmethod
     def _node_payload(node) -> dict:
@@ -361,6 +408,12 @@ class WorkloopServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), WorkloopRequestHandler)
         self.workloop_root = Path(root).resolve()
         self.workbench = WorkbenchService(self.workloop_root / "workbench")
+        self.collaboration = CollaborationService(
+            self.workloop_root / "workbench",
+            validate_role=self.workbench.validate_role,
+            execute_task=self.workbench.execute_role_task,
+            validate_project=self.workbench.get_project,
+        )
 
 
 def make_server(root: Path, port: int = 8765, open_browser: bool = False) -> WorkloopServer:

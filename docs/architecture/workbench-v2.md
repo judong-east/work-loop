@@ -13,12 +13,38 @@ HTTP/UI -> WorkbenchService
                 |-- NodeRegistry + WorkflowCatalog
                 |-- ModelGateway
                 `-- WorkspaceRuntime
+
+HTTP/UI -> CollaborationService
+           |-- RoleProfile catalog
+           |-- CollaborationTask + TaskGraph
+           |-- Handoff repository
+           `-- Workbench role-task executor
 ```
 
 The domain owns provider/model references, projects, sessions, task policy,
 structured context, workflows, nodes, and node-run events. Infrastructure owns
 HTTP model protocols, secret files, JSON persistence, workspace I/O, and process
 execution. The web layer only maps `/api/v2` resources to application methods.
+
+## Collaboration model
+
+`RoleProfile` is a reusable execution identity. It binds a responsibility node,
+model alias, instructions, capabilities, and one workspace access mode: `read`,
+`write`, or `validate`.
+
+`CollaborationTask` is the durable unit of development work. It owns one role,
+priority, dependency list, execution session, compact result, error, and status.
+`TaskGraph` verifies that dependencies exist and form a DAG.
+
+`CollaborationService` executes one ready dependency wave at a time. Independent
+read-only tasks use a bounded thread pool. Write and validation roles are
+serialized. Completed tasks publish `Handoff` records to direct dependents;
+failed or blocked dependencies propagate a blocked status.
+
+Every role task still runs through `DagOrchestrator` as a single-node workflow.
+This keeps model routing, output contracts, workspace writes, validation,
+events, and quality Gates consistent. Collaboration sessions are durable but
+hidden from the ordinary conversation list.
 
 ## Model resources
 
@@ -74,10 +100,11 @@ or replan. Repeating the same failed phase three times produces a
 
 ## Persistence and recovery
 
-Projects and sessions are separate atomic JSON records. Node events include a
-serialized `NodeRun`, allowing the orchestrator to skip completed or explicitly
-skipped nodes on resume. Provider/model catalogs, workflows, node contracts,
-health results, and session events are durable local data.
+Projects, sessions, roles, collaboration tasks, and handoffs are separate atomic
+JSON records. Node events include a serialized `NodeRun`, allowing the
+orchestrator to skip completed or explicitly skipped nodes on resume.
+Provider/model catalogs, workflows, node contracts, health results, and session
+events are durable local data.
 
 ## Security properties
 
@@ -88,4 +115,7 @@ health results, and session events are durable local data.
 - secrets never enter session context or API responses;
 - model output cannot invoke a shell;
 - only user-configured validation argv arrays are executed;
-- model file operations are bounded, atomic, workspace-relative writes.
+- model file operations are bounded, atomic, workspace-relative writes;
+- project coordination is single-owner, and workspace writers/validators are
+  serialized;
+- task results and handoffs are size-bounded and never contain provider secrets.

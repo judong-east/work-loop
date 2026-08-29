@@ -528,7 +528,13 @@ class WorkbenchDomainTest(unittest.TestCase):
             with urllib.request.urlopen(base + "/", timeout=5) as response:
                 page = response.read().decode()
             self.assertIn("Workloop 工作台", page)
+            self.assertIn("协同任务", page)
+            self.assertIn("/static/collaboration.js", page)
             self.assertNotIn("经典控制台", page)
+
+            with urllib.request.urlopen(base + "/static/collaboration.js", timeout=5) as response:
+                collaboration_script = response.read().decode()
+            self.assertIn("workloop:project-selected", collaboration_script)
 
             with self.assertRaises(urllib.error.HTTPError) as removed:
                 request("GET", "/api/agent/tasks")

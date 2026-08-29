@@ -119,6 +119,11 @@
       if (state.session.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
       if (state.session.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
       renderMode(); renderProjects(); renderSessions(); $("rail").classList.remove("open");
+      document.body.dataset.projectId = state.project.project_id;
+      document.body.dataset.projectName = state.project.name;
+      window.dispatchEvent(new CustomEvent("workloop:project-selected", {
+        detail: { projectId: state.project.project_id, projectName: state.project.name },
+      }));
     } catch (error) { toast(error.message); }
   }
 
