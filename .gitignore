@@ -1,20 +1,15 @@
 __pycache__/
 *.pyc
 .idea/
-tasks/
 .selfhost-data/
 .selfhost-runtime/
 .preview_server.py
 
-# runtime queue state (workflows.json stays tracked)
-agent-runtime/queue/
-agent-runtime/keys/
-agent-runtime/native-api-key
-agent-runtime/managed-projects/
-agent-runtime/projects/
+# Retired pre-V2 local data. V2 never imports or loads these directories.
+tasks/
+agent-runtime/
+memory/
 agent-profiles.json
-agent-runtime/model-providers.json
-agent-runtime/native-runtime.json
 
-# Workbench V2 stores local projects, sessions, provider credentials, and events.
+# V2 local projects, sessions, provider credentials, and events.
 workbench/

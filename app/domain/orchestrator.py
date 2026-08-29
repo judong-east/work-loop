@@ -38,6 +38,7 @@ class OrchestrationEvent:
 
 
 EventSink = Callable[[OrchestrationEvent], None]
+OutputProcessor = Callable[[Session, WorkflowNode, ContextState, dict[str, Any]], dict[str, Any]]
 
 
 class OrchestrationError(RuntimeError):
@@ -62,12 +63,14 @@ class DagOrchestrator:
         gateway: ModelGateway,
         *,
         event_sink: EventSink | None = None,
+        output_processor: OutputProcessor | None = None,
         max_attempts: int = 2,
     ):
         self.registry = registry
         self.store = store
         self.gateway = gateway
         self.event_sink = event_sink
+        self.output_processor = output_processor
         self.max_attempts = max(1, max_attempts)
 
     def validate(self, workflow: WorkflowDefinition) -> list[str]:
@@ -102,7 +105,6 @@ class DagOrchestrator:
                 payload={"gate": session.policy.gate},
             ))
             return session
-        session.mode = session.mode
         session.status = "running"
         self._emit(OrchestrationEvent("session_started", session.session_id, status=session.status))
         self.store.save(session)
@@ -160,8 +162,14 @@ class DagOrchestrator:
                 self._emit(OrchestrationEvent("node_skipped", session.session_id, node_id, run.status, {"error": run.error}))
             else:
                 session.status = "waiting_for_human" if node.on_failure == "human" else "failed"
+                if run.output:
+                    context = context.merge(run.output)
                 session.context = context.merge({"errors": [run.error]})
-                if node.on_failure == "human":
+                output_gate = run.output.get("gate", {}) if isinstance(run.output, dict) else {}
+                if isinstance(output_gate, dict) and output_gate.get("status") == "blocked":
+                    session.policy.gate = str(output_gate.get("name", "quality_review"))
+                    session.policy.gate_status = "blocked"
+                elif node.on_failure == "human":
                     session.policy.gate = "human_review"
                     session.policy.gate_status = "blocked"
                 elif node.on_failure == "replan":
@@ -210,7 +218,36 @@ class DagOrchestrator:
                         },
                     )
                     output = self.gateway.complete(model_alias=run.model_alias, node=gateway_node, context=context)
+                    if "inputs" in output or "errors" in output:
+                        raise ValueError("model output cannot replace authoritative inputs or errors")
+                # Reject malformed output before an output processor performs
+                # workspace side effects.
                 definition.validate_output(output)
+                context.merge(output)
+                if self.output_processor is not None:
+                    output = self.output_processor(session, node, context, output)
+                definition.validate_output(output)
+                # Validate the shared-state envelope while node failure policy
+                # can still convert malformed model output into a durable run.
+                context.merge(output)
+                gate = output.get("gate", {}) if isinstance(output, dict) else {}
+                facts = output.get("facts", {}) if isinstance(output.get("facts", {}), dict) else {}
+                review_blocked = (
+                    node.node_type == "review"
+                    and str(output.get("verdict", facts.get("verdict", "pass"))).lower() != "pass"
+                )
+                if review_blocked and not gate:
+                    gate = {
+                        "name": "quality_review", "status": "blocked",
+                        "reason": f"review verdict: {output.get('verdict', 'revise')}",
+                    }
+                    output["gate"] = gate
+                if isinstance(gate, dict) and gate.get("status") == "blocked":
+                    run.status = "failed"
+                    run.output = output
+                    run.error = str(gate.get("reason", "quality gate blocked"))
+                    run.finished_at = utc_now()
+                    return run
                 run.status = "completed"
                 run.output = output
                 run.finished_at = utc_now()

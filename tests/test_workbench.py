@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import sys
 import tempfile
 import unittest
 import urllib.request
@@ -37,7 +38,44 @@ class RecordingGateway:
         return {"facts": {"checks": []}, "risks": [], "decisions": []}
 
 
+class WorkspaceGateway(RecordingGateway):
+    def __init__(self, file_path="hello.txt"):
+        super().__init__()
+        self.file_path = file_path
+        self.review_context = None
+
+    def complete(self, *, model_alias, node, context):
+        if node.node_type == "implementation":
+            self.calls.append(node.node_id)
+            return {
+                "changes": "write hello.txt",
+                "file_changes": [{
+                    "operation": "write", "path": self.file_path, "content": "hello\n",
+                }],
+                "artifacts": {}, "decisions": [],
+            }
+        if node.node_type == "tool":
+            self.calls.append(node.node_id)
+            return {"result": "模型已回答", "model": model_alias or "default"}
+        if node.node_type == "review":
+            self.review_context = context.to_dict()
+        return super().complete(model_alias=model_alias, node=node, context=context)
+
+
 class WorkbenchDomainTest(unittest.TestCase):
+    def test_project_update_rejects_malformed_workspace_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp) / "data")
+            project = service.create_project("Strict")
+            with self.assertRaisesRegex(ValueError, "argv list"):
+                service.update_project(project.project_id, {
+                    "validation_commands": ["python -m unittest"],
+                })
+            with self.assertRaisesRegex(ValueError, "knowledge_refs"):
+                service.update_project(project.project_id, {
+                    "knowledge_refs": "README.md",
+                })
+
     def test_registry_loads_custom_json_and_rejects_builtin_override(self):
         registry = NodeRegistry()
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,8 +97,8 @@ class WorkbenchDomainTest(unittest.TestCase):
             service.sessions.save(session, session.session_id)
             result = service.run_task(session.session_id)
             self.assertEqual(result.status, "completed")
-            self.assertEqual(service.gateway.calls, ["requirement", "planning", "implementation", "review", "testing"])
-            self.assertEqual(result.context.version, 8)
+            self.assertEqual(service.gateway.calls, ["requirement", "planning", "implementation", "review"])
+            self.assertEqual(result.context.version, 9)
             restored = service.get_session(session.session_id)
             self.assertEqual(restored.status, "completed")
             self.assertTrue(any(message.node_id == "review" for message in restored.messages))
@@ -434,7 +472,7 @@ class WorkbenchDomainTest(unittest.TestCase):
     def test_v2_api_exposes_resource_catalog_projects_and_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            server = make_server(root, 0, auto_run_agent=False)
+            server = make_server(root, 0)
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
             self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
@@ -453,6 +491,15 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(any(item["strategy"] == "guided-develop" for item in strategies))
             _, project = request("POST", "/api/v2/projects", {"name": "API project"})
+            status, project = request("POST", f"/api/v2/projects/{project['project_id']}", {
+                "workspace_path": str(root),
+                "validation_commands": [[sys.executable, "-c", "print('ok')"]],
+            })
+            self.assertEqual(status, 200)
+            self.assertEqual(project["workspace_path"], str(root.resolve()))
+            status, workspace = request("GET", f"/api/v2/projects/{project['project_id']}/workspace")
+            self.assertEqual(status, 200)
+            self.assertTrue(workspace["configured"])
             status, session = request("POST", f"/api/v2/projects/{project['project_id']}/sessions", {"title": "Task", "mode": "task", "policy": {"strategy": "quick-implement", "complexity": "S"}})
             self.assertEqual(status, 201)
             self.assertEqual(session["mode"], "task")
@@ -466,7 +513,7 @@ class WorkbenchDomainTest(unittest.TestCase):
 
     def test_v2_management_api_and_root_workbench(self):
         with tempfile.TemporaryDirectory() as tmp:
-            server = make_server(Path(tmp), 0, auto_run_agent=False)
+            server = make_server(Path(tmp), 0)
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
             self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
@@ -482,6 +529,20 @@ class WorkbenchDomainTest(unittest.TestCase):
                 page = response.read().decode()
             self.assertIn("Workloop 工作台", page)
             self.assertNotIn("经典控制台", page)
+
+            with self.assertRaises(urllib.error.HTTPError) as removed:
+                request("GET", "/api/agent/tasks")
+            self.assertEqual(removed.exception.code, 404)
+
+            cross_site = urllib.request.Request(
+                base + "/api/v2/projects",
+                data=json.dumps({"name": "blocked"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(cross_site, timeout=5)
+            self.assertEqual(rejected.exception.code, 403)
 
             request("POST", "/api/v2/resources/providers", {
                 "provider_id": "vendor", "label": "Vendor", "base_url": "https://example.test/v1",
@@ -530,12 +591,12 @@ class WorkbenchDomainTest(unittest.TestCase):
             status, _ = request("DELETE", "/api/v2/resources/providers/vendor")
             self.assertEqual(status, 200)
 
-    def test_task_policy_defaults_and_legacy_session_compatibility(self):
+    def test_task_policy_defaults_and_missing_policy_compatibility(self):
         policy = TaskPolicy.from_dict({})
         self.assertEqual(policy.strategy, "guided-develop")
         self.assertEqual(policy.complexity, "M")
         self.assertEqual(Session.from_dict({
-            "session_id": "legacy", "project_id": "p", "title": "old",
+            "session_id": "existing", "project_id": "p", "title": "old",
         }).policy.gate_status, "open")
         with self.assertRaisesRegex(ValueError, "unknown strategy"):
             TaskPolicy(strategy="missing").validate()
@@ -557,7 +618,7 @@ class WorkbenchDomainTest(unittest.TestCase):
             ))
             self.assertEqual(result.status, "completed")
             self.assertEqual(captured["context_pack"]["task"]["policy"]["strategy"], "refactor-safely")
-            self.assertEqual(captured["context_pack"]["shared_context"]["version"], 3)
+            self.assertEqual(captured["context_pack"]["shared_context"]["version"], 4)
 
     def test_repeated_failed_phase_is_blocked_for_replan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -576,6 +637,185 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(result.status, "needs_replan")
             self.assertEqual(result.policy.gate, "loop_detected")
             self.assertEqual(result.policy.gate_status, "blocked")
+
+    def test_v2_workspace_applies_model_files_and_runs_real_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            gateway = WorkspaceGateway()
+            service = WorkbenchService(Path(tmp) / "data", gateway=gateway)
+            project = service.create_project(
+                "Writable",
+                workspace_path=str(workspace),
+                validation_commands=[[
+                    sys.executable, "-c",
+                    "from pathlib import Path; assert Path('hello.txt').read_text() == 'hello\\n'",
+                ]],
+            )
+            session = service.create_session(project.project_id, "write", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "create hello.txt")
+            result = service.run_task(session.session_id)
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual((workspace / "hello.txt").read_text(encoding="utf-8"), "hello\n")
+            self.assertEqual(result.context.facts["applied_files"][0]["path"], "hello.txt")
+            checks = result.context.facts["checks"]
+            self.assertEqual(checks[0]["status"], "passed")
+            self.assertEqual(gateway.calls, ["requirement", "planning", "implementation", "review"])
+            reviewed_workspace = gateway.review_context["inputs"]["workspace"]
+            reviewed_file = next(item for item in reviewed_workspace["files"] if item["path"] == "hello.txt")
+            self.assertEqual(reviewed_file["content"], "hello\n")
+            implementation_event = next(
+                message for message in result.messages if message.node_id == "implementation"
+            )
+            self.assertNotIn("file_changes", implementation_event.metadata["node_run"]["output"])
+            self.assertNotIn("file_changes", result.context.facts)
+
+    def test_validation_failure_blocks_quality_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            service = WorkbenchService(Path(tmp) / "data", gateway=WorkspaceGateway())
+            project = service.create_project(
+                "Failing",
+                workspace_path=str(workspace),
+                validation_commands=[[sys.executable, "-c", "raise SystemExit(2)"]],
+            )
+            session = service.create_session(project.project_id, "write", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "create hello.txt")
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertEqual(result.policy.gate, "quality_review")
+            self.assertEqual(result.policy.gate_status, "blocked")
+            self.assertEqual(result.context.facts["checks"][0]["exit_code"], 2)
+
+    def test_workspace_rejects_model_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            service = WorkbenchService(Path(tmp) / "data", gateway=WorkspaceGateway("../outside.txt"))
+            project = service.create_project("Safe", workspace_path=str(workspace))
+            session = service.create_session(project.project_id, "write", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "write outside")
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertFalse((Path(tmp) / "outside.txt").exists())
+            self.assertIn("越出工作区", result.context.errors[-1])
+
+    def test_workspace_rejects_nested_repository_metadata_and_binary_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            nested_git = workspace / "src" / ".git"
+            nested_git.mkdir(parents=True)
+            binary = workspace / "binary.dat"
+            binary.write_bytes(b"\xff\xfe\x00\x01")
+
+            protected = WorkbenchService(
+                Path(tmp) / "protected-data",
+                gateway=WorkspaceGateway("src/.git/config"),
+            )
+            project = protected.create_project("Protected", workspace_path=str(workspace))
+            session = protected.create_session(project.project_id, "write", mode=SessionMode.TASK)
+            protected.send_message(session.session_id, "write metadata")
+            result = protected.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertFalse((nested_git / "config").exists())
+
+            binary_service = WorkbenchService(
+                Path(tmp) / "binary-data",
+                gateway=WorkspaceGateway("binary.dat"),
+            )
+            project = binary_service.create_project("Binary", workspace_path=str(workspace))
+            session = binary_service.create_session(project.project_id, "write", mode=SessionMode.TASK)
+            binary_service.send_message(session.session_id, "replace binary")
+            result = binary_service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertEqual(binary.read_bytes(), b"\xff\xfe\x00\x01")
+
+    def test_malformed_model_state_is_recorded_as_node_failure(self):
+        class MalformedGateway(RecordingGateway):
+            def complete(self, *, model_alias, node, context):
+                if node.node_type == "requirement":
+                    self.calls.append(node.node_id)
+                    return {
+                        "facts": [],
+                        "understanding": "bad envelope",
+                        "acceptance_criteria": [],
+                        "open_questions": [],
+                    }
+                return super().complete(model_alias=model_alias, node=node, context=context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp), gateway=MalformedGateway())
+            project = service.create_project("Malformed")
+            session = service.create_session(project.project_id, "bad", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "run")
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertIn("facts must be an object", result.context.errors[-1])
+
+    def test_workspace_prevalidates_entire_change_batch(self):
+        class BatchGateway(WorkspaceGateway):
+            def complete(self, *, model_alias, node, context):
+                if node.node_type != "implementation":
+                    return super().complete(model_alias=model_alias, node=node, context=context)
+                self.calls.append(node.node_id)
+                return {
+                    "changes": "batch",
+                    "file_changes": [
+                        {"operation": "write", "path": "would-write.txt", "content": "first"},
+                        {"operation": "write", "path": "../escape.txt", "content": "second"},
+                    ],
+                    "artifacts": {}, "decisions": [],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            service = WorkbenchService(Path(tmp) / "data", gateway=BatchGateway())
+            project = service.create_project("Batch", workspace_path=str(workspace))
+            session = service.create_session(project.project_id, "batch", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "write batch")
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertFalse((workspace / "would-write.txt").exists())
+            self.assertFalse((Path(tmp) / "escape.txt").exists())
+
+    def test_workspace_does_not_write_before_output_contract_validation(self):
+        class IncompleteGateway(WorkspaceGateway):
+            def complete(self, *, model_alias, node, context):
+                if node.node_type != "implementation":
+                    return super().complete(model_alias=model_alias, node=node, context=context)
+                self.calls.append(node.node_id)
+                return {
+                    "file_changes": [{
+                        "operation": "write", "path": "invalid.txt", "content": "must not publish",
+                    }],
+                    "artifacts": {},
+                    "decisions": [],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            service = WorkbenchService(Path(tmp) / "data", gateway=IncompleteGateway())
+            project = service.create_project("Contract", workspace_path=str(workspace))
+            session = service.create_session(project.project_id, "invalid", mode=SessionMode.TASK)
+            service.send_message(session.session_id, "write invalid output")
+            result = service.run_task(session.session_id)
+            self.assertEqual(result.status, "waiting_for_human")
+            self.assertFalse((workspace / "invalid.txt").exists())
+            self.assertIn("output missing: changes", result.context.errors[-1])
+
+    def test_chat_mode_calls_the_v2_model_gateway(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = WorkspaceGateway()
+            service = WorkbenchService(Path(tmp), gateway=gateway)
+            project = service.create_project("Chat")
+            session = service.create_session(project.project_id, "chat", mode=SessionMode.CHAT)
+            result = service.send_message(session.session_id, "你好")
+            self.assertEqual(result.messages[-1].content, "模型已回答")
+            self.assertEqual(gateway.calls, ["chat"])
 
 
 if __name__ == "__main__":

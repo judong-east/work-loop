@@ -14,7 +14,12 @@ from .resource_center import ResourceCenter
 _OUTPUT_CONTRACTS = {
     "requirement": {"understanding": "string", "acceptance_criteria": ["string"], "open_questions": ["string"]},
     "planning": {"steps": ["string"], "risks": ["string"], "artifacts": {}},
-    "implementation": {"changes": "string", "artifacts": {}, "decisions": ["string"]},
+    "implementation": {
+        "changes": "string",
+        "file_changes": [{"operation": "write", "path": "relative/path", "content": "complete file text"}],
+        "artifacts": {},
+        "decisions": ["string"],
+    },
     "review": {"verdict": "pass|revise|blocked", "issues": [], "decisions": ["string"]},
     "testing": {"checks": [], "risks": ["string"], "decisions": ["string"]},
     "tool": {"result": "any"},
@@ -136,6 +141,8 @@ class OpenAICompatibleGateway:
                 "content": (
                     "You are one node in a durable multi-agent workflow. "
                     "Return one JSON object only, without markdown fences. "
+                    "Never claim a file was changed unless it is included in file_changes. "
+                    "File paths must be workspace-relative and file contents must be complete. "
                     f"Required output shape: {json.dumps(contract, ensure_ascii=False)}"
                 ),
             },

@@ -1,66 +1,91 @@
 # Workbench V2 Architecture
 
-This document turns the supplied V2 design report into the repository's
-concrete boundaries.
+Workbench V2 is the only live product architecture. It does not expose a
+compatibility API and does not assemble a second agent runtime.
 
-## Request flow
+## Boundaries
 
 ```text
-browser -> /api/v2 -> WorkbenchService
-                       |-- ResourceCenter (providers, aliases, credentials)
-                       |-- JsonCollection (projects, sessions)
-                       `-- DagOrchestrator
-                             |-- NodeRegistry (contracts and handlers)
-                             |-- WorkflowCatalog (DAG persistence)
-                             `-- ModelGateway (vendor adapter)
+HTTP/UI -> WorkbenchService
+           |-- ResourceCenter
+           |-- Project / Session repositories
+           `-- DagOrchestrator
+                |-- NodeRegistry + WorkflowCatalog
+                |-- ModelGateway
+                `-- WorkspaceRuntime
 ```
 
-The old agent runtime remains behind `/api/agent` while task data migrates. It
-is deliberately not imported by the V2 domain objects, so a new provider or
-node type cannot change delivery permissions in the compatibility runtime.
+The domain owns provider/model references, projects, sessions, task policy,
+structured context, workflows, nodes, and node-run events. Infrastructure owns
+HTTP model protocols, secret files, JSON persistence, workspace I/O, and process
+execution. The web layer only maps `/api/v2` resources to application methods.
 
-## Domain contracts
+## Model resources
 
-`Project` owns durable instructions, knowledge references, and a default model
-alias. `Session` belongs to one project and has an explicit `SessionMode`:
+A `ModelProvider` is a connection and authentication policy. A provider may
+serve any number of `ModelAlias` records and may expose OpenAI, Claude, or both
+protocols. Workflows store aliases, never physical provider model names.
 
-- `chat` records a user message and an immediate assistant response;
-- `task` records the user request and runs a `WorkflowDefinition`.
+Credential values are written under `workbench/resources/secrets`; serialized
+providers contain only a credential reference.
 
-`ContextState` is the only implicit handoff between nodes. It has named buckets
-for facts, artifacts, decisions, inputs, and errors. Node output is validated by
-its `NodeDefinition` before it is merged, so malformed output stops at the
-responsible node instead of poisoning every downstream prompt.
+## Project workspace
 
-`Session.policy` carries task governance metadata independently of the graph:
-strategy preset, complexity, risk, current phase, next action, revision, and
-Gate status. Built-in strategy presets are exposed from `GET /api/v2/strategies`;
-the policy can be updated through `POST /api/v2/sessions/{id}/policy`.
+A project may declare:
 
-## Failure and resume rules
+- one absolute `workspace_path`;
+- one default model alias;
+- durable instructions and knowledge references;
+- zero or more validation commands represented as argv arrays.
 
-Every node produces a `NodeRun` event. The orchestrator skips completed or
-skipped nodes when resuming a persisted session. A node can declare `retry`,
-`human`, `skip`, or `replan` as its failure policy. Dependencies are checked
-before execution and a cycle is rejected before any model is called. Before
-each node, a bounded `context_pack` contains the task policy, node identity,
-shared context, and recent node events. Repeated failed phases become a
-`loop_detected` Gate and block the session until the user approves or replans;
-human and replan failures create explicit blocked Gates as well.
+`WorkspaceRuntime.snapshot` reads a bounded UTF-8 view while excluding common
+generated and metadata directories. It does not follow directory or file
+symlinks.
 
-## Resource and security rules
+Implementation nodes propose `file_changes`. Only complete text-file writes are
+accepted. Paths must be relative and remain under the configured workspace.
+Writes to repository metadata, `.workloop`, or the root `workbench` data
+directory are rejected, as are deletion, non-UTF-8 overwrite, path traversal,
+symlink targets, duplicate paths, and oversized batches. Files are published
+atomically. Complete generated file contents are discarded after publication;
+only path and hash evidence enters durable session context.
 
-Provider JSON stores only a `credential_ref`; the actual API key is in a
-provider-specific file under `resources/secrets`. The UI receives provider
-metadata and health state, never secret contents. Model aliases are the stable
-binding in workflow nodes, so changing a physical model does not require editing
-the workflow graph. `OpenAICompatibleGateway` resolves those aliases and sends a
-contract-specific JSON request to `/chat/completions`; invalid model output fails
-at the producing node before context is updated.
+Validation commands are project-owned argv arrays. They run with `shell=False`,
+a small inherited environment, a fixed timeout, and bounded captured output.
+They are never inferred from model text.
 
-## Extending the system
+## Execution and Gates
 
-Register a `NodeDefinition` and a Python handler with `NodeRegistry`, or load a
-contract-only catalog from JSON/YAML. Handlers receive a session, node, and
-bounded `ContextState`; they return a structured object matching the node's
-output fields. Model-backed nodes use the injected `ModelGateway` instead.
+The default graph is:
+
+```text
+requirement -> planning -> implementation -> testing -> review
+```
+
+Each node receives a bounded `context_pack` with task policy, node identity,
+structured shared context, workspace snapshot, and recent events. Completed
+outputs are validated against the node contract before entering shared context.
+
+A failed validation command or a review verdict other than `pass` produces a
+blocked `quality_review` Gate. Human and replan failures also block. The normal
+run endpoint cannot bypass a blocked Gate; the caller must explicitly approve
+or replan. Repeating the same failed phase three times produces a
+`loop_detected` Gate.
+
+## Persistence and recovery
+
+Projects and sessions are separate atomic JSON records. Node events include a
+serialized `NodeRun`, allowing the orchestrator to skip completed or explicitly
+skipped nodes on resume. Provider/model catalogs, workflows, node contracts,
+health results, and session events are durable local data.
+
+## Security properties
+
+- server binds only to `127.0.0.1`;
+- cross-origin writes are rejected;
+- request bodies are bounded and must be JSON objects;
+- record identifiers and workflow/node identifiers are validated;
+- secrets never enter session context or API responses;
+- model output cannot invoke a shell;
+- only user-configured validation argv arrays are executed;
+- model file operations are bounded, atomic, workspace-relative writes.

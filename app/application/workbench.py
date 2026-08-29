@@ -13,12 +13,19 @@ from app.domain.workflow_catalog import WorkflowCatalog
 from app.infrastructure.json_repository import JsonCollection
 from app.infrastructure.model_gateway import OpenAICompatibleGateway
 from app.infrastructure.resource_center import ResourceCenter
+from app.infrastructure.workspace_runtime import WorkspaceRuntime
 
 
 class WorkbenchService:
     """Application facade for projects, sessions, resources, and workflows."""
 
-    def __init__(self, root: Path, *, gateway: ModelGateway | None = None):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        gateway: ModelGateway | None = None,
+        workspace_runtime: WorkspaceRuntime | None = None,
+    ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.registry = NodeRegistry()
@@ -29,24 +36,30 @@ class WorkbenchService:
         self.workflows = WorkflowCatalog(self.root / "workflows.json", self.registry)
         self.events_path = self.root / "events.jsonl"
         self.gateway = gateway or OpenAICompatibleGateway(self.resources)
-        self.orchestrator = DagOrchestrator(self.registry, self.sessions, self.gateway, event_sink=self._record_event)
+        self.workspace_runtime = workspace_runtime or WorkspaceRuntime()
+        self.registry.register_handler("testing", self.workspace_runtime.validate)
+        self.orchestrator = DagOrchestrator(
+            self.registry,
+            self.sessions,
+            self.gateway,
+            event_sink=self._record_event,
+            output_processor=self.workspace_runtime.process_output,
+        )
         self._ensure_default_workflow()
 
     def _ensure_default_workflow(self) -> None:
-        if self.workflows.list():
-            return
         self.workflows.save(
             WorkflowDefinition(
                 workflow_id="default-task",
                 label="默认任务流",
-                description="需求梳理 → 计划制定 → 项目执行 → 审核 → 测试",
+                description="需求梳理 → 计划制定 → 项目执行 → 测试 → 审核",
                 builtin=True,
                 nodes=[
                     WorkflowNode("requirement", "requirement"),
                     WorkflowNode("planning", "planning", ("requirement",)),
                     WorkflowNode("implementation", "implementation", ("planning",)),
-                    WorkflowNode("review", "review", ("implementation",)),
-                    WorkflowNode("testing", "testing", ("implementation", "review"), on_failure="skip"),
+                    WorkflowNode("testing", "testing", ("implementation",), on_failure="human"),
+                    WorkflowNode("review", "review", ("implementation", "testing"), on_failure="human"),
                 ],
             )
         )
@@ -66,8 +79,26 @@ class WorkbenchService:
             for item in self.registry.list()
         ]
 
-    def create_project(self, name: str, *, instructions: str = "", knowledge_refs: list[str] | None = None, default_model: str = "") -> Project:
-        project = Project.create(name, instructions=instructions, knowledge_refs=knowledge_refs or [], default_model=default_model)
+    def create_project(
+        self,
+        name: str,
+        *,
+        instructions: str = "",
+        knowledge_refs: list[str] | None = None,
+        default_model: str = "",
+        workspace_path: str = "",
+        validation_commands: list[list[str]] | None = None,
+    ) -> Project:
+        if default_model and default_model not in {item.alias for item in self.resources.list_models()}:
+            raise ValueError(f"unknown model alias: {default_model}")
+        project = Project.create(
+            name,
+            instructions=instructions,
+            knowledge_refs=knowledge_refs or [],
+            default_model=default_model,
+            workspace_path=workspace_path,
+            validation_commands=validation_commands or [],
+        )
         return self.projects.save(project, project.project_id)
 
     def list_projects(self) -> list[Project]:
@@ -75,6 +106,26 @@ class WorkbenchService:
 
     def get_project(self, project_id: str) -> Project:
         return self.projects.get(project_id)
+
+    def update_project(self, project_id: str, value: dict[str, Any]) -> Project:
+        current = self.get_project(project_id)
+        default_model = str(value.get("default_model", current.default_model))
+        if default_model and default_model not in {item.alias for item in self.resources.list_models()}:
+            raise ValueError(f"unknown model alias: {default_model}")
+        project = Project(
+            project_id=current.project_id,
+            name=str(value.get("name", current.name)).strip(),
+            instructions=str(value.get("instructions", current.instructions)),
+            knowledge_refs=value.get("knowledge_refs", current.knowledge_refs),
+            default_model=default_model,
+            workspace_path=str(value.get("workspace_path", current.workspace_path)),
+            validation_commands=value.get("validation_commands", current.validation_commands),
+            created_at=current.created_at,
+            updated_at=utc_now(),
+            schema_version=current.schema_version,
+        )
+        project.validate()
+        return self.projects.save(project, project.project_id)
 
     def create_session(
         self,
@@ -95,13 +146,10 @@ class WorkbenchService:
             task_policy = TaskPolicy.from_dict(policy)
         task_policy.validate()
         session = Session.create(project_id, title, mode, workflow_id, policy=task_policy)
-        session.context = session.context.merge({"inputs": {"project": {
-            "project_id": project.project_id,
-            "name": project.name,
-            "instructions": project.instructions,
-            "knowledge_refs": list(project.knowledge_refs),
-            "default_model": project.default_model,
-        }}})
+        session.context = session.context.merge({"inputs": {
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+        }})
         return self.sessions.save(session, session.session_id)
 
     def list_strategies(self) -> list[dict[str, Any]]:
@@ -153,9 +201,26 @@ class WorkbenchService:
         if not content.strip():
             raise ValueError("message cannot be empty")
         session.add_message("user", content.strip())
-        session.context = session.context.merge({"inputs": {"request": content.strip()}})
+        project = self.get_project(session.project_id)
+        session.context = session.context.merge({"inputs": {
+            "request": content.strip(),
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+        }})
         if session.mode is SessionMode.CHAT:
-            session.add_message("assistant", "消息已记录，等待模型运行时接入。", metadata={"mode": "chat"})
+            node = WorkflowNode(
+                "chat", "tool", model_alias=project.default_model,
+                prompt_template="直接回答用户请求；result 字段必须是可展示给用户的完整文本。",
+            )
+            output = self.gateway.complete(
+                model_alias=project.default_model,
+                node=node,
+                context=session.context,
+            )
+            session.add_message(
+                "assistant", str(output.get("result", output)),
+                metadata={"mode": "chat", "model": output.get("model", project.default_model)},
+            )
         return self.sessions.save(session, session.session_id)
 
     def save_workflow(self, workflow: WorkflowDefinition) -> WorkflowDefinition:
@@ -214,10 +279,18 @@ class WorkbenchService:
             raise ValueError("only task sessions can run a workflow")
         if workflow is None:
             workflow = self.workflows.get(session.workflow_id)
+        project = self.get_project(session.project_id)
+        session.context = session.context.merge({"inputs": {
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+        }})
         if not session.context.inputs.get("request"):
             latest = next((message.content for message in reversed(session.messages) if message.role == "user"), "")
             session.context = session.context.merge({"inputs": {"request": latest}})
         return self.orchestrator.run(session, workflow)
+
+    def workspace_status(self, project_id: str) -> dict[str, Any]:
+        return self.workspace_runtime.snapshot(self.get_project(project_id))
 
     def resource_status(self) -> dict[str, Any]:
         return {
@@ -280,3 +353,15 @@ class WorkbenchService:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("a", encoding="utf-8") as stream:
             stream.write(__import__("json").dumps(event.to_dict(), ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _project_context(project: Project) -> dict[str, Any]:
+        return {
+            "project_id": project.project_id,
+            "name": project.name,
+            "instructions": project.instructions,
+            "knowledge_refs": list(project.knowledge_refs),
+            "default_model": project.default_model,
+            "workspace_path": project.workspace_path,
+            "validation_commands": [list(command) for command in project.validation_commands],
+        }

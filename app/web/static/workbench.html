@@ -26,6 +26,7 @@
         <button class="mobile-menu icon-button" id="mobileMenu" type="button" aria-label="打开项目列表">☰</button>
         <div class="session-heading"><span class="eyebrow" id="projectName">选择一个项目</span><h1 id="sessionTitle">新的会话</h1></div>
         <div class="header-actions">
+          <button class="icon-button" id="editProject" type="button" aria-label="编辑当前项目" title="项目设置">⌂</button>
           <button class="icon-button" data-open-management type="button" aria-label="打开管理中心" title="管理中心">⚙</button>
           <button class="icon-button reopen-inspector" id="showInspector" type="button" aria-label="展开任务编排" title="展开任务编排">▤</button>
           <button class="icon-button" id="refreshSession" type="button" aria-label="刷新会话" title="刷新会话">↻</button>
@@ -55,7 +56,7 @@
     </aside>
   </div>
 
-  <dialog id="projectDialog" aria-labelledby="projectDialogTitle"><form method="dialog" id="projectForm"><div class="dialog-head"><div><span class="eyebrow">PROJECT</span><h2 id="projectDialogTitle">新建项目</h2></div><button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button></div><div class="dialog-body"><label>项目名称<input id="projectInput" required maxlength="120" placeholder="例如：电商重构"></label><label>全局指令<span>所有会话都会继承</span><textarea id="instructionsInput" rows="4" maxlength="50000" placeholder="编码风格、技术栈和长期约束"></textarea></label></div><div class="dialog-actions"><button class="button quiet" value="cancel">取消</button><button class="button primary" value="default">创建项目</button></div></form></dialog>
+  <dialog id="projectDialog" aria-labelledby="projectDialogTitle"><form method="dialog" id="projectForm"><div class="dialog-head"><div><span class="eyebrow">PROJECT</span><h2 id="projectDialogTitle">新建项目</h2></div><button class="icon-button" value="cancel" type="submit" aria-label="关闭">×</button></div><div class="dialog-body"><label>项目名称<input id="projectInput" required maxlength="120" placeholder="例如：电商重构"></label><label>工作区绝对路径<span>任务节点将在这里读取和写入文件</span><input id="workspaceInput" placeholder="D:\code\my-project"></label><label>默认模型<select id="projectDefaultModel"><option value="">自动选择模型</option></select></label><label>验证命令<span>每行一个命令，使用 JSON argv，例如 ["python","-m","pytest"]</span><textarea id="validationCommandsInput" rows="3" placeholder='["python","-m","pytest","-q"]'></textarea></label><label>全局指令<span>所有会话都会继承</span><textarea id="instructionsInput" rows="4" maxlength="50000" placeholder="编码风格、技术栈和长期约束"></textarea></label></div><div class="dialog-actions"><button class="button quiet" value="cancel">取消</button><button class="button primary" value="default">创建项目</button></div></form></dialog>
 
   <dialog id="managementDialog" class="management-dialog" aria-labelledby="managementTitle">
     <div class="dialog-head"><div><span class="eyebrow">MANAGEMENT</span><h2 id="managementTitle">管理中心</h2></div><button class="icon-button" data-close-management type="button" aria-label="关闭">×</button></div>

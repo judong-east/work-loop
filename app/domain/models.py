@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from app.core.contracts import new_id, utc_now
@@ -237,6 +238,8 @@ class Project:
     instructions: str = ""
     knowledge_refs: list[str] = field(default_factory=list)
     default_model: str = ""
+    workspace_path: str = ""
+    validation_commands: list[list[str]] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     schema_version: int = 1
@@ -246,6 +249,24 @@ class Project:
             raise ValueError("project_id and name are required")
         if len(self.instructions) > 50_000:
             raise ValueError("project instructions are too long")
+        if not isinstance(self.knowledge_refs, list) or not all(
+            isinstance(item, str) for item in self.knowledge_refs
+        ):
+            raise ValueError("knowledge_refs must be a list of strings")
+        if self.workspace_path:
+            workspace = Path(self.workspace_path).expanduser()
+            if not workspace.is_absolute():
+                raise ValueError("workspace_path must be absolute")
+            if not workspace.is_dir():
+                raise ValueError(f"workspace_path is not a directory: {workspace}")
+            self.workspace_path = str(workspace.resolve())
+        if not isinstance(self.validation_commands, list):
+            raise ValueError("validation_commands must be a list")
+        if len(self.validation_commands) > 20:
+            raise ValueError("a project can define at most 20 validation commands")
+        for command in self.validation_commands:
+            if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+                raise ValueError("each validation command must be a non-empty argv list")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -255,6 +276,8 @@ class Project:
             "instructions": self.instructions,
             "knowledge_refs": list(self.knowledge_refs),
             "default_model": self.default_model,
+            "workspace_path": self.workspace_path,
+            "validation_commands": [list(command) for command in self.validation_commands],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "schema_version": self.schema_version,
@@ -268,12 +291,23 @@ class Project:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Project":
+        raw_knowledge_refs = value.get("knowledge_refs", [])
+        if not isinstance(raw_knowledge_refs, list):
+            raise ValueError("knowledge_refs must be a list")
+        raw_commands = value.get("validation_commands", [])
+        if not isinstance(raw_commands, list):
+            raise ValueError("validation_commands must be a list")
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
             instructions=str(value.get("instructions", "")),
-            knowledge_refs=[str(item) for item in value.get("knowledge_refs", [])],
+            knowledge_refs=list(raw_knowledge_refs),
             default_model=str(value.get("default_model", "")),
+            workspace_path=str(value.get("workspace_path", "")),
+            validation_commands=[
+                list(command) if isinstance(command, list) else command
+                for command in raw_commands
+            ],
             created_at=str(value.get("created_at", utc_now())),
             updated_at=str(value.get("updated_at", value.get("created_at", utc_now()))),
             schema_version=int(value.get("schema_version", 1)),
@@ -329,19 +363,34 @@ class ContextState:
     def merge(self, patch: dict[str, Any]) -> "ContextState":
         if not isinstance(patch, dict):
             raise ValueError("node output must be an object")
+        facts_patch = patch.get("facts", {})
+        artifacts_patch = patch.get("artifacts", {})
+        decisions_patch = patch.get("decisions", [])
+        inputs_patch = patch.get("inputs", {})
+        errors_patch = patch.get("errors", [])
+        if not isinstance(facts_patch, dict):
+            raise ValueError("node output facts must be an object")
+        if not isinstance(artifacts_patch, dict):
+            raise ValueError("node output artifacts must be an object")
+        if not isinstance(decisions_patch, list):
+            raise ValueError("node output decisions must be a list")
+        if not isinstance(inputs_patch, dict):
+            raise ValueError("node output inputs must be an object")
+        if not isinstance(errors_patch, list):
+            raise ValueError("node output errors must be a list")
         facts = dict(self.facts)
-        facts.update(dict(patch.get("facts", {})))
+        facts.update(facts_patch)
         # Node contracts may expose a field directly (for example ``result``)
         # or group it under ``facts``.  Keep both forms available to downstream
         # nodes while reserving envelope keys for the structured state buckets.
         reserved = {"facts", "artifacts", "decisions", "inputs", "errors"}
         facts.update({key: value for key, value in patch.items() if key not in reserved})
         artifacts = dict(self.artifacts)
-        artifacts.update({str(k): str(v) for k, v in dict(patch.get("artifacts", {})).items()})
-        decisions = list(dict.fromkeys(self.decisions + [str(item) for item in patch.get("decisions", [])]))
+        artifacts.update({str(k): str(v) for k, v in artifacts_patch.items()})
+        decisions = list(dict.fromkeys(self.decisions + [str(item) for item in decisions_patch]))
         inputs = dict(self.inputs)
-        inputs.update(dict(patch.get("inputs", {})))
-        errors = self.errors + [str(item) for item in patch.get("errors", [])]
+        inputs.update(inputs_patch)
+        errors = self.errors + [str(item) for item in errors_patch]
         return ContextState(facts, artifacts, decisions, inputs, errors, self.version + 1)
 
     def to_dict(self) -> dict[str, Any]:

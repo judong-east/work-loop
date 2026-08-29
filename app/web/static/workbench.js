@@ -2,7 +2,7 @@
   const state = {
     projects: [], sessions: [], project: null, session: null, mode: "chat",
     catalog: { nodes: [], workflows: [] }, strategies: [], resources: { providers: [], models: [], health: [] },
-    selectedWorkflowId: "default-task", selectedStrategy: "guided-develop", editingWorkflow: null, testingProviders: new Set(),
+    selectedWorkflowId: "default-task", selectedStrategy: "guided-develop", editingProjectId: "", editingWorkflow: null, testingProviders: new Set(),
   };
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -23,7 +23,7 @@
     $("projectList").innerHTML = state.projects.length ? state.projects.map(project => {
       const active = state.project?.project_id === project.project_id;
       const sessions = active ? state.sessions : [];
-      return `<div class="project-group"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">⌂</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话` : "点击查看"}</span></span></button>${active ? `<div class="session-list">${sessions.map(session => `<button type="button" class="session-item ${state.session?.session_id === session.session_id ? "active" : ""}" data-session="${esc(session.session_id)}"><span>${session.mode === "task" ? "▤" : "·"}</span><strong>${esc(session.title)}</strong></button>`).join("")}<button type="button" class="session-item new" data-new-session><span>＋</span><strong>新会话</strong></button></div>` : ""}</div>`;
+      return `<div class="project-group"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">⌂</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话 · ${project.workspace_path ? "工作区已连接" : "未连接工作区"}` : "点击查看"}</span></span></button>${active ? `<div class="session-list">${sessions.map(session => `<button type="button" class="session-item ${state.session?.session_id === session.session_id ? "active" : ""}" data-session="${esc(session.session_id)}"><span>${session.mode === "task" ? "▤" : "·"}</span><strong>${esc(session.title)}</strong></button>`).join("")}<button type="button" class="session-item new" data-new-session><span>＋</span><strong>新会话</strong></button></div>` : ""}</div>`;
     }).join("") : `<div class="inspector-empty compact-empty"><strong>还没有项目</strong><p>先创建项目，把工作上下文固定下来。</p></div>`;
     document.querySelectorAll("[data-project]").forEach(button => button.addEventListener("click", () => selectProject(button.dataset.project)));
     document.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", () => {
@@ -143,6 +143,7 @@
     const modelCount = state.resources.models.length;
     $("resourceHint").textContent = modelCount ? `${modelCount} 个模型可用` : "尚未配置模型";
     $("modelLabel").textContent = modelCount ? `${modelCount} 个模型` : "尚未配置模型";
+    $("projectDefaultModel").innerHTML = option("", "自动选择模型") + state.resources.models.map(item => option(item.alias, item.alias)).join("");
     renderWorkflowPicker(); renderProviders(); renderNodes(); renderWorkflowList();
   }
 
@@ -369,10 +370,38 @@
     } catch (error) { toast(error.message); }
   }
 
-  $("newProject").addEventListener("click", () => $("projectDialog").showModal());
+  function openProjectDialog(project = null) {
+    state.editingProjectId = project?.project_id || "";
+    $("projectDialogTitle").textContent = project ? "项目设置" : "新建项目";
+    $("projectInput").value = project?.name || "";
+    $("workspaceInput").value = project?.workspace_path || "";
+    $("projectDefaultModel").value = project?.default_model || "";
+    $("validationCommandsInput").value = (project?.validation_commands || []).map(command => JSON.stringify(command)).join("\n");
+    $("instructionsInput").value = project?.instructions || "";
+    $("projectDialog").showModal();
+  }
+
+  $("newProject").addEventListener("click", () => openProjectDialog());
+  $("editProject").addEventListener("click", () => state.project ? openProjectDialog(state.project) : toast("请先选择项目"));
   $("projectForm").addEventListener("submit", async event => {
     if (event.submitter?.value === "cancel") return; event.preventDefault();
-    try { const project = await post("/api/v2/projects", { name: $("projectInput").value, instructions: $("instructionsInput").value }); state.projects.unshift(project); $("projectDialog").close(); $("projectForm").reset(); await selectProject(project.project_id); }
+    try {
+      const validationCommands = $("validationCommandsInput").value.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map((line, index) => {
+        let value; try { value = JSON.parse(line); } catch (_) { throw new Error(`第 ${index + 1} 条验证命令不是合法 JSON`); }
+        if (!Array.isArray(value) || !value.length || value.some(item => typeof item !== "string" || !item)) throw new Error(`第 ${index + 1} 条验证命令必须是非空字符串数组`);
+        return value;
+      });
+      const project = await post(state.editingProjectId ? `/api/v2/projects/${encodeURIComponent(state.editingProjectId)}` : "/api/v2/projects", {
+        name: $("projectInput").value,
+        workspace_path: $("workspaceInput").value.trim(),
+        default_model: $("projectDefaultModel").value,
+        validation_commands: validationCommands,
+        instructions: $("instructionsInput").value,
+      });
+      if (state.editingProjectId) state.projects = state.projects.map(item => item.project_id === project.project_id ? project : item);
+      else state.projects.unshift(project);
+      state.editingProjectId = ""; $("projectDialog").close(); $("projectForm").reset(); await selectProject(project.project_id);
+    }
     catch (error) { toast(error.message); }
   });
   $("sendMessage").addEventListener("click", send);
