@@ -530,6 +530,7 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertIn("Workloop 工作台", page)
             self.assertIn("协同任务", page)
             self.assertIn("/static/collaboration.js", page)
+            self.assertEqual(page.count("data-close-project"), 2)
             self.assertNotIn("经典控制台", page)
 
             with urllib.request.urlopen(base + "/static/collaboration.js", timeout=5) as response:

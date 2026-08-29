@@ -386,10 +386,23 @@
     $("projectDialog").showModal();
   }
 
+  function closeProjectDialog() {
+    state.editingProjectId = "";
+    $("projectForm").reset();
+    $("projectDialog").close();
+  }
+
   $("newProject").addEventListener("click", () => openProjectDialog());
   $("editProject").addEventListener("click", () => state.project ? openProjectDialog(state.project) : toast("请先选择项目"));
+  document.querySelectorAll("[data-close-project]").forEach(button => {
+    button.addEventListener("click", closeProjectDialog);
+  });
+  $("projectDialog").addEventListener("cancel", () => {
+    state.editingProjectId = "";
+    $("projectForm").reset();
+  });
   $("projectForm").addEventListener("submit", async event => {
-    if (event.submitter?.value === "cancel") return; event.preventDefault();
+    event.preventDefault();
     try {
       const validationCommands = $("validationCommandsInput").value.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map((line, index) => {
         let value; try { value = JSON.parse(line); } catch (_) { throw new Error(`第 ${index + 1} 条验证命令不是合法 JSON`); }
@@ -405,7 +418,7 @@
       });
       if (state.editingProjectId) state.projects = state.projects.map(item => item.project_id === project.project_id ? project : item);
       else state.projects.unshift(project);
-      state.editingProjectId = ""; $("projectDialog").close(); $("projectForm").reset(); await selectProject(project.project_id);
+      closeProjectDialog(); await selectProject(project.project_id);
     }
     catch (error) { toast(error.message); }
   });
