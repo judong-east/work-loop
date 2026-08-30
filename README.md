@@ -91,6 +91,22 @@ Each task owns a role, priority, dependencies, execution session, status, and
 compact result. Completing a task creates durable handoffs for its dependents.
 A failed task blocks downstream work instead of being silently skipped.
 
+### Goal decomposition
+
+A large goal can be split into role-owned subtasks automatically. Submit a goal
+through **管理中心 → 协同任务 → 大目标拆分**, or `POST /api/v2/projects/{id}/goals`:
+
+1. the planning model (the `planning`-node role's model, else the project
+   default) proposes a ref-based draft plan;
+2. the plan is validated against the configured roles and the DAG rules —
+   unknown roles, unknown refs, self references, and cycles are all rejected
+   before anything is persisted;
+3. valid items become durable tasks in topological order, grouped under a
+   Goal record so the whole decomposition stays traceable.
+
+Pass `subtasks` in the request body to split manually without calling a model,
+and `auto_coordinate: true` to run the coordinator immediately after splitting.
+
 ## Architecture
 
 ```text
@@ -138,6 +154,7 @@ Core write endpoints:
 - `POST /api/v2/projects/{project_id}/sessions`
 - `POST /api/v2/projects/{project_id}/tasks`
 - `POST /api/v2/projects/{project_id}/coordinate`
+- `POST /api/v2/projects/{project_id}/goals`
 - `POST /api/v2/tasks/{task_id}/retry`
 - `POST /api/v2/roles`
 - `POST /api/v2/sessions/{session_id}/messages`

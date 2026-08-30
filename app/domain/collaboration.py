@@ -98,6 +98,8 @@ class CollaborationTask:
     role_id: str
     depends_on: tuple[str, ...] = ()
     priority: int = 50
+    goal_id: str = ""
+    model_alias: str = ""
     status: TaskStatus = TaskStatus.PENDING
     session_id: str = ""
     result: dict[str, Any] = field(default_factory=dict)
@@ -118,6 +120,10 @@ class CollaborationTask:
             raise ValueError("task dependencies must be unique and cannot reference itself")
         for dependency in self.depends_on:
             _safe_id(dependency, "dependency task_id")
+        if self.goal_id:
+            _safe_id(self.goal_id, "goal_id")
+        if self.model_alias:
+            _safe_id(self.model_alias, "model_alias")
         if not 0 <= self.priority <= 100:
             raise ValueError("task priority must be between 0 and 100")
         if len(json.dumps(self.result, ensure_ascii=False)) > 250_000:
@@ -133,6 +139,8 @@ class CollaborationTask:
             "role_id": self.role_id,
             "depends_on": list(self.depends_on),
             "priority": self.priority,
+            "goal_id": self.goal_id,
+            "model_alias": self.model_alias,
             "status": self.status.value,
             "session_id": self.session_id,
             "result": dict(self.result),
@@ -152,6 +160,8 @@ class CollaborationTask:
         *,
         depends_on: Iterable[str] = (),
         priority: int = 50,
+        goal_id: str = "",
+        model_alias: str = "",
     ) -> "CollaborationTask":
         task = cls(
             task_id=new_id("TASK"),
@@ -161,6 +171,8 @@ class CollaborationTask:
             role_id=role_id,
             depends_on=tuple(depends_on),
             priority=priority,
+            goal_id=goal_id,
+            model_alias=model_alias,
         )
         task.validate()
         return task
@@ -181,6 +193,8 @@ class CollaborationTask:
             role_id=str(value["role_id"]),
             depends_on=tuple(str(item) for item in dependencies),
             priority=int(value.get("priority", 50)),
+            goal_id=str(value.get("goal_id", "")),
+            model_alias=str(value.get("model_alias", "")),
             status=TaskStatus(str(value.get("status", "pending"))),
             session_id=str(value.get("session_id", "")),
             result=dict(result),
@@ -259,6 +273,65 @@ class Handoff:
         )
         handoff.validate()
         return handoff
+
+
+@dataclass
+class Goal:
+    """A large goal that decomposition splits into role-owned subtasks."""
+
+    goal_id: str
+    project_id: str
+    goal: str
+    summary: str = ""
+    task_ids: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now)
+    schema_version: int = 1
+
+    def validate(self) -> None:
+        self.goal_id = _safe_id(self.goal_id, "goal_id")
+        self.project_id = _safe_id(self.project_id, "project_id")
+        if not self.goal.strip():
+            raise ValueError("goal text is required")
+        if len(self.goal) > 50_000:
+            raise ValueError("goal text is too long")
+        if len(self.summary) > 2_000:
+            raise ValueError("goal summary is too long")
+        if not isinstance(self.task_ids, list) or not all(isinstance(item, str) and item for item in self.task_ids):
+            raise ValueError("goal task_ids must be a list of task ids")
+        for task_id in self.task_ids:
+            _safe_id(task_id, "goal task_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "goal_id": self.goal_id,
+            "project_id": self.project_id,
+            "goal": self.goal,
+            "summary": self.summary,
+            "task_ids": list(self.task_ids),
+            "created_at": self.created_at,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def create(cls, project_id: str, goal: str, *, summary: str = "") -> "Goal":
+        record = cls(goal_id=new_id("GOAL"), project_id=project_id, goal=goal.strip(), summary=summary.strip())
+        record.validate()
+        return record
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Goal":
+        record = cls(
+            goal_id=str(value["goal_id"]),
+            project_id=str(value["project_id"]),
+            goal=str(value["goal"]),
+            summary=str(value.get("summary", "")),
+            task_ids=[str(item) for item in value.get("task_ids", [])],
+            created_at=str(value.get("created_at", utc_now())),
+            schema_version=int(value.get("schema_version", 1)),
+        )
+        record.validate()
+        return record
 
 
 @dataclass(frozen=True)

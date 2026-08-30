@@ -20,13 +20,14 @@ from app.domain.collaboration import (
 from app.web.server import make_server
 
 
-def make_service(root: Path, execute_task) -> CollaborationService:
+def make_service(root: Path, execute_task, validate_model=None) -> CollaborationService:
     return CollaborationService(
         root,
         validate_role=lambda role: role.validate(),
         execute_task=execute_task,
         validate_project=lambda project_id: project_id == "PROJECT-1"
         or (_ for _ in ()).throw(KeyError(project_id)),
+        validate_model=validate_model,
     )
 
 
@@ -246,6 +247,177 @@ class CollaborationTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             self.assertEqual(state["tasks"][0]["task_id"], task["task_id"])
+
+
+class CoordinationRecoveryTest(unittest.TestCase):
+    def test_blocked_dependent_auto_unblocks_after_dependency_retry(self):
+        runs = {"count": 0}
+
+        def execute(task, role, handoffs):
+            del role, handoffs
+            if task.title == "上游":
+                runs["count"] += 1
+                if runs["count"] == 1:
+                    return TaskOutcome(TaskStatus.FAILED, error="first run fails")
+            return TaskOutcome(TaskStatus.COMPLETED)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(Path(tmp), execute)
+            upstream = service.create_task("PROJECT-1", {
+                "title": "上游", "description": "第一次执行会失败", "role_id": "analyst",
+            })
+            downstream = service.create_task("PROJECT-1", {
+                "title": "下游", "description": "依赖上游", "role_id": "architect",
+                "depends_on": [upstream.task_id],
+            })
+            first = service.coordinate("PROJECT-1")
+            first_by_id = {item["task_id"]: item for item in first["tasks"]}
+            self.assertEqual(first_by_id[upstream.task_id]["status"], "failed")
+            self.assertEqual(first_by_id[downstream.task_id]["status"], "blocked")
+            self.assertFalse(first["coordinating"])
+
+            service.retry_task(upstream.task_id)
+            second = service.coordinate("PROJECT-1")
+            self.assertTrue(all(item["status"] == "completed" for item in second["tasks"]))
+
+
+class WaveConcurrencyTest(unittest.TestCase):
+    def test_writer_runs_while_reader_is_still_executing(self):
+        writer_started = threading.Event()
+
+        def execute(task, role, handoffs):
+            del task, handoffs
+            if role.workspace_access.value == "read":
+                # With the old two-phase wave the writer could never start
+                # before this reader finished, and the wait below would fail.
+                if not writer_started.wait(timeout=3):
+                    raise AssertionError("writer did not start while reader was running")
+            else:
+                writer_started.set()
+            return TaskOutcome(TaskStatus.COMPLETED)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(Path(tmp), execute)
+            service.create_task("PROJECT-1", {"title": "分析", "description": "读者任务", "role_id": "analyst"})
+            service.create_task("PROJECT-1", {"title": "实现", "description": "写者任务", "role_id": "developer"})
+            state = service.coordinate("PROJECT-1")
+            self.assertEqual(state["counts"]["completed"], 2)
+
+
+class UpdateTaskTest(unittest.TestCase):
+    def test_update_task_fields_dependencies_and_protections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(Path(tmp), lambda task, role, handoffs: TaskOutcome(TaskStatus.COMPLETED))
+            first = service.create_task("PROJECT-1", {"title": "A", "description": "任务 A", "role_id": "analyst"})
+            second = service.create_task("PROJECT-1", {
+                "title": "B", "description": "任务 B", "role_id": "architect", "depends_on": [first.task_id],
+            })
+
+            updated = service.update_task(second.task_id, {"title": "B 改名", "priority": 80})
+            self.assertEqual(updated.title, "B 改名")
+            self.assertEqual(updated.priority, 80)
+            self.assertEqual(updated.depends_on, (first.task_id,))
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+
+            with self.assertRaisesRegex(ValueError, "DAG"):
+                service.update_task(first.task_id, {"depends_on": [second.task_id]})
+
+            with self.assertRaises(FileNotFoundError):
+                service.update_task(second.task_id, {"role_id": "ghost"})
+
+            running = service.repository.tasks.get(second.task_id)
+            running.status = TaskStatus.RUNNING
+            service.repository.save_task(running)
+            with self.assertRaisesRegex(ValueError, "running"):
+                service.update_task(second.task_id, {"title": "X"})
+
+    def test_model_alias_is_validated_on_create_and_update(self):
+        def validator(alias: str) -> None:
+            if alias != "known-model":
+                raise ValueError(f"unknown model alias: {alias}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(
+                Path(tmp),
+                lambda task, role, handoffs: TaskOutcome(TaskStatus.COMPLETED),
+                validate_model=validator,
+            )
+            with self.assertRaisesRegex(ValueError, "unknown model alias: ghost"):
+                service.create_task("PROJECT-1", {
+                    "title": "A", "description": "d", "role_id": "analyst", "model_alias": "ghost",
+                })
+            task = service.create_task("PROJECT-1", {
+                "title": "A", "description": "d", "role_id": "analyst", "model_alias": "known-model",
+            })
+            self.assertEqual(task.model_alias, "known-model")
+            with self.assertRaisesRegex(ValueError, "unknown model alias: other"):
+                service.update_task(task.task_id, {"model_alias": "other"})
+
+
+class CoordinateApiAsyncTest(unittest.TestCase):
+    def test_async_coordinate_event_stream_and_task_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = make_server(Path(tmp), 0)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def request(method, path, value=None):
+                data = json.dumps(value).encode() if value is not None else None
+                req = urllib.request.Request(
+                    base + path,
+                    data=data,
+                    method=method,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    return response.status, json.loads(response.read().decode())
+
+            _, project = request("POST", "/api/v2/projects", {"name": "Async"})
+            project_id = project["project_id"]
+            _, task = request(
+                "POST",
+                f"/api/v2/projects/{project_id}/tasks",
+                {"title": "分析", "description": "没有模型会阻塞", "role_id": "analyst"},
+            )
+            task_id = task["task_id"]
+
+            with server._coordination_guard:
+                server._coordinating_projects.add(project_id)
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                request("POST", f"/api/v2/projects/{project_id}/coordinate", {"async": True})
+            self.assertEqual(rejected.exception.code, 409)
+            with server._coordination_guard:
+                server._coordinating_projects.discard(project_id)
+
+            status, started = request("POST", f"/api/v2/projects/{project_id}/coordinate", {"async": True})
+            self.assertEqual(status, 202)
+            self.assertTrue(started["started"])
+
+            state = {}
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                _, state = request("GET", f"/api/v2/projects/{project_id}/collaboration")
+                if not state["coordinating"] and state["counts"]["pending"] == 0:
+                    break
+                time.sleep(0.2)
+            self.assertFalse(state["coordinating"])
+            self.assertEqual(state["counts"]["blocked"], 1)
+
+            status, events = request("GET", "/api/v2/events")
+            self.assertEqual(status, 200)
+            self.assertGreaterEqual(events["total"], 1)
+            self.assertTrue(any(item.get("event_type") == "node_failed" for item in events["events"]))
+
+            status, page = request("GET", "/api/v2/events?after=0&limit=2")
+            self.assertEqual(status, 200)
+            self.assertEqual(page["next"], min(2, page["total"]))
+
+            status, updated = request("POST", f"/api/v2/tasks/{task_id}", {"title": "改名", "priority": 80})
+            self.assertEqual(status, 200)
+            self.assertEqual(updated["priority"], 80)
+            self.assertEqual(updated["title"], "改名")
 
 
 if __name__ == "__main__":

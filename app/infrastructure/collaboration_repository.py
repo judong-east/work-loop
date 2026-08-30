@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.domain.collaboration import CollaborationTask, Handoff, RoleProfile
+from app.domain.collaboration import CollaborationTask, Goal, Handoff, RoleProfile
 
 from .json_repository import JsonCollection
 
@@ -20,6 +20,9 @@ class CollaborationRepository:
         )
         self.handoffs = JsonCollection(
             root / "handoffs", Handoff.from_dict, lambda value: value.to_dict()
+        )
+        self.goals = JsonCollection(
+            root / "goals", Goal.from_dict, lambda value: value.to_dict()
         )
 
     def list_roles(self) -> list[RoleProfile]:
@@ -45,4 +48,13 @@ class CollaborationRepository:
 
     def save_handoff(self, handoff: Handoff) -> Handoff:
         return self.handoffs.save(handoff, handoff.message_id)
+
+    def list_goals(self, project_id: str) -> list[Goal]:
+        return sorted(
+            (goal for goal in self.goals.list() if goal.project_id == project_id),
+            key=lambda goal: (goal.created_at, goal.goal_id),
+        )
+
+    def save_goal(self, goal: Goal) -> Goal:
+        return self.goals.save(goal, goal.goal_id)
 

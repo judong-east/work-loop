@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from app.application.collaboration import CollaborationService
+from app.application.decomposition import GoalDecomposer
 from app.application.workbench import WorkbenchService
 from app.domain.models import SessionMode, WorkflowDefinition, WorkflowNode
 
@@ -44,6 +45,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/roles$"), "handle_roles"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_session"),
         (re.compile(r"^/api/v2/resources$"), "handle_resources"),
+        (re.compile(r"^/api/v2/events$"), "handle_events"),
     ]
     POST_ROUTES = [
         (re.compile(r"^/api/v2/projects$"), "handle_create_project"),
@@ -51,6 +53,8 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_create_session"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/tasks$"), "handle_create_collaboration_task"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/coordinate$"), "handle_coordinate"),
+        (re.compile(r"^/api/v2/tasks/([\w-]+)$"), "handle_update_collaboration_task"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/goals$"), "handle_decompose_goal"),
         (re.compile(r"^/api/v2/tasks/([\w-]+)/retry$"), "handle_retry_collaboration_task"),
         (re.compile(r"^/api/v2/roles$"), "handle_save_role"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/messages$"), "handle_message"),
@@ -70,6 +74,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/nodes/([\w-]+)$"), "handle_delete_node"),
         (re.compile(r"^/api/v2/workflows/([\w-]+)$"), "handle_delete_workflow"),
         (re.compile(r"^/api/v2/roles/([\w-]+)$"), "handle_delete_role"),
+        (re.compile(r"^/api/v2/goals/([\w-]+)$"), "handle_delete_goal"),
         (re.compile(r"^/api/v2/tasks/([\w-]+)$"), "handle_delete_collaboration_task"),
     ]
 
@@ -234,8 +239,58 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self._send_json(201, task.to_dict())
 
     def handle_coordinate(self, project_id: str, body: dict) -> None:
-        del body
-        self._send_json(200, self.server.collaboration.coordinate(project_id))
+        if not body.get("async"):
+            self._send_json(200, self.server.collaboration.coordinate(project_id))
+            return
+        with self.server._coordination_guard:
+            if (
+                project_id in self.server._coordinating_projects
+                or self.server.collaboration.is_coordinating(project_id)
+            ):
+                raise _HttpError(409, "该项目正在协同执行中。")
+            self.server._coordinating_projects.add(project_id)
+        threading.Thread(
+            target=self._coordinate_worker, args=(project_id,), daemon=True
+        ).start()
+        self._send_json(202, {"started": True, "project_id": project_id})
+
+    def _coordinate_worker(self, project_id: str) -> None:
+        try:
+            self.server.collaboration.coordinate(project_id)
+        except Exception as error:  # noqa: BLE001 - surface background failures in the event log
+            try:
+                self.server.workbench.record_event(
+                    "coordination_failed",
+                    {"project_id": project_id, "error": str(error)},
+                )
+            except OSError:
+                pass
+        finally:
+            with self.server._coordination_guard:
+                self.server._coordinating_projects.discard(project_id)
+
+    def handle_update_collaboration_task(self, task_id: str, body: dict) -> None:
+        self._send_json(200, self.server.collaboration.update_task(task_id, body).to_dict())
+
+    def handle_events(self) -> None:
+        after = int(self.query_params.get("after", ["0"])[0])
+        limit = int(self.query_params.get("limit", ["500"])[0])
+        self._send_json(200, self.server.workbench.read_events(after=after, limit=limit))
+
+    def handle_decompose_goal(self, project_id: str, body: dict) -> None:
+        subtasks = body.get("subtasks")
+        result = self.server.decomposition.decompose(
+            project_id,
+            str(body.get("goal", "")),
+            max_subtasks=int(body.get("max_subtasks", 8)),
+            subtasks=subtasks if isinstance(subtasks, list) else None,
+            auto_coordinate=bool(body.get("auto_coordinate", False)),
+        )
+        self._send_json(201, result)
+
+    def handle_delete_goal(self, goal_id: str) -> None:
+        self.server.collaboration.delete_goal(goal_id)
+        self._send_json(200, {"deleted": goal_id})
 
     def handle_retry_collaboration_task(self, task_id: str, body: dict) -> None:
         del body
@@ -284,6 +339,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"deleted": provider_id})
 
     def handle_delete_model(self, alias: str) -> None:
+        task_references = self.server.collaboration.tasks_using_model(alias)
+        if task_references:
+            raise ValueError(f"model is still used by tasks: {', '.join(task_references)}")
         role_references = self.server.collaboration.roles_using_model(alias)
         if role_references:
             raise ValueError(f"model is still used by roles: {', '.join(role_references)}")
@@ -413,6 +471,16 @@ class WorkloopServer(ThreadingHTTPServer):
             validate_role=self.workbench.validate_role,
             execute_task=self.workbench.execute_role_task,
             validate_project=self.workbench.get_project,
+            validate_model=self.workbench.validate_model_alias,
+        )
+        self._coordination_guard = threading.Lock()
+        self._coordinating_projects: set[str] = set()
+        self.decomposition = GoalDecomposer(
+            gateway=self.workbench.gateway,
+            collaboration=self.collaboration,
+            project_loader=self.workbench.get_project,
+            project_context=WorkbenchService._project_context,
+            workspace_snapshot=self.workbench.workspace_runtime.snapshot,
         )
 
 

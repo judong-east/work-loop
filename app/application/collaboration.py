@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.core.contracts import utc_now
 from app.domain.collaboration import (
     CollaborationTask,
+    Goal,
     Handoff,
     RoleProfile,
     TaskGraph,
@@ -21,6 +22,7 @@ from app.infrastructure.collaboration_repository import CollaborationRepository
 RoleValidator = Callable[[RoleProfile], None]
 TaskExecutor = Callable[[CollaborationTask, RoleProfile, list[Handoff]], TaskOutcome]
 ProjectValidator = Callable[[str], Any]
+ModelValidator = Callable[[str], None]
 
 
 _DEFAULT_ROLES = (
@@ -70,9 +72,10 @@ _DEFAULT_ROLES = (
 class CollaborationService:
     """Coordinate role-bound tasks over a durable dependency graph.
 
-    Read-only roles in the same dependency wave may execute concurrently.
-    Workspace writers and validators execute serially, so one project never has
-    overlapping mutations or validation against a partially written tree.
+    Read-only tasks in the same dependency wave execute concurrently; workspace
+    writers and validators serialize with each other (not with readers), so one
+    project never has overlapping mutations.  Blocked dependents recover
+    automatically once a retried dependency completes.
     """
 
     def __init__(
@@ -82,12 +85,14 @@ class CollaborationService:
         validate_role: RoleValidator,
         execute_task: TaskExecutor,
         validate_project: ProjectValidator,
+        validate_model: ModelValidator | None = None,
         max_workers: int = 4,
     ):
         self.repository = CollaborationRepository(root)
         self.validate_role = validate_role
         self.execute_task = execute_task
         self.validate_project = validate_project
+        self.validate_model = validate_model
         self.max_workers = max(1, min(max_workers, 8))
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
@@ -131,6 +136,12 @@ class CollaborationService:
         self.validate_project(project_id)
         role_id = str(value.get("role_id", ""))
         self.repository.roles.get(role_id)
+        model_alias = self._checked_model_alias(str(value.get("model_alias", "")))
+        goal_id = str(value.get("goal_id", ""))
+        if goal_id:
+            goal = self.repository.goals.get(goal_id)
+            if goal.project_id != project_id:
+                raise ValueError("goal belongs to another project")
         dependencies = value.get("depends_on", [])
         if not isinstance(dependencies, (list, tuple)):
             raise ValueError("task dependencies must be a list")
@@ -141,10 +152,61 @@ class CollaborationService:
             role_id,
             depends_on=(str(item) for item in dependencies),
             priority=int(value.get("priority", 50)),
+            goal_id=goal_id,
+            model_alias=model_alias,
         )
         existing = self.repository.list_tasks(project_id)
         TaskGraph.validate([*existing, task])
         return self.repository.save_task(task)
+
+    def update_task(self, task_id: str, value: dict[str, Any]) -> CollaborationTask:
+        task = self.repository.tasks.get(task_id)
+        if task.status is TaskStatus.RUNNING:
+            raise ValueError("cannot update a running task")
+        role_id = str(value.get("role_id", task.role_id))
+        self.repository.roles.get(role_id)
+        model_alias = self._checked_model_alias(str(value.get("model_alias", task.model_alias)))
+        goal_id = str(value.get("goal_id", task.goal_id))
+        if goal_id:
+            goal = self.repository.goals.get(goal_id)
+            if goal.project_id != task.project_id:
+                raise ValueError("goal belongs to another project")
+        dependencies = value.get("depends_on", task.depends_on)
+        if not isinstance(dependencies, (list, tuple)):
+            raise ValueError("task dependencies must be a list")
+        updated = CollaborationTask(
+            task_id=task.task_id,
+            project_id=task.project_id,
+            title=str(value.get("title", task.title)),
+            description=str(value.get("description", task.description)),
+            role_id=role_id,
+            depends_on=tuple(str(item) for item in dependencies),
+            priority=int(value.get("priority", task.priority)),
+            goal_id=goal_id,
+            model_alias=model_alias,
+            status=task.status,
+            session_id=task.session_id,
+            result=dict(task.result),
+            error=task.error,
+            created_at=task.created_at,
+            updated_at=utc_now(),
+            schema_version=task.schema_version,
+        )
+        updated.validate()
+        others = [
+            item for item in self.repository.list_tasks(task.project_id)
+            if item.task_id != task.task_id
+        ]
+        TaskGraph.validate([*others, updated])
+        return self.repository.save_task(updated)
+
+    def _checked_model_alias(self, alias: str) -> str:
+        if alias and self.validate_model is not None:
+            self.validate_model(alias)
+        return alias
+
+    def tasks_using_model(self, alias: str) -> list[str]:
+        return [task.task_id for task in self.repository.tasks.list() if task.model_alias == alias]
 
     def delete_task(self, task_id: str) -> None:
         task = self.repository.tasks.get(task_id)
@@ -159,6 +221,14 @@ class CollaborationService:
         for handoff in self.repository.list_handoffs(task.project_id):
             if task_id in {handoff.from_task_id, handoff.to_task_id}:
                 self.repository.handoffs.delete(handoff.message_id)
+        if task.goal_id:
+            try:
+                goal = self.repository.goals.get(task.goal_id)
+            except FileNotFoundError:
+                goal = None
+            if goal is not None and task_id in goal.task_ids:
+                goal.task_ids = [item for item in goal.task_ids if item != task_id]
+                self.repository.save_goal(goal)
         self.repository.tasks.delete(task_id)
 
     def retry_task(self, task_id: str) -> CollaborationTask:
@@ -172,6 +242,9 @@ class CollaborationService:
         task.updated_at = utc_now()
         return self.repository.save_task(task)
 
+    def is_coordinating(self, project_id: str) -> bool:
+        return self._lock_for(project_id).locked()
+
     def project_state(self, project_id: str) -> dict[str, Any]:
         tasks = self.list_tasks(project_id)
         counts = {status.value: 0 for status in TaskStatus}
@@ -179,10 +252,29 @@ class CollaborationService:
             counts[task.status.value] += 1
         return {
             "project_id": project_id,
+            "coordinating": self.is_coordinating(project_id),
             "tasks": [task.to_dict() for task in tasks],
             "handoffs": [item.to_dict() for item in self.repository.list_handoffs(project_id)],
+            "goals": [goal.to_dict() for goal in self.repository.list_goals(project_id)],
             "counts": counts,
         }
+
+    def list_goals(self, project_id: str) -> list[Goal]:
+        self.validate_project(project_id)
+        return self.repository.list_goals(project_id)
+
+    def save_goal(self, goal: Goal) -> Goal:
+        return self.repository.save_goal(goal)
+
+    def delete_goal(self, goal_id: str) -> None:
+        goal = self.repository.goals.get(goal_id)
+        referencing = [
+            task.task_id for task in self.repository.list_tasks(goal.project_id)
+            if task.goal_id == goal.goal_id
+        ]
+        if referencing:
+            raise ValueError(f"goal is still referenced by tasks: {', '.join(referencing)}")
+        self.repository.goals.delete(goal_id)
 
     def coordinate(self, project_id: str) -> dict[str, Any]:
         self.validate_project(project_id)
@@ -194,29 +286,55 @@ class CollaborationService:
             while True:
                 tasks = self.repository.list_tasks(project_id)
                 TaskGraph.validate(tasks)
+                self._unblock_recovered(tasks)
                 ready = TaskGraph.ready(tasks)
                 if not ready:
                     break
                 self._run_wave(ready)
             self._block_failed_dependencies(project_id)
-            return self.project_state(project_id)
         finally:
             lock.release()
+        # State is read after the lock is released so callers never observe
+        # ``coordinating: true`` for a run that has already finished.
+        return self.project_state(project_id)
+
+    def _unblock_recovered(self, tasks: list[CollaborationTask]) -> None:
+        failed = {
+            task.task_id for task in tasks
+            if task.status in {TaskStatus.BLOCKED, TaskStatus.FAILED}
+        }
+        for task in tasks:
+            if (
+                task.status is TaskStatus.BLOCKED
+                and task.error == "dependency did not complete"
+                and not set(task.depends_on) & failed
+            ):
+                task.status = TaskStatus.PENDING
+                task.error = ""
+                task.updated_at = utc_now()
+                self.repository.save_task(task)
 
     def _run_wave(self, tasks: list[CollaborationTask]) -> None:
         roles = {role.role_id: role for role in self.list_roles()}
-        read_only = [task for task in tasks if roles[task.role_id].workspace_access is WorkspaceAccess.READ]
-        serialized = [task for task in tasks if roles[task.role_id].workspace_access is not WorkspaceAccess.READ]
-
-        if len(read_only) == 1:
-            self._execute_one(read_only[0], roles[read_only[0].role_id])
-        elif read_only:
-            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(read_only))) as pool:
-                futures = [pool.submit(self._execute_one, task, roles[task.role_id]) for task in read_only]
+        readers = [task for task in tasks if roles[task.role_id].workspace_access is WorkspaceAccess.READ]
+        writers = [task for task in tasks if roles[task.role_id].workspace_access is not WorkspaceAccess.READ]
+        futures = []
+        pool = (
+            ThreadPoolExecutor(max_workers=min(self.max_workers, max(1, len(readers))))
+            if readers else None
+        )
+        try:
+            # Readers run in the pool while writers proceed immediately on this
+            # thread, serialized among themselves but never behind readers.
+            for task in readers:
+                futures.append(pool.submit(self._execute_one, task, roles[task.role_id]))
+            for task in writers:
+                self._execute_one(task, roles[task.role_id])
+        finally:
+            if pool is not None:
                 for future in futures:
                     future.result()
-        for task in serialized:
-            self._execute_one(task, roles[task.role_id])
+                pool.shutdown(wait=True)
 
     def _execute_one(self, task: CollaborationTask, role: RoleProfile) -> None:
         task.status = TaskStatus.RUNNING

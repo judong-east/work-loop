@@ -3,8 +3,9 @@
     roles: [],
     nodes: [],
     models: [],
-    collaboration: { tasks: [], handoffs: [], counts: {} },
+    collaboration: { tasks: [], handoffs: [], goals: [], counts: {} },
     coordinating: false,
+    editingTaskId: "",
   };
 
   const $ = id => document.getElementById(id);
@@ -119,17 +120,20 @@
     const currentProjectId = projectId();
     $("collaborationProjectName").textContent = document.body.dataset.projectName || "未选择项目";
     if (!currentProjectId) {
-      state.collaboration = { tasks: [], handoffs: [], counts: {} };
+      state.collaboration = { tasks: [], handoffs: [], goals: [], counts: {} };
       renderTasks();
       return;
     }
-    const [roles, collaboration] = await Promise.all([
+    const [roles, collaboration, resources] = await Promise.all([
       api("/api/v2/roles"),
       api(`/api/v2/projects/${encodeURIComponent(currentProjectId)}/collaboration`),
+      api("/api/v2/resources"),
     ]);
     state.roles = roles;
     state.collaboration = collaboration;
+    state.models = resources.models;
     renderTasks();
+    renderGoals();
     fillTaskEditorOptions();
   }
 
@@ -149,7 +153,7 @@
             <span class="task-status">${esc(statusLabels[task.status] || task.status)}</span>
             <div class="task-copy">
               <strong>${esc(task.title)}</strong>
-              <span>${esc(roleLabels[task.role_id] || task.role_id)} · 优先级 ${esc(task.priority)}</span>
+              <span>${esc(roleLabels[task.role_id] || task.role_id)} · 优先级 ${esc(task.priority)}${task.model_alias ? ` · 模型 ${esc(task.model_alias)}` : ""}</span>
               <p>${esc(task.description)}</p>
               ${task.depends_on.length ? `<small>依赖：${task.depends_on.map(esc).join("、")}</small>` : ""}
               ${taskResultSummary(task) ? `<small class="task-result">${esc(taskResultSummary(task))}</small>` : ""}
@@ -157,6 +161,7 @@
             </div>
             <span class="row-actions">
               ${["blocked", "failed"].includes(task.status) ? `<button class="button quiet compact" type="button" data-retry-task="${esc(task.task_id)}">重试</button>` : ""}
+              ${task.status !== "running" ? `<button class="icon-button small" type="button" data-edit-task="${esc(task.task_id)}" aria-label="编辑任务">✎</button>` : ""}
               ${task.status !== "running" ? `<button class="icon-button small danger-icon" type="button" data-delete-task="${esc(task.task_id)}" aria-label="删除任务">×</button>` : ""}
             </span>
           </article>
@@ -164,9 +169,14 @@
       : `<div class="list-empty">${projectId() ? "还没有协同任务。" : "请先选择项目。"}</div>`;
     $("coordinateTasks").disabled = state.coordinating || !tasks.some(task => task.status === "pending");
     $("newCollaborationTask").disabled = !projectId();
+    $("decomposeGoal").disabled = !projectId() || state.coordinating || !$("goalInput").value.trim();
     renderHandoffs();
+    renderGoals();
     document.querySelectorAll("[data-retry-task]").forEach(button => {
       button.addEventListener("click", () => retryTask(button.dataset.retryTask));
+    });
+    document.querySelectorAll("[data-edit-task]").forEach(button => {
+      button.addEventListener("click", () => editTask(button.dataset.editTask));
     });
     document.querySelectorAll("[data-delete-task]").forEach(button => {
       button.addEventListener("click", () => deleteTask(button.dataset.deleteTask));
@@ -188,6 +198,59 @@
     return "";
   }
 
+  function renderGoals() {
+    const goals = state.collaboration.goals || [];
+    const tasks = Object.fromEntries((state.collaboration.tasks || []).map(task => [task.task_id, task]));
+    $("goalCount").textContent = goals.length;
+    $("goalList").innerHTML = goals.length
+      ? goals.map(goal => `
+          <div class="goal-row">
+            <div class="goal-copy">
+              <strong>${esc(goal.summary || goal.goal)}</strong>
+              <p>${esc(goal.goal)}</p>
+              <small>${(goal.task_ids || []).map(id => esc(tasks[id]?.title || id)).join(" → ") || "暂无子任务"}</small>
+            </div>
+            <span class="row-actions">
+              <button class="icon-button small danger-icon" type="button" data-delete-goal="${esc(goal.goal_id)}" aria-label="删除目标">×</button>
+            </span>
+          </div>
+        `).join("")
+      : '<div class="list-empty">拆分后的大目标会显示在这里。</div>';
+    document.querySelectorAll("[data-delete-goal]").forEach(button => {
+      button.addEventListener("click", () => deleteGoal(button.dataset.deleteGoal));
+    });
+  }
+
+  async function decomposeGoal() {
+    const goal = $("goalInput").value.trim();
+    if (!projectId() || !goal || state.coordinating) return;
+    $("decomposeGoal").disabled = true;
+    $("decomposeGoal").textContent = "拆分中…";
+    try {
+      const result = await post(`/api/v2/projects/${encodeURIComponent(projectId())}/goals`, { goal });
+      $("goalInput").value = "";
+      await refreshTasks();
+      toast(`已拆分为 ${result.task_ids.length} 个子任务`);
+    } catch (error) {
+      toast(error.message);
+      await refreshTasks();
+    } finally {
+      $("decomposeGoal").textContent = "拆分为子任务";
+      renderTasks();
+    }
+  }
+
+  async function deleteGoal(goalId) {
+    if (!confirm("删除该目标记录？（仅当其子任务全部删除后可删）")) return;
+    try {
+      await remove(`/api/v2/goals/${encodeURIComponent(goalId)}`);
+      await refreshTasks();
+      toast("目标记录已删除");
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
   function renderHandoffs() {
     const handoffs = state.collaboration.handoffs || [];
     const tasks = Object.fromEntries((state.collaboration.tasks || []).map(task => [task.task_id, task.title]));
@@ -202,13 +265,30 @@
       : '<div class="list-empty">任务完成后，交接记录会显示在这里。</div>';
   }
 
-  function fillTaskEditorOptions() {
+  function fillTaskEditorOptions(task = null) {
     $("collaborationTaskRole").innerHTML = state.roles.map(role => (
-      option(role.role_id, `${role.label} · ${role.model_alias || "自动模型"}`, "analyst")
+      option(role.role_id, `${role.label} · ${role.model_alias || "自动模型"}`, task?.role_id || "analyst")
     )).join("");
-    $("collaborationTaskDependencies").innerHTML = (state.collaboration.tasks || []).map(task => (
-      option(task.task_id, `${task.title} · ${task.status}`)
-    )).join("");
+    $("collaborationTaskModel").innerHTML = option("", "跟随角色模型", task?.model_alias || "")
+      + state.models.map(model => option(model.alias, model.alias, task?.model_alias)).join("");
+    $("collaborationTaskDependencies").innerHTML = (state.collaboration.tasks || [])
+      .filter(item => item.task_id !== task?.task_id)
+      .map(item => option(item.task_id, `${item.title} · ${item.status}`, task && task.depends_on.includes(item.task_id) ? item.task_id : ""))
+      .join("");
+  }
+
+  function editTask(taskId) {
+    const task = (state.collaboration.tasks || []).find(item => item.task_id === taskId);
+    if (!task) return;
+    state.editingTaskId = taskId;
+    $("collaborationTaskForm").reset();
+    fillTaskEditorOptions(task);
+    $("collaborationTaskTitle").value = task.title;
+    $("collaborationTaskDescription").value = task.description;
+    $("collaborationTaskPriority").value = String(task.priority);
+    $("collaborationTaskFormTitle").textContent = "编辑协同任务";
+    $("collaborationTaskSubmit").textContent = "保存任务";
+    $("collaborationTaskForm").classList.remove("hidden");
   }
 
   async function retryTask(taskId) {
@@ -238,19 +318,39 @@
     $("coordinateTasks").textContent = "协同执行中…";
     renderTasks();
     try {
-      state.collaboration = await post(
+      const started = await post(
         `/api/v2/projects/${encodeURIComponent(projectId())}/coordinate`,
-        {},
+        { async: true },
       );
-      renderTasks();
-      toast("本轮协同执行完成");
+      if (started.started) {
+        await pollCoordination();
+        toast("本轮协同执行完成");
+      } else {
+        state.collaboration = started;
+        renderTasks();
+        toast("本轮协同执行完成");
+      }
     } catch (error) {
       toast(error.message);
-      await refreshTasks();
     } finally {
       state.coordinating = false;
       $("coordinateTasks").textContent = "运行协同";
-      renderTasks();
+      await refreshTasks().catch(() => renderTasks());
+    }
+  }
+
+  async function pollCoordination() {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try {
+        state.collaboration = await api(
+          `/api/v2/projects/${encodeURIComponent(projectId())}/collaboration`,
+        );
+        renderTasks();
+      } catch (error) {
+        return;
+      }
+      if (!state.collaboration.coordinating) return;
     }
   }
 
@@ -282,33 +382,49 @@
   });
 
   $("newCollaborationTask").addEventListener("click", () => {
+    state.editingTaskId = "";
     $("collaborationTaskForm").reset();
     $("collaborationTaskPriority").value = "50";
     fillTaskEditorOptions();
+    $("collaborationTaskFormTitle").textContent = "新建协同任务";
+    $("collaborationTaskSubmit").textContent = "创建任务";
     $("collaborationTaskForm").classList.remove("hidden");
   });
   $("collaborationTaskForm").addEventListener("submit", async event => {
     event.preventDefault();
+    const dependencies = [...$("collaborationTaskDependencies").selectedOptions].map(item => item.value);
+    const payload = {
+      title: $("collaborationTaskTitle").value,
+      description: $("collaborationTaskDescription").value,
+      role_id: $("collaborationTaskRole").value,
+      model_alias: $("collaborationTaskModel").value,
+      priority: Number($("collaborationTaskPriority").value),
+      depends_on: dependencies,
+    };
     try {
-      const dependencies = [...$("collaborationTaskDependencies").selectedOptions].map(item => item.value);
-      await post(`/api/v2/projects/${encodeURIComponent(projectId())}/tasks`, {
-        title: $("collaborationTaskTitle").value,
-        description: $("collaborationTaskDescription").value,
-        role_id: $("collaborationTaskRole").value,
-        priority: Number($("collaborationTaskPriority").value),
-        depends_on: dependencies,
-      });
+      if (state.editingTaskId) {
+        await post(`/api/v2/tasks/${encodeURIComponent(state.editingTaskId)}`, payload);
+        toast("协同任务已更新");
+      } else {
+        await post(`/api/v2/projects/${encodeURIComponent(projectId())}/tasks`, payload);
+        toast("协同任务已创建");
+      }
+      state.editingTaskId = "";
       $("collaborationTaskForm").classList.add("hidden");
       await refreshTasks();
-      toast("协同任务已创建");
     } catch (error) {
       toast(error.message);
     }
   });
   document.querySelector("[data-cancel-collaboration-task]").addEventListener("click", () => {
+    state.editingTaskId = "";
     $("collaborationTaskForm").classList.add("hidden");
   });
   $("coordinateTasks").addEventListener("click", coordinate);
+  $("decomposeGoal").addEventListener("click", decomposeGoal);
+  $("goalInput").addEventListener("input", () => {
+    $("decomposeGoal").disabled = !projectId() || state.coordinating || !$("goalInput").value.trim();
+  });
 
   document.querySelectorAll("[data-management-tab]").forEach(button => {
     button.addEventListener("click", async () => {
