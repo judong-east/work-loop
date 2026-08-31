@@ -110,7 +110,12 @@ class ResourceCenter:
         return provider, model
 
     def default_alias(self, capability: str = "general") -> str:
-        models = [item for item in self.list_models() if item.enabled]
+        enabled_providers = {item.provider_id for item in self.list_providers() if item.enabled}
+        models = [
+            item
+            for item in self.list_models()
+            if item.enabled and item.provider_id in enabled_providers
+        ]
         matched = [item for item in models if capability in item.capabilities]
         selected = matched[0] if matched else (models[0] if models else None)
         return selected.alias if selected is not None else ""
@@ -155,9 +160,9 @@ class ResourceCenter:
 
     def _write_secret(self, provider_id: str, api_key: str) -> None:
         if len(api_key.strip()) < 8:
-            raise ValueError("api key is too short")
+            raise ValueError("credential is too short")
         if any(char in api_key for char in "\r\n"):
-            raise ValueError("api key cannot contain newlines")
+            raise ValueError("credential cannot contain newlines")
         path = self.secrets_dir / f"{provider_id}.key"
         write_text_atomic(path, api_key.strip() + "\n")
         try:

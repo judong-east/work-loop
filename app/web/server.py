@@ -35,7 +35,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     GET_ROUTES = [
         (re.compile(r"^/$"), "handle_index"),
         (re.compile(r"^/workbench/?$"), "handle_workbench"),
-        (re.compile(r"^/static/(workbench\.css|workbench\.js|collaboration\.js)$"), "handle_asset"),
+        (re.compile(r"^/static/(workbench\.css|workbench\.js|collaboration\.js|app-icon\.png|logo-wide\.png|logo\.svg)$"), "handle_asset"),
         (re.compile(r"^/api/v2/catalog$"), "handle_catalog"),
         (re.compile(r"^/api/v2/strategies$"), "handle_strategies"),
         (re.compile(r"^/api/v2/projects$"), "handle_projects"),
@@ -170,7 +170,14 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def handle_asset(self, filename: str) -> None:
-        content_type = "text/css; charset=utf-8" if filename.endswith(".css") else "text/javascript; charset=utf-8"
+        if filename.endswith(".css"):
+            content_type = "text/css; charset=utf-8"
+        elif filename.endswith(".svg"):
+            content_type = "image/svg+xml"
+        elif filename.endswith(".png"):
+            content_type = "image/png"
+        else:
+            content_type = "text/javascript; charset=utf-8"
         self._send_file(STATIC_DIR / filename, content_type)
 
     def handle_catalog(self) -> None:
@@ -472,6 +479,7 @@ class WorkloopServer(ThreadingHTTPServer):
             execute_task=self.workbench.execute_role_task,
             validate_project=self.workbench.get_project,
             validate_model=self.workbench.validate_model_alias,
+            default_model_for_node=self.workbench.default_model_for_node,
         )
         self._coordination_guard = threading.Lock()
         self._coordinating_projects: set[str] = set()

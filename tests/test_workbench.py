@@ -142,6 +142,30 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(resolved_provider.provider_id, "vendor")
             self.assertEqual(resolved_model.model, "fast-1")
 
+    def test_default_role_model_uses_node_capability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp))
+            service.save_provider({
+                "provider_id": "local",
+                "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "auth_type": "none",
+            })
+            service.save_model({
+                "alias": "general-model",
+                "provider_id": "local",
+                "model": "general",
+                "capabilities": ["general"],
+            })
+            service.save_model({
+                "alias": "coder-model",
+                "provider_id": "local",
+                "model": "coder",
+                "capabilities": ["coding"],
+            })
+
+            self.assertEqual(service.default_model_for_node("implementation"), "coder-model")
+
     def test_provider_supports_multiple_protocol_models_and_auth_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
             center = ResourceCenter(Path(tmp))
@@ -266,6 +290,31 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(opener.call_args.args[0].headers["X-auth-token"], "Key secret-key-value")
             raw = (Path(tmp) / "providers.json").read_text(encoding="utf-8")
             self.assertNotIn("secret-key-value", raw)
+
+    def test_token_basic_and_query_auth_are_applied(self):
+        from app.domain.models import ModelProvider
+
+        token_headers = OpenAICompatibleGateway._headers(
+            ModelProvider("token", "Token", "https://token.test/v1", auth_type="token"),
+            "secret-token", "openai",
+        )
+        self.assertEqual(token_headers["Authorization"], "Token secret-token")
+
+        basic_headers = OpenAICompatibleGateway._headers(
+            ModelProvider(
+                "basic", "Basic", "https://basic.test/v1", auth_type="basic",
+                metadata={"username": "workloop"},
+            ),
+            "secret-password", "openai",
+        )
+        self.assertEqual(basic_headers["Authorization"], "Basic d29ya2xvb3A6c2VjcmV0LXBhc3N3b3Jk")
+
+        query_provider = ModelProvider(
+            "query", "Query", "https://query.test/v1?region=cn", auth_type="query_param",
+            auth_header="api_key", metadata={"query_param": "api_key"},
+        )
+        request_url = OpenAICompatibleGateway._request_url(query_provider, "secret-key", "openai")
+        self.assertEqual(request_url, "https://query.test/v1/chat/completions?region=cn&api_key=secret-key")
 
     def test_gateway_probe_supports_openai_and_claude_requests(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,11 +1,12 @@
-"""Minimal OpenAI-compatible endpoint for driving the native harness locally.
+"""Minimal OpenAI-compatible endpoint for driving Workloop V2 locally.
 
-Serves ``POST /v1/chat/completions`` with scripted responses for the three
-Workloop roles (planner / executor / reviewer), including a real write_file
-tool-call round so the in-process tool loop is exercised end to end. Use it
-to demo or develop the native runtime without a paid API key:
+Serves ``POST /v1/chat/completions`` with direct structured JSON responses for
+the built-in Workloop node contracts. Implementation responses use the V2
+``file_changes`` field, so the endpoint exercises the same atomic workspace
+publish path as a real model. Use it to demo or develop the native runtime
+without a paid API key:
 
-    py demo/mock_openai_server.py --port 8977
+    python demo/mock_openai_server.py --port 8977
 
 然后在控制台「接入模型」里填 Base URL http://127.0.0.1:8977/v1，
 模型名任意（例如 mock-model），API Key 任意非空字符串。
@@ -15,12 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-_CRITERIA_PATTERN = re.compile(r"\"acceptance_criteria\"\s*:\s*\[(.*?)\]", re.S)
-_COMMANDS_PATTERN = re.compile(r"\"available_validation_commands\"\s*:\s*\[(.*?)\]", re.S)
 
 HELLO_CONTENT = (
     "def greet(name):\n"
@@ -32,16 +28,8 @@ HELLO_CONTENT = (
 )
 
 
-def _string_list(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    return [item for item in re.findall(r"\"((?:[^\"\\\\]|\\\\.)*)\"", raw)]
-
-
-def _completion(content: str, tool_calls: list[dict] | None = None) -> dict:
+def _completion(content: str) -> dict:
     message: dict = {"role": "assistant", "content": content}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
     return {
         "id": "chatcmpl-mock",
         "object": "chat.completion",
@@ -50,80 +38,83 @@ def _completion(content: str, tool_calls: list[dict] | None = None) -> dict:
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": "tool_calls" if tool_calls else "stop",
+                "finish_reason": "stop",
             }
         ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }
 
 
-def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
-    return {
-        "id": call_id,
-        "type": "function",
-        "function": {
-            "name": name,
-            "arguments": json.dumps(arguments, ensure_ascii=False),
-        },
-    }
-
-
 def respond(messages: list[dict]) -> dict:
-    """Pick a scripted reply from the role named in the prompt."""
-    text = "\n".join(
-        str(message.get("content") or "") for message in messages if isinstance(message, dict)
-    )
-    ran_tools = any(message.get("role") == "tool" for message in messages)
+    """Pick a scripted reply from the node type in the V2 JSON request."""
+    payload = _request_payload(messages)
+    node_type = str(payload.get("node_type", ""))
+    context = payload.get("shared_context", {})
+    inputs = context.get("inputs", {}) if isinstance(context, dict) else {}
+    project = inputs.get("project", {}) if isinstance(inputs, dict) else {}
+    commands = project.get("validation_commands", []) if isinstance(project, dict) else []
 
-    if "ExecutionPlan" in text:
-        commands = _string_list(_COMMANDS_PATTERN.search(text).group(1) if _COMMANDS_PATTERN.search(text) else None)
-        plan = {
-            "requirement_understanding": "在项目中新增 hello.py，提供 greet(name) 问候函数（mock 计划）。",
-            "non_goals": [],
-            "files_and_symbols": ["hello.py: greet"],
-            "steps": ["创建 hello.py，实现 greet(name) 并附最小可运行入口"],
-            "constraints": [],
+    if node_type == "requirement":
+        return _completion(json.dumps({
+            "understanding": "在项目中新增 hello.py，提供 greet(name) 问候函数（mock 需求）。",
             "acceptance_criteria": [
                 "hello.py 定义了 greet 函数",
                 "greet('世界') 返回包含『世界』的问候文本",
             ],
-            "required_tests": commands[:1] or ["workloop-check"],
-            "risks": [],
             "open_questions": [],
-        }
-        return _completion(json.dumps(plan, ensure_ascii=False))
+        }, ensure_ascii=False))
 
-    if "ExecutionResult" in text:
-        if ran_tools:
-            result = {
-                "completed_steps": ["创建 hello.py 并实现 greet"],
-                "modified_files": ["hello.py"],
-                "tests": [],
-                "deviations": [],
-                "remaining_risks": [],
-                "next_steps": [],
-            }
-            return _completion(json.dumps(result, ensure_ascii=False))
-        return _completion(
-            "",
-            tool_calls=[
-                _tool_call("call-write", "write_file", {"path": "hello.py", "content": HELLO_CONTENT})
-            ],
-        )
+    if node_type == "planning":
+        required_tests = [list(command) for command in commands[:1]] if isinstance(commands, list) else []
+        return _completion(json.dumps({
+            "steps": ["创建 hello.py，实现 greet(name) 并附最小可运行入口"],
+            "risks": [],
+            "artifacts": {"required_tests": required_tests},
+        }, ensure_ascii=False))
 
-    if "ReviewResult" in text or "verdict" in text:
-        match = _CRITERIA_PATTERN.search(text)
-        criteria = _string_list(match.group(1) if match else None) or ["mock 验收"]
-        review = {
+    if node_type == "implementation":
+        return _completion(json.dumps({
+            "changes": "创建 hello.py 并实现 greet(name)。",
+            "file_changes": [{"operation": "write", "path": "hello.py", "content": HELLO_CONTENT}],
+            "artifacts": {},
+            "decisions": [],
+        }, ensure_ascii=False))
+
+    if node_type == "testing":
+        return _completion(json.dumps({
+            "checks": [],
+            "risks": [],
+            "decisions": [],
+        }, ensure_ascii=False))
+
+    if node_type == "review":
+        return _completion(json.dumps({
             "verdict": "pass",
-            "acceptance": [{"criterion": criterion, "passed": True} for criterion in criteria],
             "issues": [],
-            "recommended_tests": [],
-            "summary": "mock 审核通过：实现与计划一致。",
-        }
-        return _completion(json.dumps(review, ensure_ascii=False))
+            "decisions": ["mock 审核通过：实现与计划一致。"],
+        }, ensure_ascii=False))
 
-    return _completion("ok")
+    if node_type == "tool":
+        return _completion(json.dumps({"result": "ok"}, ensure_ascii=False))
+
+    return _completion(json.dumps({"result": "ok"}, ensure_ascii=False))
+
+
+def _parse_json(content: str) -> object:
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+def _request_payload(messages: list[dict]) -> dict:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        parsed = _parse_json(str(message.get("content") or ""))
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 class Handler(BaseHTTPRequestHandler):

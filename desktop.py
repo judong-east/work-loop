@@ -74,7 +74,7 @@ def main() -> None:
         min_size=(1100, 700),
         frameless=True,
         easy_drag=False,
-        background_color="#f3f6f9",
+        background_color="#eef2f5",
     )
     controls.attach(window)
     webview.start()

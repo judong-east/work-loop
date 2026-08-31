@@ -48,6 +48,10 @@ class RoleProfile:
         self.node_type = _safe_id(self.node_type, "node_type")
         if not self.label.strip():
             raise ValueError("role label is required")
+        self.model_alias = self.model_alias.strip()
+        if not self.model_alias:
+            raise ValueError("role model_alias is required; every role must bind exactly one model")
+        _safe_id(self.model_alias, "model_alias")
         if len(self.instructions) > 50_000:
             raise ValueError("role instructions are too long")
         if not self.capabilities or not all(isinstance(item, str) and item for item in self.capabilities):
@@ -99,6 +103,7 @@ class CollaborationTask:
     depends_on: tuple[str, ...] = ()
     priority: int = 50
     goal_id: str = ""
+    # Read-compatible legacy field; active routing is always role-bound.
     model_alias: str = ""
     status: TaskStatus = TaskStatus.PENDING
     session_id: str = ""

@@ -343,6 +343,7 @@ class WorkbenchService:
         return self.workspace_runtime.snapshot(self.get_project(project_id))
 
     def validate_role(self, role: RoleProfile) -> None:
+        role.validate()
         self.registry.get(role.node_type)
         self.validate_model_alias(role.model_alias)
         if role.node_type == "implementation" and role.workspace_access is not WorkspaceAccess.WRITE:
@@ -353,8 +354,24 @@ class WorkbenchService:
             raise ValueError("testing roles require validate workspace access")
 
     def validate_model_alias(self, alias: str) -> None:
-        if alias and alias not in {item.alias for item in self.resources.list_models()}:
-            raise ValueError(f"unknown model alias: {alias}")
+        if not alias:
+            raise ValueError("model alias is required")
+        try:
+            self.resources.resolve(alias)
+        except KeyError as error:
+            raise ValueError(f"unknown model alias: {alias}") from error
+
+    def default_model_for_node(self, node_type: str) -> str:
+        definition = self.registry.get(node_type)
+        models = self.resources.list_models()
+        for capability in definition.capabilities:
+            alias = self.resources.default_alias(capability)
+            if alias and any(
+                item.alias == alias and capability in item.capabilities
+                for item in models
+            ):
+                return alias
+        return self.resources.default_alias()
 
     def execute_role_task(
         self,
@@ -364,23 +381,7 @@ class WorkbenchService:
     ) -> TaskOutcome:
         self.validate_role(role)
         project = self.get_project(task.project_id)
-        effective_model = task.model_alias or role.model_alias
-        if isinstance(self.gateway, OpenAICompatibleGateway):
-            effective_model = (
-                effective_model
-                or project.default_model
-                or self.resources.default_alias(role.node_type)
-            )
-            if not effective_model:
-                error = f"任务 {task.title} 没有可用模型，请先为任务、角色或项目绑定模型。"
-                self._record_event(OrchestrationEvent(
-                    "node_failed",
-                    session_id="",
-                    node_id=task.task_id,
-                    status="failed",
-                    payload={"task_id": task.task_id, "error": error},
-                ))
-                return TaskOutcome(TaskStatus.BLOCKED, error=error)
+        effective_model = role.model_alias
         policy = TaskPolicy.from_dict({
             "task_type": role.node_type,
             "strategy": infer_strategy(task.description),

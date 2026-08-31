@@ -28,6 +28,7 @@ def make_service(root: Path, execute_task, validate_model=None) -> Collaboration
         validate_project=lambda project_id: project_id == "PROJECT-1"
         or (_ for _ in ()).throw(KeyError(project_id)),
         validate_model=validate_model,
+        default_model_for_node=lambda _node_type: "known-model",
     )
 
 
@@ -185,14 +186,21 @@ class CollaborationTest(unittest.TestCase):
                 "provider_id": "local",
                 "model": "analysis-model",
             })
+            workbench.save_model({
+                "alias": "planning-model",
+                "provider_id": "local",
+                "model": "planning-model",
+            })
             project = workbench.create_project("协同项目")
             service = CollaborationService(
                 root / "data",
                 validate_role=workbench.validate_role,
                 execute_task=workbench.execute_role_task,
                 validate_project=workbench.get_project,
+                default_model_for_node=lambda _node_type: "analysis-model",
             )
             service.save_role({"role_id": "analyst", "model_alias": "analysis-model"})
+            service.save_role({"role_id": "architect", "model_alias": "planning-model"})
             requirement = service.create_task(project.project_id, {
                 "title": "需求", "description": "整理需求", "role_id": "analyst",
             })
@@ -204,7 +212,7 @@ class CollaborationTest(unittest.TestCase):
             state = service.coordinate(project.project_id)
 
             self.assertEqual(state["counts"]["completed"], 2)
-            self.assertEqual(selected_models, ["analysis-model", ""])
+            self.assertEqual(selected_models, ["analysis-model", "planning-model"])
             self.assertEqual(planning_handoffs[0]["from_task_id"], requirement.task_id)
             self.assertEqual(workbench.list_sessions(project.project_id), [])
             self.assertEqual(
@@ -230,6 +238,16 @@ class CollaborationTest(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=5) as response:
                     return response.status, json.loads(response.read().decode())
 
+            status, roles = request("GET", "/api/v2/roles")
+            self.assertEqual(status, 200)
+            self.assertEqual(roles, [])
+            request("POST", "/api/v2/resources/providers", {
+                "provider_id": "local", "label": "Local",
+                "base_url": "http://127.0.0.1:9/v1", "auth_type": "none",
+            })
+            request("POST", "/api/v2/resources/models", {
+                "alias": "local-model", "provider_id": "local", "model": "local-model",
+            })
             status, roles = request("GET", "/api/v2/roles")
             self.assertEqual(status, 200)
             self.assertEqual({item["role_id"] for item in roles}, {
@@ -305,6 +323,19 @@ class WaveConcurrencyTest(unittest.TestCase):
 
 
 class UpdateTaskTest(unittest.TestCase):
+    def test_role_requires_exactly_one_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(
+                Path(tmp),
+                lambda task, role, handoffs: TaskOutcome(TaskStatus.COMPLETED),
+            )
+            with self.assertRaisesRegex(ValueError, "role model_alias is required"):
+                service.save_role({
+                    "role_id": "unbound",
+                    "label": "未绑定角色",
+                    "node_type": "requirement",
+                })
+
     def test_update_task_fields_dependencies_and_protections(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = make_service(Path(tmp), lambda task, role, handoffs: TaskOutcome(TaskStatus.COMPLETED))
@@ -331,7 +362,7 @@ class UpdateTaskTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "running"):
                 service.update_task(second.task_id, {"title": "X"})
 
-    def test_model_alias_is_validated_on_create_and_update(self):
+    def test_task_model_is_fixed_by_role(self):
         def validator(alias: str) -> None:
             if alias != "known-model":
                 raise ValueError(f"unknown model alias: {alias}")
@@ -342,15 +373,15 @@ class UpdateTaskTest(unittest.TestCase):
                 lambda task, role, handoffs: TaskOutcome(TaskStatus.COMPLETED),
                 validate_model=validator,
             )
-            with self.assertRaisesRegex(ValueError, "unknown model alias: ghost"):
+            with self.assertRaisesRegex(ValueError, "fixed by its role"):
                 service.create_task("PROJECT-1", {
-                    "title": "A", "description": "d", "role_id": "analyst", "model_alias": "ghost",
+                    "title": "A", "description": "d", "role_id": "analyst", "model_alias": "known-model",
                 })
             task = service.create_task("PROJECT-1", {
-                "title": "A", "description": "d", "role_id": "analyst", "model_alias": "known-model",
+                "title": "A", "description": "d", "role_id": "analyst",
             })
-            self.assertEqual(task.model_alias, "known-model")
-            with self.assertRaisesRegex(ValueError, "unknown model alias: other"):
+            self.assertEqual(task.model_alias, "")
+            with self.assertRaisesRegex(ValueError, "fixed by its role"):
                 service.update_task(task.task_id, {"model_alias": "other"})
 
 
@@ -376,10 +407,17 @@ class CoordinateApiAsyncTest(unittest.TestCase):
 
             _, project = request("POST", "/api/v2/projects", {"name": "Async"})
             project_id = project["project_id"]
+            request("POST", "/api/v2/resources/providers", {
+                "provider_id": "local", "label": "Local",
+                "base_url": "http://127.0.0.1:9/v1", "auth_type": "none",
+            })
+            request("POST", "/api/v2/resources/models", {
+                "alias": "local-model", "provider_id": "local", "model": "local-model",
+            })
             _, task = request(
                 "POST",
                 f"/api/v2/projects/{project_id}/tasks",
-                {"title": "分析", "description": "没有模型会阻塞", "role_id": "analyst"},
+                {"title": "分析", "description": "模型调用失败会阻塞", "role_id": "analyst"},
             )
             task_id = task["task_id"]
 

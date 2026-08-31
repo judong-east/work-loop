@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -63,12 +65,12 @@ class OpenAICompatibleGateway:
         protocol = model.protocol or provider.protocols[0]
         credential = self.resources.credential(provider.provider_id)
         if provider.auth_type != "none" and not credential:
-            raise ValueError(f"供应商 {provider.label} 尚未配置认证密钥。")
+            raise ValueError(f"供应商 {provider.label} 尚未配置认证凭据。")
 
         messages = self._messages(node, context)
         payload = self._payload(protocol, model, messages)
         request = urllib.request.Request(
-            self._endpoint(provider.base_url, protocol),
+            self._request_url(provider, credential, protocol),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers=self._headers(provider, credential, protocol),
@@ -94,7 +96,7 @@ class OpenAICompatibleGateway:
         if provider.auth_type != "none" and not credential:
             return {
                 "ok": False, "alias": model.alias, "protocol": protocol,
-                "error_type": "authentication_missing", "error": "尚未配置认证密钥。",
+                "error_type": "authentication_missing", "error": "尚未配置认证凭据。",
             }
         if protocol == "claude":
             payload: dict[str, Any] = {
@@ -109,7 +111,7 @@ class OpenAICompatibleGateway:
                 "max_tokens": 1,
             }
         request = urllib.request.Request(
-            self._endpoint(provider.base_url, protocol),
+            self._request_url(provider, credential, protocol),
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
             headers=self._headers(provider, credential, protocol),
@@ -201,19 +203,40 @@ class OpenAICompatibleGateway:
             headers["Authorization"] = f"{prefix} {credential}".strip()
         elif provider.auth_type == "api_key":
             headers["x-api-key"] = credential
-        else:
+        elif provider.auth_type == "token":
+            prefix = provider.auth_prefix.strip()
+            if not prefix or prefix.lower() == "bearer":
+                prefix = "Token"
+            headers["Authorization"] = f"{prefix} {credential}".strip()
+        elif provider.auth_type == "basic":
+            username = str(provider.metadata.get("username", ""))
+            encoded = base64.b64encode(f"{username}:{credential}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {encoded}"
+        elif provider.auth_type == "custom_header":
             value = f"{provider.auth_prefix.strip()} {credential}".strip()
             headers[provider.auth_header] = value
         return headers
 
+    @classmethod
+    def _request_url(cls, provider: ModelProvider, credential: str, protocol: str) -> str:
+        endpoint = cls._endpoint(provider.base_url, protocol)
+        if provider.auth_type != "query_param":
+            return endpoint
+        parts = urllib.parse.urlsplit(endpoint)
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        query.append((provider.auth_header, credential))
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query), parts.fragment))
+
     @staticmethod
     def _endpoint(base_url: str, protocol: str) -> str:
-        value = base_url.rstrip("/")
+        parts = urllib.parse.urlsplit(base_url.rstrip("/"))
+        path = parts.path.rstrip("/")
         if protocol == "claude":
-            if value.endswith("/messages"):
-                return value
-            return value + ("/messages" if value.endswith("/v1") else "/v1/messages")
-        return value if value.endswith("/chat/completions") else value + "/chat/completions"
+            if not path.endswith("/messages"):
+                path += "/messages" if path.endswith("/v1") else "/v1/messages"
+        elif not path.endswith("/chat/completions"):
+            path += "/chat/completions"
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
     @staticmethod
     def _content(raw: dict[str, Any], protocol: str) -> str:

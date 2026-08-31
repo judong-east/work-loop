@@ -23,6 +23,7 @@ RoleValidator = Callable[[RoleProfile], None]
 TaskExecutor = Callable[[CollaborationTask, RoleProfile, list[Handoff]], TaskOutcome]
 ProjectValidator = Callable[[str], Any]
 ModelValidator = Callable[[str], None]
+DefaultModelForNode = Callable[[str], str]
 
 
 _DEFAULT_ROLES = (
@@ -86,6 +87,7 @@ class CollaborationService:
         execute_task: TaskExecutor,
         validate_project: ProjectValidator,
         validate_model: ModelValidator | None = None,
+        default_model_for_node: DefaultModelForNode | None = None,
         max_workers: int = 4,
     ):
         self.repository = CollaborationRepository(root)
@@ -93,12 +95,14 @@ class CollaborationService:
         self.execute_task = execute_task
         self.validate_project = validate_project
         self.validate_model = validate_model
+        self.default_model_for_node = default_model_for_node
         self.max_workers = max(1, min(max_workers, 8))
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._ensure_default_roles()
 
     def list_roles(self) -> list[RoleProfile]:
+        self._ensure_default_roles()
         order = {value["role_id"]: index for index, value in enumerate(_DEFAULT_ROLES)}
         return sorted(
             self.repository.list_roles(),
@@ -109,10 +113,12 @@ class CollaborationService:
         role_id = str(value.get("role_id", ""))
         try:
             current = self.repository.roles.get(role_id).to_dict()
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             current = {}
         role = RoleProfile.from_dict({**current, **value, "updated_at": utc_now()})
         self.validate_role(role)
+        if self.validate_model is not None:
+            self.validate_model(role.model_alias)
         return self.repository.save_role(role)
 
     def delete_role(self, role_id: str) -> None:
@@ -123,10 +129,11 @@ class CollaborationService:
         self.repository.roles.delete(role_id)
 
     def roles_using_model(self, model_alias: str) -> list[str]:
-        return [role.role_id for role in self.list_roles() if role.model_alias == model_alias]
+        return [role.role_id for role in self.repository.roles.list() if role.model_alias == model_alias]
 
     def roles_using_node(self, node_type: str) -> list[str]:
-        return [role.role_id for role in self.list_roles() if role.node_type == node_type]
+        # Reference checks must not materialize lazy default roles as a side effect.
+        return [role.role_id for role in self.repository.roles.list() if role.node_type == node_type]
 
     def list_tasks(self, project_id: str) -> list[CollaborationTask]:
         self.validate_project(project_id)
@@ -134,9 +141,10 @@ class CollaborationService:
 
     def create_task(self, project_id: str, value: dict[str, Any]) -> CollaborationTask:
         self.validate_project(project_id)
+        self._ensure_default_roles()
         role_id = str(value.get("role_id", ""))
-        self.repository.roles.get(role_id)
-        model_alias = self._checked_model_alias(str(value.get("model_alias", "")))
+        role = self.repository.roles.get(role_id)
+        self._reject_task_model_override(value)
         goal_id = str(value.get("goal_id", ""))
         if goal_id:
             goal = self.repository.goals.get(goal_id)
@@ -153,7 +161,6 @@ class CollaborationService:
             depends_on=(str(item) for item in dependencies),
             priority=int(value.get("priority", 50)),
             goal_id=goal_id,
-            model_alias=model_alias,
         )
         existing = self.repository.list_tasks(project_id)
         TaskGraph.validate([*existing, task])
@@ -164,8 +171,8 @@ class CollaborationService:
         if task.status is TaskStatus.RUNNING:
             raise ValueError("cannot update a running task")
         role_id = str(value.get("role_id", task.role_id))
-        self.repository.roles.get(role_id)
-        model_alias = self._checked_model_alias(str(value.get("model_alias", task.model_alias)))
+        role = self.repository.roles.get(role_id)
+        self._reject_task_model_override(value)
         goal_id = str(value.get("goal_id", task.goal_id))
         if goal_id:
             goal = self.repository.goals.get(goal_id)
@@ -183,7 +190,7 @@ class CollaborationService:
             depends_on=tuple(str(item) for item in dependencies),
             priority=int(value.get("priority", task.priority)),
             goal_id=goal_id,
-            model_alias=model_alias,
+            model_alias="",
             status=task.status,
             session_id=task.session_id,
             result=dict(task.result),
@@ -200,12 +207,19 @@ class CollaborationService:
         TaskGraph.validate([*others, updated])
         return self.repository.save_task(updated)
 
-    def _checked_model_alias(self, alias: str) -> str:
-        if alias and self.validate_model is not None:
-            self.validate_model(alias)
-        return alias
+    @staticmethod
+    def _reject_task_model_override(value: dict[str, Any]) -> None:
+        if "model_alias" not in value:
+            return
+        requested = str(value.get("model_alias", "")).strip()
+        if requested:
+            raise ValueError(
+                "task model is fixed by its role; configure the role model instead"
+            )
 
     def tasks_using_model(self, alias: str) -> list[str]:
+        # Keep conservative deletion protection for pre-V2 task records; new
+        # tasks never populate this legacy field and never route through it.
         return [task.task_id for task in self.repository.tasks.list() if task.model_alias == alias]
 
     def delete_task(self, task_id: str) -> None:
@@ -429,6 +443,12 @@ class CollaborationService:
 
     def _ensure_default_roles(self) -> None:
         existing = {role.role_id for role in self.repository.list_roles()}
+        if self.default_model_for_node is None:
+            return
         for value in _DEFAULT_ROLES:
             if value["role_id"] not in existing:
-                self.save_role(dict(value))
+                model_alias = str(self.default_model_for_node(str(value["node_type"]))).strip()
+                if not model_alias:
+                    continue
+                payload = {**value, "model_alias": model_alias}
+                self.save_role(payload)

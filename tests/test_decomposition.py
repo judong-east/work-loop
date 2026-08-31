@@ -74,6 +74,7 @@ def build(root: Path, gateway):
         validate_role=workbench.validate_role,
         execute_task=workbench.execute_role_task,
         validate_project=workbench.get_project,
+        default_model_for_node=lambda _node_type: "planner",
     )
     decomposer = GoalDecomposer(
         gateway=workbench.gateway,
@@ -200,6 +201,13 @@ class GoalApiTest(unittest.TestCase):
 
             _, project = request("POST", "/api/v2/projects", {"name": "API"})
             project_id = project["project_id"]
+            request("POST", "/api/v2/resources/providers", {
+                "provider_id": "local", "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1", "auth_type": "none",
+            })
+            request("POST", "/api/v2/resources/models", {
+                "alias": "local-model", "provider_id": "local", "model": "local-model",
+            })
             payload = {
                 "goal": "完成登录功能",
                 "subtasks": [
@@ -228,7 +236,7 @@ class GoalApiTest(unittest.TestCase):
             self.assertEqual(state["goals"], [])
 
 
-    def test_task_model_override_beats_role_model(self):
+    def test_task_uses_fixed_role_model(self):
         aliases: list[str] = []
 
         class CaptureGateway:
@@ -257,21 +265,22 @@ class GoalApiTest(unittest.TestCase):
                 execute_task=workbench.execute_role_task,
                 validate_project=workbench.get_project,
                 validate_model=workbench.validate_model_alias,
+                default_model_for_node=lambda _node_type: "role-model",
             )
             collaboration.save_role({"role_id": "analyst", "model_alias": "role-model"})
 
-            with self.assertRaisesRegex(ValueError, "unknown model alias: ghost"):
+            with self.assertRaisesRegex(ValueError, "fixed by its role"):
                 collaboration.create_task(project.project_id, {
-                    "title": "需求", "description": "整理需求", "role_id": "analyst", "model_alias": "ghost",
+                    "title": "需求", "description": "整理需求", "role_id": "analyst", "model_alias": "task-model",
                 })
             collaboration.create_task(project.project_id, {
-                "title": "需求", "description": "整理需求", "role_id": "analyst", "model_alias": "task-model",
+                "title": "需求", "description": "整理需求", "role_id": "analyst",
             })
 
             state = collaboration.coordinate(project.project_id)
 
             self.assertEqual(state["counts"]["completed"], 1)
-            self.assertEqual(aliases, ["task-model"])
+            self.assertEqual(aliases, ["role-model"])
 
 
 if __name__ == "__main__":

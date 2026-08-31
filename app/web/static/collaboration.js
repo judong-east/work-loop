@@ -17,6 +17,7 @@
   const option = (value, label, selected = "") => (
     `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(label)}</option>`
   );
+  const icon = name => window.workloopIcon ? window.workloopIcon(name) : "";
   const projectId = () => document.body.dataset.projectId || "";
 
   async function api(path, options = {}) {
@@ -59,12 +60,12 @@
             <span class="role-glyph">R</span>
             <div>
               <strong>${esc(role.label)}</strong>
-              <span>${esc(role.role_id)} · ${esc(role.node_type)} · ${esc(role.model_alias || "自动选择模型")}</span>
+              <span>${esc(role.role_id)} · ${esc(role.node_type)} · ${esc(role.model_alias)}</span>
             </div>
             <span class="state-tag">${esc(accessLabels[role.workspace_access] || role.workspace_access)}</span>
             <span class="row-actions">
-              <button class="icon-button small" type="button" data-edit-role="${esc(role.role_id)}" aria-label="编辑角色">✎</button>
-              <button class="icon-button small danger-icon" type="button" data-delete-role="${esc(role.role_id)}" aria-label="删除角色">×</button>
+              <button class="icon-button small" type="button" data-edit-role="${esc(role.role_id)}" aria-label="编辑角色">${icon("pencil")}</button>
+              <button class="icon-button small danger-icon" type="button" data-delete-role="${esc(role.role_id)}" aria-label="删除角色">${icon("trash")}</button>
             </span>
           </div>
         `).join("")
@@ -81,8 +82,9 @@
     $("roleNodeType").innerHTML = state.nodes.map(node => (
       option(node.node_type, node.label, role?.node_type)
     )).join("");
-    $("roleModel").innerHTML = option("", "自动选择模型", role?.model_alias)
-      + state.models.map(model => option(model.alias, model.alias, role?.model_alias)).join("");
+    $("roleModel").innerHTML = state.models.filter(model => model.enabled).map(model => (
+      option(model.alias, model.alias, role?.model_alias)
+    )).join("");
   }
 
   function editRole(roleId = "") {
@@ -153,7 +155,7 @@
             <span class="task-status">${esc(statusLabels[task.status] || task.status)}</span>
             <div class="task-copy">
               <strong>${esc(task.title)}</strong>
-              <span>${esc(roleLabels[task.role_id] || task.role_id)} · 优先级 ${esc(task.priority)}${task.model_alias ? ` · 模型 ${esc(task.model_alias)}` : ""}</span>
+              <span>${esc(roleLabels[task.role_id] || task.role_id)} · 优先级 ${esc(task.priority)}</span>
               <p>${esc(task.description)}</p>
               ${task.depends_on.length ? `<small>依赖：${task.depends_on.map(esc).join("、")}</small>` : ""}
               ${taskResultSummary(task) ? `<small class="task-result">${esc(taskResultSummary(task))}</small>` : ""}
@@ -161,8 +163,8 @@
             </div>
             <span class="row-actions">
               ${["blocked", "failed"].includes(task.status) ? `<button class="button quiet compact" type="button" data-retry-task="${esc(task.task_id)}">重试</button>` : ""}
-              ${task.status !== "running" ? `<button class="icon-button small" type="button" data-edit-task="${esc(task.task_id)}" aria-label="编辑任务">✎</button>` : ""}
-              ${task.status !== "running" ? `<button class="icon-button small danger-icon" type="button" data-delete-task="${esc(task.task_id)}" aria-label="删除任务">×</button>` : ""}
+              ${task.status !== "running" ? `<button class="icon-button small" type="button" data-edit-task="${esc(task.task_id)}" aria-label="编辑任务">${icon("pencil")}</button>` : ""}
+              ${task.status !== "running" ? `<button class="icon-button small danger-icon" type="button" data-delete-task="${esc(task.task_id)}" aria-label="删除任务">${icon("trash")}</button>` : ""}
             </span>
           </article>
         `).join("")
@@ -211,7 +213,7 @@
               <small>${(goal.task_ids || []).map(id => esc(tasks[id]?.title || id)).join(" → ") || "暂无子任务"}</small>
             </div>
             <span class="row-actions">
-              <button class="icon-button small danger-icon" type="button" data-delete-goal="${esc(goal.goal_id)}" aria-label="删除目标">×</button>
+              <button class="icon-button small danger-icon" type="button" data-delete-goal="${esc(goal.goal_id)}" aria-label="删除目标">${icon("trash")}</button>
             </span>
           </div>
         `).join("")
@@ -267,10 +269,8 @@
 
   function fillTaskEditorOptions(task = null) {
     $("collaborationTaskRole").innerHTML = state.roles.map(role => (
-      option(role.role_id, `${role.label} · ${role.model_alias || "自动模型"}`, task?.role_id || "analyst")
+      option(role.role_id, `${role.label} · ${role.model_alias}`, task?.role_id || "analyst")
     )).join("");
-    $("collaborationTaskModel").innerHTML = option("", "跟随角色模型", task?.model_alias || "")
-      + state.models.map(model => option(model.alias, model.alias, task?.model_alias)).join("");
     $("collaborationTaskDependencies").innerHTML = (state.collaboration.tasks || [])
       .filter(item => item.task_id !== task?.task_id)
       .map(item => option(item.task_id, `${item.title} · ${item.status}`, task && task.depends_on.includes(item.task_id) ? item.task_id : ""))
@@ -397,7 +397,6 @@
       title: $("collaborationTaskTitle").value,
       description: $("collaborationTaskDescription").value,
       role_id: $("collaborationTaskRole").value,
-      model_alias: $("collaborationTaskModel").value,
       priority: Number($("collaborationTaskPriority").value),
       depends_on: dependencies,
     };

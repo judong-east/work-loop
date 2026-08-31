@@ -127,14 +127,24 @@ class ModelProvider:
         unsupported = set(self.protocols) - {"openai", "claude"}
         if unsupported:
             raise ValueError(f"unsupported provider protocols: {', '.join(sorted(unsupported))}")
-        if self.auth_type not in {"bearer", "api_key", "custom_header", "none"}:
+        if self.auth_type not in {"bearer", "api_key", "token", "basic", "custom_header", "query_param", "none"}:
             raise ValueError("unsupported provider auth_type")
         if self.auth_type == "custom_header":
             safe_header = self.auth_header.replace("-", "")
             if not safe_header or not safe_header.isalnum():
                 raise ValueError("custom auth header must be a safe HTTP header name")
+        if self.auth_type == "query_param":
+            safe_parameter = self.auth_header.replace("-", "").replace("_", "")
+            if not safe_parameter or not safe_parameter.isalnum():
+                raise ValueError("query auth parameter must be a safe name")
+        if self.auth_type == "basic":
+            username = str(self.metadata.get("username", ""))
+            if not username or any(char in username for char in ":\r\n"):
+                raise ValueError("basic auth username is required and cannot contain a colon or newline")
         if any(char in self.auth_prefix for char in "\r\n"):
             raise ValueError("auth prefix cannot contain newlines")
+        if self.auth_type == "token" and self.auth_prefix.strip().lower() == "bearer":
+            self.auth_prefix = "Token"
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -158,17 +168,21 @@ class ModelProvider:
         auth_type = str(value.get("auth_type", "")).strip()
         if not auth_type:
             auth_type = "api_key" if protocols and protocols[0] == "claude" else "bearer"
+        auth_header = str(value.get("auth_header", ""))
+        metadata = dict(value.get("metadata", {}))
+        if auth_type == "query_param" and not auth_header:
+            auth_header = str(metadata.get("query_param", "api_key"))
         provider = cls(
             provider_id=str(value["provider_id"]),
             label=str(value.get("label", value["provider_id"])),
             base_url=str(value["base_url"]),
             protocols=protocols,
             auth_type=auth_type,
-            auth_header=str(value.get("auth_header", "")),
-            auth_prefix=str(value.get("auth_prefix", "Bearer" if auth_type == "bearer" else "")),
+            auth_header=auth_header,
+            auth_prefix=str(value.get("auth_prefix", "Bearer" if auth_type == "bearer" else "Token" if auth_type == "token" else "")),
             credential_ref=str(value.get("credential_ref", "")),
             enabled=bool(value.get("enabled", True)),
-            metadata=dict(value.get("metadata", {})),
+            metadata=metadata,
             schema_version=int(value.get("schema_version", 1)),
         )
         provider.validate()
