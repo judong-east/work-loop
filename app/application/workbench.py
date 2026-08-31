@@ -246,6 +246,12 @@ class WorkbenchService:
     def get_session(self, session_id: str) -> Session:
         return self.sessions.get(session_id)
 
+    def delete_session(self, session_id: str) -> None:
+        session = self.get_session(session_id)
+        if session.purpose != "conversation":
+            raise ValueError("协同任务会话由任务记录管理，不能在会话列表中删除。")
+        self.sessions.delete(session_id)
+
     def send_message(self, session_id: str, content: str) -> Session:
         session = self.get_session(session_id)
         if not content.strip():
@@ -443,6 +449,20 @@ class WorkbenchService:
     def save_model(self, value: dict[str, Any]) -> ModelAlias:
         return self.resources.save_model(ModelAlias.from_dict(value))
 
+    def discover_provider_models(self, provider_id: str, protocol: str = "") -> dict[str, Any]:
+        provider = next((item for item in self.resources.list_providers() if item.provider_id == provider_id), None)
+        if provider is None:
+            raise KeyError(provider_id)
+        selected_protocol = protocol or provider.protocols[0]
+        discover = getattr(self.gateway, "list_models", None)
+        if not callable(discover):
+            raise ValueError("当前模型网关不支持自动获取模型列表。")
+        return {
+            "provider_id": provider.provider_id,
+            "protocol": selected_protocol,
+            "models": discover(provider.provider_id, selected_protocol),
+        }
+
     def test_provider(self, provider_id: str) -> dict[str, Any]:
         provider = next((item for item in self.resources.list_providers() if item.provider_id == provider_id), None)
         if provider is None:
@@ -473,7 +493,8 @@ class WorkbenchService:
     def delete_provider(self, provider_id: str) -> None:
         self.resources.delete_provider(provider_id)
 
-    def delete_model(self, alias: str) -> None:
+    def ensure_model_deletable(self, alias: str) -> None:
+        self.resources.resolve(alias)
         workflow_refs = [
             workflow.workflow_id
             for workflow in self.workflows.list()
@@ -481,9 +502,18 @@ class WorkbenchService:
         ]
         node_refs = [item.node_type for item in self.registry.list() if item.default_model == alias]
         project_refs = [project.project_id for project in self.projects.list() if project.default_model == alias]
-        references = workflow_refs + node_refs + project_refs
+        references = []
+        if workflow_refs:
+            references.append(f"工作流 {', '.join(workflow_refs)}")
+        if node_refs:
+            references.append(f"节点 {', '.join(node_refs)}")
+        if project_refs:
+            references.append(f"项目 {', '.join(project_refs)}")
         if references:
-            raise ValueError(f"model is still in use: {', '.join(references)}")
+            raise ValueError(f"模型仍被以下配置使用：{'；'.join(references)}。请先解除引用。")
+
+    def delete_model(self, alias: str) -> None:
+        self.ensure_model_deletable(alias)
         self.resources.delete_model(alias)
 
     def _record_event(self, event: OrchestrationEvent) -> None:

@@ -18,7 +18,7 @@ def _data_root() -> Path:
 
 
 class WindowControls:
-    """Exposed to the UI as ``window.pywebview.api`` for the custom title bar."""
+    """Exposed to the UI as ``window.pywebview.api`` for desktop integrations."""
 
     def __init__(self):
         self._window = None
@@ -42,6 +42,29 @@ class WindowControls:
 
     def close(self) -> None:
         self._window.destroy()
+
+    def choose_workspace(self, directory: str = "") -> str:
+        """Open the native folder picker and return the selected absolute path."""
+        if self._window is None:
+            return ""
+
+        import webview
+
+        initial_directory = ""
+        if directory:
+            candidate = Path(directory).expanduser()
+            if candidate.is_dir():
+                initial_directory = str(candidate.resolve())
+            elif candidate.parent.is_dir():
+                initial_directory = str(candidate.parent.resolve())
+
+        selected = self._window.create_file_dialog(
+            dialog_type=webview.FileDialog.FOLDER,
+            directory=initial_directory,
+        )
+        if not selected:
+            return ""
+        return str(Path(selected[0]).resolve())
 
 
 def main() -> None:

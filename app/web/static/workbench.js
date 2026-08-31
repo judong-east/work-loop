@@ -48,6 +48,26 @@
   const post = (path, value) => api(path, { method: "POST", body: JSON.stringify(value) });
   const remove = path => api(path, { method: "DELETE" });
   const toast = message => { $("toast").textContent = message; $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 2600); };
+  let confirmResolver = null;
+
+  function confirmAction({ title = "确认删除", message = "确定要删除此项吗？", confirmLabel = "删除" } = {}) {
+    const dialog = $("confirmDialog");
+    if (dialog.open || confirmResolver) return Promise.resolve(false);
+    $("confirmDialogTitle").textContent = title;
+    $("confirmDialogMessage").textContent = message;
+    $("confirmDialogAccept").textContent = confirmLabel;
+    dialog.returnValue = "";
+    dialog.showModal();
+    $("confirmDialogCancel").focus();
+    return new Promise(resolve => { confirmResolver = resolve; });
+  }
+
+  $("confirmDialog").addEventListener("close", () => {
+    const resolve = confirmResolver;
+    confirmResolver = null;
+    if (resolve) resolve($("confirmDialog").returnValue === "confirm");
+  });
+  window.workloopConfirm = confirmAction;
 
   function resizeComposer() {
     const input = $("messageInput");
@@ -85,7 +105,7 @@
     $("projectList").innerHTML = state.projects.length ? state.projects.map(project => {
       const active = state.project?.project_id === project.project_id;
       const sessions = active ? state.sessions : [];
-      return `<div class="project-group"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">${svgIcon("folder")}</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话 · ${project.workspace_path ? "工作区已连接" : "未连接工作区"}` : "点击查看"}</span></span></button>${active ? `<div class="session-list">${sessions.map(session => `<button type="button" class="session-item ${state.session?.session_id === session.session_id ? "active" : ""}" data-session="${esc(session.session_id)}"><span class="session-icon">${svgIcon(session.mode === "task" ? "workflow" : "message")}</span><strong>${esc(session.title)}</strong></button>`).join("")}<button type="button" class="session-item new" data-new-session><span class="session-icon">${svgIcon("plus")}</span><strong>新会话</strong></button></div>` : ""}</div>`;
+      return `<div class="project-group"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">${svgIcon("folder")}</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话 · ${project.workspace_path ? "工作区已连接" : "未连接工作区"}` : "点击查看"}</span></span></button>${active ? `<div class="session-list">${sessions.map(session => { const selected = state.session?.session_id === session.session_id; return `<div class="session-row ${selected ? "active" : ""}"><button type="button" class="session-item ${selected ? "active" : ""}" data-session="${esc(session.session_id)}"><span class="session-icon">${svgIcon(session.mode === "task" ? "workflow" : "message")}</span><strong>${esc(session.title)}</strong></button><button type="button" class="session-delete" data-delete-session="${esc(session.session_id)}" aria-label="删除会话 ${esc(session.title)}" title="删除会话">${svgIcon("trash")}</button></div>`; }).join("")}<button type="button" class="session-item new" data-new-session><span class="session-icon">${svgIcon("plus")}</span><strong>新会话</strong></button></div>` : ""}</div>`;
     }).join("") : `<div class="inspector-empty compact-empty"><strong>还没有项目</strong><p>先创建项目，把工作上下文固定下来。</p></div>`;
     document.querySelectorAll("[data-project]").forEach(button => button.addEventListener("click", () => selectProject(button.dataset.project)));
     document.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", () => {
@@ -95,6 +115,7 @@
       if (state.session?.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
       renderMode(); renderProjects(); renderSessions();
     }));
+    document.querySelectorAll("[data-delete-session]").forEach(button => button.addEventListener("click", () => deleteSession(button.dataset.deleteSession)));
     document.querySelectorAll("[data-new-session]").forEach(button => button.addEventListener("click", async () => {
       try {
         state.session = await post(`/api/v2/projects/${state.project.project_id}/sessions`, {
@@ -105,6 +126,30 @@
         state.sessions.unshift(state.session); renderProjects(); renderSessions();
       } catch (error) { toast(error.message); }
     }));
+  }
+
+  async function deleteSession(sessionId) {
+    const session = state.sessions.find(item => item.session_id === sessionId);
+    if (!session) return;
+    if (state.pendingMessage?.sessionId === sessionId) { toast("消息发送期间不能删除此会话"); return; }
+    const confirmed = await confirmAction({
+      title: "删除会话",
+      message: `确定删除会话“${session.title}”吗？其中的消息和运行上下文将一并删除。`,
+      confirmLabel: "删除会话",
+    });
+    if (!confirmed) return;
+    try {
+      await remove(`/api/v2/sessions/${encodeURIComponent(sessionId)}`);
+      const removedIndex = state.sessions.findIndex(item => item.session_id === sessionId);
+      state.sessions = state.sessions.filter(item => item.session_id !== sessionId);
+      if (state.session?.session_id === sessionId) {
+        state.session = state.sessions[Math.min(Math.max(removedIndex, 0), state.sessions.length - 1)] || null;
+        state.mode = state.session?.mode || "chat";
+        if (state.session?.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
+        if (state.session?.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
+      }
+      renderMode(); renderProjects(); renderSessions(); toast("会话已删除");
+    } catch (error) { toast(error.message); }
   }
 
   function renderWorkflowPicker() {
@@ -386,8 +431,9 @@
     $("providerFormTitle").textContent = item ? "编辑供应商" : "添加供应商";
     $("providerId").value = item?.provider_id || ""; $("providerId").readOnly = Boolean(item);
     $("providerLabel").value = item?.label || ""; $("providerUrl").value = item?.base_url || "";
-    $("providerProtocolOpenAI").checked = item ? item.protocols.includes("openai") : true;
-    $("providerProtocolClaude").checked = item ? item.protocols.includes("claude") : false;
+    const selectedProtocol = item?.protocols?.[0] || "openai";
+    $("providerProtocolOpenAI").checked = selectedProtocol === "openai";
+    $("providerProtocolClaude").checked = selectedProtocol === "claude";
     $("providerAuthType").value = item?.auth_type || "bearer";
     $("providerAuthHeader").value = item?.auth_header || "";
     $("providerAuthPrefix").value = ["custom_header", "token"].includes(item?.auth_type) ? (item.auth_prefix || (item?.auth_type === "token" ? "Token" : "")) : "";
@@ -426,8 +472,18 @@
   }
 
   async function deleteProvider(providerId) {
-    if (!confirm(`删除供应商 ${providerId}？`)) return;
-    try { await remove(`/api/v2/resources/providers/${encodeURIComponent(providerId)}`); await refreshManagement(); toast("供应商已删除"); }
+    const provider = state.resources.providers.find(item => item.provider_id === providerId);
+    const confirmed = await confirmAction({
+      title: "删除供应商",
+      message: `确定删除“${provider?.label || providerId}”吗？连接配置和本地凭据将一并移除。有关联模型时不会执行删除。`,
+    });
+    if (!confirmed) return;
+    try {
+      await remove(`/api/v2/resources/providers/${encodeURIComponent(providerId)}`);
+      if ($("providerId").value === providerId) $("providerForm").classList.add("hidden");
+      if ($("modelProvider").value === providerId) $("modelForm").classList.add("hidden");
+      await refreshManagement(); toast("供应商已删除");
+    }
     catch (error) { toast(error.message); }
   }
 
@@ -442,14 +498,94 @@
     $("modelAlias").value = item?.alias || ""; $("modelAlias").readOnly = Boolean(item);
     $("modelProvider").innerHTML = option(provider.provider_id, provider.label, provider.provider_id);
     $("modelProtocol").innerHTML = provider.protocols.map(protocol => option(protocol, protocol === "claude" ? "Claude · Messages" : "OpenAI · Chat Completions", item?.protocol || provider.protocols[0])).join("");
-    $("modelName").value = item?.model || ""; $("modelCapabilities").value = (item?.capabilities || ["general"]).join(", ");
+    $("modelName").innerHTML = option("", "正在获取模型列表…");
+    $("modelName").disabled = true;
+    $("modelNameCustom").value = "";
+    $("modelNameCustom").classList.add("hidden");
+    $("modelNameCustom").required = false;
+    $("modelDiscoveryStatus").textContent = "正在从供应商获取可用模型…";
+    $("modelDiscoveryStatus").classList.remove("error");
+    modelAliasAutoValue = item?.model || "";
+    $("modelCapabilities").value = (item?.capabilities || ["general"]).join(", ");
     $("modelTemperature").value = item?.temperature ?? ""; $("modelMaxTokens").value = item?.max_tokens ?? "";
     $("modelEnabled").checked = item?.enabled ?? true;
+    discoverProviderModels(provider, item?.model || "");
+  }
+
+  let modelAliasAutoValue = "";
+
+  function physicalModelName() {
+    return $("modelName").value === "__manual__"
+      ? $("modelNameCustom").value.trim()
+      : $("modelName").value;
+  }
+
+  function syncModelAliasDefault() {
+    const alias = $("modelAlias");
+    const modelName = physicalModelName();
+    if (!alias.readOnly && (!alias.value.trim() || alias.value === modelAliasAutoValue)) {
+      alias.value = modelName;
+      modelAliasAutoValue = modelName;
+    }
+  }
+
+  function syncPhysicalModelMode({ focus = false } = {}) {
+    const manual = $("modelName").value === "__manual__";
+    $("modelNameCustom").classList.toggle("hidden", !manual);
+    $("modelNameCustom").required = manual;
+    if (manual && focus) $("modelNameCustom").focus();
+    syncModelAliasDefault();
+  }
+
+  async function discoverProviderModels(provider, selectedModel = "") {
+    const select = $("modelName");
+    const refresh = $("refreshModelList");
+    select.disabled = true;
+    refresh.disabled = true;
+    $("modelDiscoveryStatus").textContent = "正在从供应商获取可用模型…";
+    $("modelDiscoveryStatus").classList.remove("error");
+    try {
+      const result = await post(`/api/v2/resources/providers/${encodeURIComponent(provider.provider_id)}/models/discover`, {
+        protocol: $("modelProtocol").value,
+      });
+      const models = [...new Set((result.models || []).map(value => String(value).trim()).filter(Boolean))];
+      select.innerHTML = option("", models.length ? "请选择物理模型" : "未发现可用模型")
+        + models.map(model => option(model, model, selectedModel)).join("")
+        + option("__manual__", "手动输入其他模型…");
+      if (selectedModel && !models.includes(selectedModel)) {
+        select.insertAdjacentHTML("afterbegin", option(selectedModel, `${selectedModel}（当前配置）`, selectedModel));
+      }
+      select.value = selectedModel || "";
+      $("modelDiscoveryStatus").textContent = models.length
+        ? `已获取 ${models.length} 个模型；列表中没有时可手动输入`
+        : "供应商未返回模型；请选择手动输入";
+      if (!models.length && !selectedModel) select.value = "__manual__";
+      syncPhysicalModelMode();
+    } catch (error) {
+      select.innerHTML = option("__manual__", "手动输入物理模型…", "__manual__");
+      select.value = "__manual__";
+      $("modelDiscoveryStatus").textContent = `自动获取失败：${error.message}；仍可手动输入`;
+      $("modelDiscoveryStatus").classList.add("error");
+      syncPhysicalModelMode();
+    } finally {
+      select.disabled = false;
+      refresh.disabled = false;
+    }
   }
 
   async function deleteModel(alias) {
-    if (!confirm(`删除模型别名 ${alias}？`)) return;
-    try { await remove(`/api/v2/resources/models/${encodeURIComponent(alias)}`); await refreshManagement(); toast("模型已删除"); }
+    const confirmed = await confirmAction({
+      title: "删除模型",
+      message: `确定删除模型“${alias}”吗？内置角色会自动改用其他可用模型；如果没有替代模型，未被任务使用的内置角色会暂时移除。`,
+    });
+    if (!confirmed) return;
+    try {
+      const result = await remove(`/api/v2/resources/models/${encodeURIComponent(alias)}`);
+      if ($("modelAlias").value === alias) { $("modelForm").classList.add("hidden"); $("modelForm").reset(); }
+      await refreshManagement();
+      const changed = (result.reassigned_roles || []).length || (result.removed_roles || []).length;
+      toast(changed ? "模型已删除，相关内置角色已自动处理" : "模型已删除");
+    }
     catch (error) { toast(error.message); }
   }
 
@@ -472,7 +608,8 @@
   }
 
   async function deleteNode(nodeType) {
-    if (!confirm(`删除自定义节点 ${nodeType}？`)) return;
+    const confirmed = await confirmAction({ title: "删除自定义节点", message: `确定删除“${nodeType}”吗？被工作流引用时不会执行删除。` });
+    if (!confirmed) return;
     try { await remove(`/api/v2/nodes/${encodeURIComponent(nodeType)}`); await refreshManagement(); toast("节点已删除"); }
     catch (error) { toast(error.message); }
   }
@@ -538,6 +675,32 @@
     } catch (error) { toast(error.message); }
   }
 
+  async function chooseWorkspace() {
+    const bridge = window.pywebview?.api;
+    if (!bridge || typeof bridge.choose_workspace !== "function") {
+      toast("文件夹选择仅在 Workloop 桌面版中可用，也可以手动输入绝对路径");
+      $("workspaceInput").focus();
+      return;
+    }
+
+    const button = $("chooseWorkspace");
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      const selected = await bridge.choose_workspace($("workspaceInput").value.trim());
+      if (selected) {
+        $("workspaceInput").value = selected;
+        $("workspaceInput").dispatchEvent(new Event("input", { bubbles: true }));
+        $("workspaceInput").focus();
+      }
+    } catch (error) {
+      toast(error?.message || "无法打开文件夹选择器");
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+
   function openProjectDialog(project = null) {
     state.editingProjectId = project?.project_id || "";
     $("projectDialogTitle").textContent = project ? "项目设置" : "新建项目";
@@ -557,6 +720,7 @@
 
   $("newProject").addEventListener("click", () => openProjectDialog());
   $("editProject").addEventListener("click", () => state.project ? openProjectDialog(state.project) : toast("请先选择项目"));
+  $("chooseWorkspace").addEventListener("click", chooseWorkspace);
   document.querySelectorAll("[data-close-project]").forEach(button => {
     button.addEventListener("click", closeProjectDialog);
   });
@@ -634,15 +798,15 @@
   $("providerForm").addEventListener("submit", async event => {
     event.preventDefault();
     try {
-      const protocols = [["providerProtocolOpenAI", "openai"], ["providerProtocolClaude", "claude"]].filter(([id]) => $(id).checked).map(([, value]) => value);
-      if (!protocols.length) throw new Error("请至少选择一种协议");
+      const protocol = document.querySelector('input[name="providerProtocol"]:checked')?.value;
+      if (!protocol) throw new Error("请选择接口协议");
       const authType = $("providerAuthType").value;
       if (authType === "custom_header" && !$("providerAuthHeader").value.trim()) throw new Error("请填写自定义 Header 名");
       if (authType === "query_param" && !$("providerAuthParam").value.trim()) throw new Error("请填写 Query 参数名");
       if (authType === "basic" && !$("providerAuthUsername").value.trim()) throw new Error("Basic Auth 需要用户名");
       const currentProvider = state.resources.providers.find(item => item.provider_id === $("providerId").value.trim());
       const savedProvider = await post("/api/v2/resources/providers", {
-        provider_id: $("providerId").value.trim(), label: $("providerLabel").value.trim(), base_url: $("providerUrl").value.trim(), protocols,
+        provider_id: $("providerId").value.trim(), label: $("providerLabel").value.trim(), base_url: $("providerUrl").value.trim(), protocols: [protocol],
         auth_type: authType,
         auth_header: authType === "custom_header" ? $("providerAuthHeader").value.trim() : authType === "query_param" ? $("providerAuthParam").value.trim() : "",
         auth_prefix: authType === "bearer" ? "Bearer" : ["custom_header", "token"].includes(authType) ? $("providerAuthPrefix").value.trim() : "",
@@ -677,8 +841,18 @@
     syncProviderAuth();
     if (preset === "custom") $("providerId").focus();
   }));
-  $("modelForm").addEventListener("submit", async event => { event.preventDefault(); try { await post("/api/v2/resources/models", { alias: $("modelAlias").value, provider_id: $("modelProvider").value, protocol: $("modelProtocol").value, model: $("modelName").value, capabilities: csv($("modelCapabilities").value), temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value), max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value), enabled: $("modelEnabled").checked }); $("modelForm").classList.add("hidden"); await refreshManagement(); toast("模型已保存"); } catch (error) { toast(error.message); } });
+  $("modelForm").addEventListener("submit", async event => { event.preventDefault(); try { const modelName = physicalModelName(); if (!modelName) throw new Error("请选择或输入物理模型名"); await post("/api/v2/resources/models", { alias: $("modelAlias").value, provider_id: $("modelProvider").value, protocol: $("modelProtocol").value, model: modelName, capabilities: csv($("modelCapabilities").value), temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value), max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value), enabled: $("modelEnabled").checked }); $("modelForm").classList.add("hidden"); await refreshManagement(); toast("模型已保存"); } catch (error) { toast(error.message); } });
   document.querySelector("[data-cancel-model]").addEventListener("click", () => $("modelForm").classList.add("hidden"));
+  $("modelName").addEventListener("change", () => syncPhysicalModelMode({ focus: true }));
+  $("modelNameCustom").addEventListener("input", syncModelAliasDefault);
+  $("modelProtocol").addEventListener("change", () => {
+    const provider = state.resources.providers.find(item => item.provider_id === $("modelProvider").value);
+    if (provider) discoverProviderModels(provider, physicalModelName());
+  });
+  $("refreshModelList").addEventListener("click", () => {
+    const provider = state.resources.providers.find(item => item.provider_id === $("modelProvider").value);
+    if (provider) discoverProviderModels(provider, physicalModelName());
+  });
 
   $("newNode").addEventListener("click", () => editNode());
   $("nodeForm").addEventListener("submit", async event => { event.preventDefault(); try { await post("/api/v2/nodes", { node_type: $("nodeType").value, label: $("nodeLabel").value, description: $("nodeDescription").value, input_fields: csv($("nodeInputs").value), output_fields: csv($("nodeOutputs").value), capabilities: csv($("nodeCapabilities").value), default_model: $("nodeDefaultModel").value }); $("nodeForm").classList.add("hidden"); await refreshManagement(); toast("自定义节点已保存"); } catch (error) { toast(error.message); } });
@@ -687,7 +861,7 @@
   $("newWorkflow").addEventListener("click", () => { state.editingWorkflow = newWorkflowValue(); renderWorkflowList(); renderWorkflowEditor(); });
   $("addWorkflowNode").addEventListener("click", () => { syncWorkflowForm(); const index = state.editingWorkflow.nodes.length + 1; state.editingWorkflow.nodes.push({ node_id: `step-${index}`, node_type: state.catalog.nodes[0]?.node_type || "tool", depends_on: [], model_alias: "", prompt_template: "", on_failure: "human", config: {}, position: [0, index * 100] }); renderWorkflowNodes(); });
   $("workflowForm").addEventListener("submit", async event => { event.preventDefault(); try { syncWorkflowForm(); if (!state.editingWorkflow.nodes.length) throw new Error("工作流至少需要一个节点"); const saved = await post("/api/v2/workflows", state.editingWorkflow); state.selectedWorkflowId = saved.workflow_id; state.editingWorkflow = clone(saved); await refreshManagement(); toast("工作流和模型关联已保存"); } catch (error) { toast(error.message); } });
-  $("deleteWorkflow").addEventListener("click", async () => { const id = state.editingWorkflow?.workflow_id; if (!id || !confirm(`删除工作流 ${id}？`)) return; try { await remove(`/api/v2/workflows/${encodeURIComponent(id)}`); state.editingWorkflow = null; await refreshManagement(); toast("工作流已删除"); } catch (error) { toast(error.message); } });
+  $("deleteWorkflow").addEventListener("click", async () => { const id = state.editingWorkflow?.workflow_id; if (!id) return; const confirmed = await confirmAction({ title: "删除工作流", message: `确定删除“${id}”吗？内置工作流不会被删除。` }); if (!confirmed) return; try { await remove(`/api/v2/workflows/${encodeURIComponent(id)}`); state.editingWorkflow = null; await refreshManagement(); toast("工作流已删除"); } catch (error) { toast(error.message); } });
 
   if (new URLSearchParams(location.search).get("desktop") === "1") {
     document.body.classList.add("desktop");
@@ -715,6 +889,6 @@
   });
 
   const savedTheme = localStorage.getItem(THEME_KEY);
-  if (savedTheme !== "light") document.body.classList.add("dark");
+  if (savedTheme === "dark") document.body.classList.add("dark");
   init();
 })();

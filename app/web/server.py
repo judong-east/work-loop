@@ -63,12 +63,14 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/sessions/([\w-]+)/policy/approve$"), "handle_approve_policy"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/policy/replan$"), "handle_replan_policy"),
         (re.compile(r"^/api/v2/resources/providers$"), "handle_save_provider"),
+        (re.compile(r"^/api/v2/resources/providers/([\w-]+)/models/discover$"), "handle_discover_provider_models"),
         (re.compile(r"^/api/v2/resources/providers/([\w-]+)/test$"), "handle_test_provider"),
         (re.compile(r"^/api/v2/resources/models$"), "handle_save_model"),
         (re.compile(r"^/api/v2/nodes$"), "handle_save_node"),
         (re.compile(r"^/api/v2/workflows$"), "handle_save_workflow"),
     ]
     DELETE_ROUTES = [
+        (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_delete_session"),
         (re.compile(r"^/api/v2/resources/providers/([\w-]+)$"), "handle_delete_provider"),
         (re.compile(r"^/api/v2/resources/models/([\w-]+)$"), "handle_delete_model"),
         (re.compile(r"^/api/v2/nodes/([\w-]+)$"), "handle_delete_node"),
@@ -309,6 +311,10 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_session(self, session_id: str) -> None:
         self._send_json(200, self.server.workbench.get_session(session_id).to_dict())
 
+    def handle_delete_session(self, session_id: str) -> None:
+        self.server.workbench.delete_session(session_id)
+        self._send_json(200, {"deleted": session_id})
+
     def handle_message(self, session_id: str, body: dict) -> None:
         session = self.server.workbench.send_message(session_id, str(body.get("content", "")))
         self._send_json(200, session.to_dict())
@@ -337,6 +343,15 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_save_model(self, body: dict) -> None:
         self._send_json(201, self.server.workbench.save_model(body).to_dict())
 
+    def handle_discover_provider_models(self, provider_id: str, body: dict) -> None:
+        self._send_json(
+            200,
+            self.server.workbench.discover_provider_models(
+                provider_id,
+                str(body.get("protocol", "")),
+            ),
+        )
+
     def handle_test_provider(self, provider_id: str, body: dict) -> None:
         del body
         self._send_json(200, self.server.workbench.test_provider(provider_id))
@@ -348,12 +363,18 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_delete_model(self, alias: str) -> None:
         task_references = self.server.collaboration.tasks_using_model(alias)
         if task_references:
-            raise ValueError(f"model is still used by tasks: {', '.join(task_references)}")
-        role_references = self.server.collaboration.roles_using_model(alias)
-        if role_references:
-            raise ValueError(f"model is still used by roles: {', '.join(role_references)}")
+            raise ValueError(f"模型仍被协同任务使用：{', '.join(task_references)}。请先更换任务模型。")
+        self.server.workbench.ensure_model_deletable(alias)
+        alternatives = [
+            model.alias
+            for model in self.server.workbench.resources.list_models()
+            if model.alias != alias and model.enabled
+        ]
+        binding_changes = self.server.collaboration.release_model_bindings(
+            alias, alternatives[0] if alternatives else ""
+        )
         self.server.workbench.delete_model(alias)
-        self._send_json(200, {"deleted": alias})
+        self._send_json(200, {"deleted": alias, **binding_changes})
 
     def handle_save_node(self, body: dict) -> None:
         self._send_json(201, self._node_payload(self.server.workbench.save_node(body)))

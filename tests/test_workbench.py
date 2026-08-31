@@ -264,6 +264,46 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(payload["messages"][0]["role"], "user")
             self.assertEqual(payload["max_tokens"], 4096)
 
+    def test_gateway_discovers_openai_and_claude_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelProvider
+            center.save_provider(
+                ModelProvider("vendor", "Vendor", "https://example.test/v1"),
+                api_key="secret-key-value",
+            )
+            center.save_provider(
+                ModelProvider(
+                    "anthropic", "Anthropic", "https://api.anthropic.com",
+                    protocols=["claude"], auth_type="api_key", auth_prefix="",
+                ),
+                api_key="secret-key-value",
+            )
+
+            class Response:
+                def __init__(self, value): self.value = value
+                def __enter__(self): return self
+                def __exit__(self, *_): return None
+                def read(self): return json.dumps(self.value).encode()
+
+            responses = [
+                Response({"data": [{"id": "gpt-5"}, {"id": "gpt-4.1"}, {"id": "gpt-5"}]}),
+                Response({"data": [{"id": "claude-opus-5", "display_name": "Claude Opus 5"}]}),
+            ]
+            with mock.patch("urllib.request.urlopen", side_effect=responses) as opener:
+                gateway = OpenAICompatibleGateway(center)
+                self.assertEqual(gateway.list_models("vendor", "openai"), ["gpt-5", "gpt-4.1"])
+                self.assertEqual(gateway.list_models("anthropic", "claude"), ["claude-opus-5"])
+
+            openai_request = opener.call_args_list[0].args[0]
+            self.assertEqual(openai_request.get_method(), "GET")
+            self.assertEqual(openai_request.full_url, "https://example.test/v1/models")
+            self.assertEqual(openai_request.headers["Authorization"], "Bearer secret-key-value")
+            claude_request = opener.call_args_list[1].args[0]
+            self.assertEqual(claude_request.full_url, "https://api.anthropic.com/v1/models")
+            self.assertEqual(claude_request.headers["X-api-key"], "secret-key-value")
+            self.assertEqual(claude_request.headers["Anthropic-version"], "2023-06-01")
+
     def test_custom_header_auth_is_applied_without_leaking_credential(self):
         with tempfile.TemporaryDirectory() as tmp:
             center = ResourceCenter(Path(tmp))
@@ -559,6 +599,14 @@ class WorkbenchDomainTest(unittest.TestCase):
             status, detail = request("GET", f"/api/v2/sessions/{session['session_id']}")
             self.assertEqual(status, 200)
             self.assertEqual(detail["project_id"], project["project_id"])
+            status, deleted = request("DELETE", f"/api/v2/sessions/{session['session_id']}")
+            self.assertEqual(status, 200)
+            self.assertEqual(deleted["deleted"], session["session_id"])
+            _, sessions = request("GET", f"/api/v2/projects/{project['project_id']}/sessions")
+            self.assertEqual(sessions, [])
+            with self.assertRaises(urllib.error.HTTPError) as missing:
+                request("GET", f"/api/v2/sessions/{session['session_id']}")
+            self.assertEqual(missing.exception.code, 404)
 
     def test_v2_management_api_and_root_workbench(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -580,11 +628,26 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertIn("协同任务", page)
             self.assertIn("/static/collaboration.js", page)
             self.assertEqual(page.count("data-close-project"), 2)
+            self.assertEqual(page.count('name="providerProtocol"'), 2)
+            self.assertIn('id="providerProtocolOpenAI" type="radio"', page)
+            self.assertIn('id="providerProtocolClaude" type="radio"', page)
+            self.assertIn('id="modelName" required', page)
+            self.assertIn('id="refreshModelList"', page)
+            self.assertIn('id="confirmDialog"', page)
             self.assertNotIn("经典控制台", page)
+
+            with urllib.request.urlopen(base + "/static/workbench.js", timeout=5) as response:
+                workbench_script = response.read().decode()
+            self.assertNotIn("confirm(`", workbench_script)
+            self.assertIn("window.workloopConfirm = confirmAction", workbench_script)
+            self.assertIn('if (savedTheme === "dark")', workbench_script)
+            self.assertIn("data-delete-session", workbench_script)
+            self.assertIn("/api/v2/sessions/${encodeURIComponent(sessionId)}", workbench_script)
 
             with urllib.request.urlopen(base + "/static/collaboration.js", timeout=5) as response:
                 collaboration_script = response.read().decode()
             self.assertIn("workloop:project-selected", collaboration_script)
+            self.assertNotIn("confirm(`", collaboration_script)
 
             with self.assertRaises(urllib.error.HTTPError) as removed:
                 request("GET", "/api/agent/tasks")
@@ -609,6 +672,9 @@ class WorkbenchDomainTest(unittest.TestCase):
 
             class ProbeGateway:
                 def complete(self, **_): return {}
+                def list_models(self, provider_id, protocol):
+                    self.discovery = (provider_id, protocol)
+                    return ["vendor-model-1", "vendor-model-2"]
                 def probe(self, alias):
                     return {
                         "ok": True, "alias": alias, "protocol": "openai",
@@ -616,6 +682,10 @@ class WorkbenchDomainTest(unittest.TestCase):
                     }
 
             server.workbench.gateway = ProbeGateway()
+            status, discovery = request("POST", "/api/v2/resources/providers/vendor/models/discover", {"protocol": "openai"})
+            self.assertEqual(status, 200)
+            self.assertEqual(discovery["models"], ["vendor-model-1", "vendor-model-2"])
+            self.assertEqual(server.workbench.gateway.discovery, ("vendor", "openai"))
             status, probe = request("POST", "/api/v2/resources/providers/vendor/test", {})
             self.assertEqual(status, 200)
             self.assertTrue(probe["ok"])
@@ -641,9 +711,16 @@ class WorkbenchDomainTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as blocked:
                 request("DELETE", "/api/v2/resources/models/secure-model")
             self.assertEqual(blocked.exception.code, 400)
+            blocked_payload = json.loads(blocked.exception.read().decode())
+            self.assertIn("模型仍被以下配置使用", blocked_payload["error"])
             request("DELETE", "/api/v2/workflows/secure-flow")
             request("DELETE", "/api/v2/nodes/security_review")
-            request("DELETE", "/api/v2/resources/models/secure-model")
+            _, role_payload = request("GET", "/api/v2/roles")
+            self.assertTrue(any(role["model_alias"] == "secure-model" for role in role_payload))
+            _, deletion = request("DELETE", "/api/v2/resources/models/secure-model")
+            self.assertEqual(sorted(deletion["removed_roles"]), ["analyst", "architect", "developer", "reviewer", "tester"])
+            _, role_payload = request("GET", "/api/v2/roles")
+            self.assertEqual(role_payload, [])
             status, _ = request("DELETE", "/api/v2/resources/providers/vendor")
             self.assertEqual(status, 200)
 

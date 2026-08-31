@@ -68,6 +68,7 @@ _DEFAULT_ROLES = (
         "workspace_access": "read",
     },
 )
+_DEFAULT_ROLE_IDS = frozenset(str(value["role_id"]) for value in _DEFAULT_ROLES)
 
 
 class CollaborationService:
@@ -130,6 +131,48 @@ class CollaborationService:
 
     def roles_using_model(self, model_alias: str) -> list[str]:
         return [role.role_id for role in self.repository.roles.list() if role.model_alias == model_alias]
+
+    def release_model_bindings(self, model_alias: str, replacement_alias: str = "") -> dict[str, list[str] | str]:
+        """Reassign roles, or remove idle generated roles, before deleting a model.
+
+        Default roles are materialized lazily as soon as the first model exists. If
+        that model is also the last one, treating those generated bindings as hard
+        references makes the model impossible to delete. Custom roles and roles
+        already used by tasks remain protected because removing them would discard
+        user configuration or invalidate task history.
+        """
+        roles = [role for role in self.repository.roles.list() if role.model_alias == model_alias]
+        if not roles:
+            return {"replacement_alias": replacement_alias, "reassigned_roles": [], "removed_roles": []}
+
+        task_roles = {task.role_id for task in self.repository.tasks.list()}
+        if replacement_alias:
+            updated = []
+            for role in roles:
+                payload = role.to_dict()
+                payload["model_alias"] = replacement_alias
+                self.save_role(payload)
+                updated.append(role.role_id)
+            return {
+                "replacement_alias": replacement_alias,
+                "reassigned_roles": updated,
+                "removed_roles": [],
+            }
+
+        protected = [
+            role.role_id for role in roles
+            if role.role_id not in _DEFAULT_ROLE_IDS or role.role_id in task_roles
+        ]
+        if protected:
+            raise ValueError(
+                f"模型仍被角色使用：{', '.join(protected)}。请先为这些角色选择其他模型。"
+            )
+
+        removed = []
+        for role in roles:
+            self.repository.roles.delete(role.role_id)
+            removed.append(role.role_id)
+        return {"replacement_alias": "", "reassigned_roles": [], "removed_roles": removed}
 
     def roles_using_node(self, node_type: str) -> list[str]:
         # Reference checks must not materialize lazy default roles as a side effect.

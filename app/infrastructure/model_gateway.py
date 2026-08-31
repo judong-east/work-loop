@@ -140,6 +140,37 @@ class OpenAICompatibleGateway:
             "latency_ms": round((time.monotonic() - started) * 1000),
         }
 
+    def list_models(self, provider_id: str, protocol: str = "") -> list[str]:
+        provider = next(
+            (item for item in self.resources.list_providers() if item.provider_id == provider_id),
+            None,
+        )
+        if provider is None:
+            raise KeyError(provider_id)
+        selected_protocol = protocol or provider.protocols[0]
+        if selected_protocol not in provider.protocols:
+            raise ValueError(f"供应商 {provider.label} 不支持协议 {selected_protocol}。")
+        credential = self.resources.credential(provider.provider_id)
+        if provider.auth_type != "none" and not credential:
+            raise ValueError(f"供应商 {provider.label} 尚未配置认证凭据。")
+
+        request = urllib.request.Request(
+            self._models_url(provider, credential, selected_protocol),
+            method="GET",
+            headers=self._headers(provider, credential, selected_protocol),
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=min(self.timeout_seconds, 20)) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"获取模型列表失败（HTTP {error.code}）: {detail}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise RuntimeError(f"无法连接供应商模型列表接口: {error}") from error
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("供应商模型列表不是合法 JSON。") from error
+        return self._model_ids(raw)
+
     @staticmethod
     def _messages(node: WorkflowNode, context: ContextState) -> list[dict[str, str]]:
         contract = _OUTPUT_CONTRACTS.get(node.node_type)
@@ -220,6 +251,15 @@ class OpenAICompatibleGateway:
     @classmethod
     def _request_url(cls, provider: ModelProvider, credential: str, protocol: str) -> str:
         endpoint = cls._endpoint(provider.base_url, protocol)
+        return cls._apply_query_auth(endpoint, provider, credential)
+
+    @classmethod
+    def _models_url(cls, provider: ModelProvider, credential: str, protocol: str) -> str:
+        endpoint = cls._models_endpoint(provider.base_url, protocol)
+        return cls._apply_query_auth(endpoint, provider, credential)
+
+    @staticmethod
+    def _apply_query_auth(endpoint: str, provider: ModelProvider, credential: str) -> str:
         if provider.auth_type != "query_param":
             return endpoint
         parts = urllib.parse.urlsplit(endpoint)
@@ -237,6 +277,48 @@ class OpenAICompatibleGateway:
         elif not path.endswith("/chat/completions"):
             path += "/chat/completions"
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    @staticmethod
+    def _models_endpoint(base_url: str, protocol: str) -> str:
+        parts = urllib.parse.urlsplit(base_url.rstrip("/"))
+        path = parts.path.rstrip("/")
+        if path.endswith("/chat/completions"):
+            path = path[: -len("/chat/completions")]
+        elif path.endswith("/messages"):
+            path = path[: -len("/messages")]
+        if not path.endswith("/models"):
+            if protocol == "claude" and not path.endswith("/v1"):
+                path += "/v1/models"
+            else:
+                path += "/models"
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    @staticmethod
+    def _model_ids(raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = raw.get("data", raw.get("models", []))
+        else:
+            items = []
+        if not isinstance(items, list):
+            raise ValueError("供应商模型列表缺少 data 或 models 数组。")
+
+        models: list[str] = []
+        for item in items:
+            if isinstance(item, str):
+                model_id = item
+            elif isinstance(item, dict):
+                model_id = next(
+                    (str(item[key]) for key in ("id", "model", "name") if item.get(key)),
+                    "",
+                )
+            else:
+                model_id = ""
+            model_id = model_id.strip()
+            if model_id and model_id not in models:
+                models.append(model_id)
+        return models
 
     @staticmethod
     def _content(raw: dict[str, Any], protocol: str) -> str:

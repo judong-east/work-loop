@@ -84,7 +84,7 @@ class ResourceCenter:
             if len(items) == len(providers):
                 raise KeyError(provider_id)
             if any(item.provider_id == provider_id for item in self.list_models()):
-                raise ValueError("provider still has model aliases")
+                raise ValueError("供应商仍有关联模型，请先删除这些模型。")
             write_json_atomic(self.providers_path, {"schema_version": 1, "providers": [item.to_dict() for item in items]})
             self._delete_secret(provider_id)
             health = dict(self._read(self.health_path).get("providers", {}))

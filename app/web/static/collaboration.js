@@ -32,6 +32,9 @@
 
   const post = (path, value) => api(path, { method: "POST", body: JSON.stringify(value) });
   const remove = path => api(path, { method: "DELETE" });
+  const confirmAction = options => window.workloopConfirm
+    ? window.workloopConfirm(options)
+    : Promise.resolve(false);
 
   function toast(message) {
     $("toast").textContent = message;
@@ -108,7 +111,8 @@
   }
 
   async function deleteRole(roleId) {
-    if (!confirm(`删除角色 ${roleId}？`)) return;
+    const confirmed = await confirmAction({ title: "删除角色", message: `确定删除角色“${roleId}”吗？仍被任务使用时不会执行删除。` });
+    if (!confirmed) return;
     try {
       await remove(`/api/v2/roles/${encodeURIComponent(roleId)}`);
       await refreshRoleResources();
@@ -243,7 +247,8 @@
   }
 
   async function deleteGoal(goalId) {
-    if (!confirm("删除该目标记录？（仅当其子任务全部删除后可删）")) return;
+    const confirmed = await confirmAction({ title: "删除目标记录", message: "确定删除该目标记录吗？存在关联子任务时不会执行删除。" });
+    if (!confirmed) return;
     try {
       await remove(`/api/v2/goals/${encodeURIComponent(goalId)}`);
       await refreshTasks();
@@ -302,7 +307,8 @@
   }
 
   async function deleteTask(taskId) {
-    if (!confirm(`删除任务 ${taskId}？`)) return;
+    const confirmed = await confirmAction({ title: "删除协同任务", message: `确定删除任务“${taskId}”吗？存在依赖、交接或运行记录时不会执行删除。` });
+    if (!confirmed) return;
     try {
       await remove(`/api/v2/tasks/${encodeURIComponent(taskId)}`);
       await refreshTasks();
