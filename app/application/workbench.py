@@ -25,6 +25,7 @@ from app.domain.models import (
     WorkflowDefinition,
     WorkflowNode,
 )
+from app.domain.longhorizon import LongHorizonLoop
 from app.domain.node_catalog import NodeCatalog
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator, ModelGateway, OrchestrationEvent
@@ -59,6 +60,13 @@ class WorkbenchService:
         self.gateway = gateway or OpenAICompatibleGateway(self.resources)
         self.workspace_runtime = workspace_runtime or WorkspaceRuntime()
         self.registry.register_handler("testing", self.workspace_runtime.validate)
+        self.longhorizon = LongHorizonLoop(
+            self.gateway,
+            self.workspace_runtime,
+            event_sink=self._record_event,
+            store=self.sessions,
+        )
+        self.registry.register_handler("long_horizon", self.longhorizon.run)
         self.orchestrator = DagOrchestrator(
             self.registry,
             self.sessions,
@@ -81,6 +89,20 @@ class WorkbenchService:
                     WorkflowNode("implementation", "implementation", ("planning",)),
                     WorkflowNode("testing", "testing", ("implementation",), on_failure="human"),
                     WorkflowNode("review", "review", ("implementation", "testing"), on_failure="human"),
+                ],
+            )
+        )
+        self.workflows.save(
+            WorkflowDefinition(
+                workflow_id="long-horizon-task",
+                label="长时程任务流",
+                description="计划制定 → Manager/Executor/Auditor 多轮循环执行 → 测试 → 审核",
+                builtin=True,
+                nodes=[
+                    WorkflowNode("planning", "planning"),
+                    WorkflowNode("long_horizon", "long_horizon", ("planning",), on_failure="human"),
+                    WorkflowNode("testing", "testing", ("long_horizon",), on_failure="human"),
+                    WorkflowNode("review", "review", ("long_horizon", "testing"), on_failure="human"),
                 ],
             )
         )
@@ -325,6 +347,8 @@ class WorkbenchService:
         self.validate_model_alias(role.model_alias)
         if role.node_type == "implementation" and role.workspace_access is not WorkspaceAccess.WRITE:
             raise ValueError("implementation roles require write workspace access")
+        if role.node_type == "long_horizon" and role.workspace_access is not WorkspaceAccess.WRITE:
+            raise ValueError("long_horizon roles require write workspace access")
         if role.node_type == "testing" and role.workspace_access is not WorkspaceAccess.VALIDATE:
             raise ValueError("testing roles require validate workspace access")
 

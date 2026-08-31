@@ -23,6 +23,26 @@ _OUTPUT_CONTRACTS = {
     "review": {"verdict": "pass|revise|blocked", "issues": [], "decisions": ["string"]},
     "testing": {"checks": [], "risks": ["string"], "decisions": ["string"]},
     "tool": {"result": "any"},
+    # Long-horizon loop roles; the executor episode reuses the implementation
+    # contract so its file_changes flow through the atomic publish path.
+    "longhorizon_manager": {
+        "route": "execute|done|blocked|ask",
+        "task_state": {"completed": ["string"], "incomplete": ["string"], "risks": ["string"], "untrusted": ["string"]},
+        "task_contract": "string",
+        "subtask": "string",
+        "acceptance_criteria": ["string"],
+        "related_rounds": [1],
+        "question": "string",
+    },
+    "longhorizon_auditor": {
+        "status": "complete|incomplete|blocked",
+        "integrity": "clean|suspect|violation",
+        "contract_audit": "aligned|unknown|needs_revision",
+        "facts": ["string"],
+        "gaps": ["string"],
+        "blocking_constraints": ["string"],
+        "state_update": "string",
+    },
 }
 
 

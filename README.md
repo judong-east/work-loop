@@ -14,8 +14,12 @@ V2 runtime, one resource center, and one HTTP API (`/api/v2`).
 - defines reusable roles with their own model, instructions, capabilities, and
   workspace permission;
 - coordinates multiple role-owned tasks through a dependency DAG;
-- runs independent read-only tasks concurrently while serializing workspace
-  writes and validation;
+- runs read-only tasks concurrently and serializes workspace writers against
+  each other, without making writers wait for unrelated readers;
+- automatically unblocks downstream tasks once a retried dependency completes;
+- lets each task override the role's model with its own model alias;
+- supports editing pending/blocked/failed tasks and re-validates the DAG;
+- runs coordination asynchronously and exposes the orchestration event log;
 - persists task-to-task handoffs for downstream roles;
 - persists project, session, context, node run, strategy, and Gate state;
 - reads a configured local workspace into a bounded context snapshot;
@@ -78,6 +82,42 @@ Workloop validates and publishes these writes atomically. The testing node then
 runs only the commands configured on the project. A failed command or non-pass
 review blocks the session with a `quality_review` Gate.
 
+## Long-horizon execution
+
+Large tasks can run through a multi-round Manager → Executor → Auditor loop
+(the `long_horizon` node type), adapted from
+[AMAP-ML/LongHorizon-Harness](https://github.com/AMAP-ML/LongHorizon-Harness)
+(MIT). The built-in workflow **长时程任务流** (`long-horizon-task`) uses it:
+
+```text
+planning -> long_horizon -> (testing, review)
+```
+
+Each round:
+
+1. the **Manager** plans one subtask and rewrites the durable task state; every
+   completed fact must cite the audit round that verified it;
+2. the **Executor** runs that subtask with a fresh context and proposes
+   `file_changes`, which are published through the same atomic workspace
+   validation as the implementation node;
+3. the **Auditor** independently verifies the round and returns
+   `status` / `integrity` / `contract_audit`. Unresolved blocking constraints,
+   violations, or an unaligned contract audit downgrade a `complete` verdict.
+
+A `done` route is accepted only when the latest audit is clean. Protocol
+violations (an invalid route, a premature `done`) are fed back to the Manager
+as harness feedback instead of failing the node. Node config:
+
+- `max_rounds` — rounds per invocation, default `8`, clamped to `1..25`;
+- `manager_model_alias` / `executor_model_alias` / `auditor_model_alias`
+  — optional per-role model overrides, defaulting to the node's model alias.
+
+When the budget is exhausted without a clean audit, or the Manager routes
+`blocked`/`ask`, the session is blocked behind a `longhorizon_rounds`,
+`longhorizon_blocked`, or `longhorizon_input_needed` Gate. Approving the policy
+and re-running resumes from the persisted round ledger (session event messages)
+instead of starting over.
+
 ## Collaborative development
 
 Collaboration adds a task graph above individual model workflows:
@@ -89,7 +129,12 @@ Collaboration adds a task graph above individual model workflows:
 
 Each task owns a role, priority, dependencies, execution session, status, and
 compact result. Completing a task creates durable handoffs for its dependents.
-A failed task blocks downstream work instead of being silently skipped.
+A failed task blocks downstream work instead of being silently skipped. When a
+blocked dependency is retried and completes, its blocked dependents are
+unblocked automatically on the next coordination round — no manual requeueing.
+
+Each task can pin its own `model_alias`; it overrides the role's binding for
+that single task, so one developer role can fan work out across several models.
 
 ### Goal decomposition
 
@@ -146,6 +191,7 @@ Core read endpoints:
 - `GET /api/v2/projects/{project_id}/collaboration`
 - `GET /api/v2/roles`
 - `GET /api/v2/sessions/{session_id}`
+- `GET /api/v2/events?after=&limit=`
 
 Core write endpoints:
 
@@ -153,8 +199,11 @@ Core write endpoints:
 - `POST /api/v2/projects/{project_id}`
 - `POST /api/v2/projects/{project_id}/sessions`
 - `POST /api/v2/projects/{project_id}/tasks`
-- `POST /api/v2/projects/{project_id}/coordinate`
+- `POST /api/v2/projects/{project_id}/coordinate` — synchronous by default;
+  pass `{"async": true}` to run in the background (returns `202`; poll
+  `GET /api/v2/projects/{project_id}/collaboration`, which reports `coordinating`)
 - `POST /api/v2/projects/{project_id}/goals`
+- `POST /api/v2/tasks/{task_id}` — edit a non-running task
 - `POST /api/v2/tasks/{task_id}/retry`
 - `POST /api/v2/roles`
 - `POST /api/v2/sessions/{session_id}/messages`

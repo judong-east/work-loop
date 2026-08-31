@@ -13,3 +13,8 @@ agent-profiles.json
 
 # V2 local projects, sessions, provider credentials, and events.
 workbench/
+
+# PyInstaller build artifacts and local agent session data.
+build/
+dist/
+.zcode/

@@ -28,6 +28,11 @@ def built_in_nodes() -> list[NodeDefinition]:
             ("implementation", "coding"), builtin=True,
         ),
         NodeDefinition(
+            "long_horizon", "长时程执行", "Manager/Executor/Auditor 多轮循环执行大型任务，直到审计确认完成。",
+            ("steps", "artifacts"), ("changes", "rounds", "completed"),
+            ("implementation", "coding", "long-horizon"), builtin=True,
+        ),
+        NodeDefinition(
             "review", "代码审核", "对上游输出和验收条件进行独立审核。",
             ("changes", "acceptance_criteria"), ("verdict", "issues", "decisions"),
             ("review", "critical"), builtin=True,

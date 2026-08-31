@@ -478,6 +478,15 @@
   $("workflowForm").addEventListener("submit", async event => { event.preventDefault(); try { syncWorkflowForm(); if (!state.editingWorkflow.nodes.length) throw new Error("工作流至少需要一个节点"); const saved = await post("/api/v2/workflows", state.editingWorkflow); state.selectedWorkflowId = saved.workflow_id; state.editingWorkflow = clone(saved); await refreshManagement(); toast("工作流和模型关联已保存"); } catch (error) { toast(error.message); } });
   $("deleteWorkflow").addEventListener("click", async () => { const id = state.editingWorkflow?.workflow_id; if (!id || !confirm(`删除工作流 ${id}？`)) return; try { await remove(`/api/v2/workflows/${encodeURIComponent(id)}`); state.editingWorkflow = null; await refreshManagement(); toast("工作流已删除"); } catch (error) { toast(error.message); } });
 
+  if (new URLSearchParams(location.search).get("desktop") === "1") {
+    document.body.classList.add("desktop");
+    $("titlebar").hidden = false;
+    const callWindow = name => { const api = window.pywebview?.api; if (api && typeof api[name] === "function") api[name](); };
+    $("winMinimize").addEventListener("click", () => callWindow("minimize"));
+    $("winMaximize").addEventListener("click", () => callWindow("toggle_maximize"));
+    $("winClose").addEventListener("click", () => callWindow("close"));
+  }
+
   if (localStorage.getItem("workloop-theme") === "dark") document.body.classList.add("dark");
   init();
 })();

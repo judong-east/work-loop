@@ -70,6 +70,15 @@ STRATEGY_PRESETS: dict[str, dict[str, Any]] = {
         "requires_approval": False,
         "required_capabilities": ["review"],
     },
+    "long-horizon": {
+        "label": "长时程开发",
+        "task_type": "feature",
+        "complexity_min": "L",
+        "phases": ["planning", "loop-execute", "audit", "testing", "review"],
+        "recommended_workflow_id": "long-horizon-task",
+        "requires_approval": True,
+        "required_capabilities": ["planning", "coding", "review", "testing"],
+    },
     "git-action": {
         "label": "版本操作",
         "task_type": "git",
