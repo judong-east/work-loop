@@ -5,9 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Workloop 工作台</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233ddba4'/%3E%3Cstop offset='.55' stop-color='%2314b8a6'/%3E%3Cstop offset='1' stop-color='%230ea5e9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1024' height='1024' rx='232' fill='url(%23g)'/%3E%3Cpath d='M757.7 684.1A300 300 0 1 1 757.7 339.9' fill='none' stroke='%23FFFFFF' stroke-width='108' stroke-linecap='round'/%3E%3Cpolygon fill='%23FFFFFF' points='866.7,495.6 854.4,272.2 661.1,407.6'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/workbench.css">
 </head>
 <body>
+  <header class="titlebar" id="titlebar" hidden>
+    <div class="titlebar-main pywebview-drag-region">
+      <span class="titlebar-mark" aria-hidden="true">W</span><span class="titlebar-name">Workloop 工作台</span>
+    </div>
+    <div class="titlebar-actions">
+      <button class="titlebar-button" id="winMinimize" type="button" aria-label="最小化">&#x2500;</button>
+      <button class="titlebar-button" id="winMaximize" type="button" aria-label="最大化或还原">&#x25A1;</button>
+      <button class="titlebar-button titlebar-close" id="winClose" type="button" aria-label="关闭">&#x2715;</button>
+    </div>
+  </header>
   <a class="skip-link" href="#conversation">跳到会话</a>
   <div class="shell" id="shell">
     <aside class="rail" id="rail">
