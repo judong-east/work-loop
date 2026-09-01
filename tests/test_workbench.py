@@ -633,7 +633,10 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(page.count('name="providerProtocol"'), 2)
             self.assertIn('id="providerProtocolOpenAI" type="radio"', page)
             self.assertIn('id="providerProtocolClaude" type="radio"', page)
-            self.assertIn('id="modelName" required', page)
+            # 物理模型下拉框不能带 required：发现成功时它会停在空占位项，
+            # 原生校验会静默拦截提交，导致无法添加模型。校验交由 JS 守卫完成。
+            self.assertIn('<select id="modelName">', page)
+            self.assertNotIn('id="modelName" required', page)
             self.assertIn('id="refreshModelList"', page)
             self.assertIn('id="confirmDialog"', page)
             self.assertNotIn("经典控制台", page)
@@ -641,6 +644,7 @@ class WorkbenchDomainTest(unittest.TestCase):
             with urllib.request.urlopen(base + "/static/workbench.js", timeout=5) as response:
                 workbench_script = response.read().decode()
             self.assertNotIn("confirm(`", workbench_script)
+            self.assertIn('throw new Error("请选择或输入物理模型名")', workbench_script)
             self.assertIn("window.workloopConfirm = confirmAction", workbench_script)
             self.assertIn('if (savedTheme === "dark")', workbench_script)
             self.assertIn("data-delete-session", workbench_script)
