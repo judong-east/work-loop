@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from app.domain.models import (
     TaskPolicy,
     WorkflowDefinition,
     WorkflowNode,
+    default_runtime_policy,
 )
 from app.domain.longhorizon import LongHorizonLoop
 from app.domain.node_catalog import NodeCatalog
@@ -34,7 +36,9 @@ from app.domain.workflow_catalog import WorkflowCatalog
 from app.infrastructure.json_repository import JsonCollection
 from app.infrastructure.model_gateway import OpenAICompatibleGateway
 from app.infrastructure.resource_center import ResourceCenter
+from app.infrastructure.zvec_grep import ZvecGrepClient
 from app.infrastructure.workspace_runtime import WorkspaceRuntime
+from .model_invocation import ModelInvocationService
 
 
 class WorkbenchService:
@@ -46,6 +50,7 @@ class WorkbenchService:
         *,
         gateway: ModelGateway | None = None,
         workspace_runtime: WorkspaceRuntime | None = None,
+        search_client: ZvecGrepClient | None = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -58,11 +63,18 @@ class WorkbenchService:
         self.events_path = self.root / "events.jsonl"
         self._event_lock = threading.Lock()
         self.gateway = gateway or OpenAICompatibleGateway(self.resources)
+        self.search_client = search_client or ZvecGrepClient()
+        self.model_invocation = ModelInvocationService(
+            self.gateway,
+            search_client=self.search_client,
+            event_sink=self._record_event,
+        )
         self.workspace_runtime = workspace_runtime or WorkspaceRuntime()
         self.registry.register_handler("testing", self.workspace_runtime.validate)
         self.longhorizon = LongHorizonLoop(
             self.gateway,
             self.workspace_runtime,
+            invoker=self.model_invocation,
             event_sink=self._record_event,
             store=self.sessions,
         )
@@ -73,6 +85,7 @@ class WorkbenchService:
             self.gateway,
             event_sink=self._record_event,
             output_processor=self.workspace_runtime.process_output,
+            invoker=self.model_invocation,
         )
         self._ensure_default_workflow()
 
@@ -131,6 +144,7 @@ class WorkbenchService:
         default_model: str = "",
         workspace_path: str = "",
         validation_commands: list[list[str]] | None = None,
+        runtime_policy: dict[str, Any] | None = None,
     ) -> Project:
         if default_model and default_model not in {item.alias for item in self.resources.list_models()}:
             raise ValueError(f"unknown model alias: {default_model}")
@@ -141,6 +155,7 @@ class WorkbenchService:
             default_model=default_model,
             workspace_path=workspace_path,
             validation_commands=validation_commands or [],
+            runtime_policy=dict(runtime_policy) if runtime_policy is not None else default_runtime_policy(),
         )
         return self.projects.save(project, project.project_id)
 
@@ -163,6 +178,7 @@ class WorkbenchService:
             default_model=default_model,
             workspace_path=str(value.get("workspace_path", current.workspace_path)),
             validation_commands=value.get("validation_commands", current.validation_commands),
+            runtime_policy=dict(value.get("runtime_policy", current.runtime_policy)),
             created_at=current.created_at,
             updated_at=utc_now(),
             schema_version=current.schema_version,
@@ -268,16 +284,100 @@ class WorkbenchService:
                 "chat", "tool", model_alias=project.default_model,
                 prompt_template="直接回答用户请求；result 字段必须是可展示给用户的完整文本。",
             )
-            output = self.gateway.complete(
-                model_alias=project.default_model,
+            output = self.model_invocation.invoke(
+                session=session,
                 node=node,
                 context=session.context,
+                model_alias=project.default_model,
+                output_fields=("result",),
             )
             session.add_message(
                 "assistant", str(output.get("result", output)),
                 metadata={"mode": "chat", "model": output.get("model", project.default_model)},
             )
         return self.sessions.save(session, session.session_id)
+
+    def send_message_stream(self, session_id: str, content: str) -> Iterator[dict[str, Any]]:
+        """Return an iterator for a chat SSE session without changing the JSON API.
+
+        The user message and running state are persisted before model work
+        starts.  The assistant message remains atomic: partial deltas are only
+        sent to the client, and the complete ``result`` is written after the
+        gateway emits ``done``.
+        """
+
+        session = self.get_session(session_id)
+        if not content.strip():
+            raise ValueError("message cannot be empty")
+        if session.mode is not SessionMode.CHAT:
+            raise ValueError("流式消息接口只支持普通对话会话")
+        normalized = content.strip()
+        session.add_message("user", normalized)
+        project = self.get_project(session.project_id)
+        session.context = session.context.merge({"inputs": {
+            "request": normalized,
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+        }})
+        session.status = "running"
+        self.sessions.save(session, session.session_id)
+
+        node = WorkflowNode(
+            "chat", "tool", model_alias=project.default_model,
+            prompt_template="直接回答用户请求；输出可直接展示给用户的完整文本。",
+        )
+
+        def events() -> Iterator[dict[str, Any]]:
+            assistant_parts: list[str] = []
+            done = False
+            try:
+                yield {"type": "start", "session_id": session.session_id}
+                for event in self.model_invocation.invoke_stream(
+                    session=session,
+                    node=node,
+                    context=session.context,
+                    model_alias=project.default_model,
+                    output_fields=("result",),
+                ):
+                    event_type = str(event.get("type", ""))
+                    if event_type == "text_delta":
+                        assistant_parts.append(str(event.get("text", "")))
+                        yield event
+                        continue
+                    if event_type != "done":
+                        yield event
+                        continue
+
+                    output = event.get("output", {})
+                    if not isinstance(output, dict):
+                        output = {"result": output}
+                    result = output.get("result", "")
+                    assistant_text = str(result if result != "" else "".join(assistant_parts))
+                    session.add_message(
+                        "assistant",
+                        assistant_text,
+                        metadata={"mode": "chat", "model": output.get("model", project.default_model)},
+                    )
+                    session.status = "idle"
+                    saved = self.sessions.save(session, session.session_id)
+                    done = True
+                    yield {
+                        "type": "done",
+                        "output": output,
+                        "model": output.get("model", project.default_model),
+                        "session": saved.to_dict(),
+                    }
+                if not done:
+                    raise RuntimeError("流式模型未返回最终结果")
+            except BaseException:
+                session.status = "idle"
+                try:
+                    self.sessions.save(session, session.session_id)
+                except OSError:
+                    pass
+                raise
+
+        return events()
 
     def save_workflow(self, workflow: WorkflowDefinition) -> WorkflowDefinition:
         try:
@@ -347,6 +447,23 @@ class WorkbenchService:
 
     def workspace_status(self, project_id: str) -> dict[str, Any]:
         return self.workspace_runtime.snapshot(self.get_project(project_id))
+
+    def search_status(self, project_id: str) -> dict[str, Any]:
+        """Return local zvec-grep readiness without starting an index job."""
+
+        project = self.get_project(project_id)
+        if not project.workspace_path:
+            return {
+                "ready": False,
+                "root": "",
+                "error": "项目尚未配置 workspace_path。",
+                "backend": "zvec-grep",
+                "local_only": True,
+            }
+        result = self.search_client.health(project.workspace_path)
+        result["backend"] = "zvec-grep"
+        result["local_only"] = True
+        return result
 
     def validate_role(self, role: RoleProfile) -> None:
         role.validate()
@@ -584,4 +701,5 @@ class WorkbenchService:
             "default_model": project.default_model,
             "workspace_path": project.workspace_path,
             "validation_commands": [list(command) for command in project.validation_commands],
+            "runtime_policy": dict(project.runtime_policy),
         }

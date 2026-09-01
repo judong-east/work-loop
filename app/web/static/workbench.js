@@ -3,7 +3,10 @@
     projects: [], sessions: [], project: null, session: null, mode: "chat",
     catalog: { nodes: [], workflows: [] }, strategies: [], resources: { providers: [], models: [], health: [] },
     selectedWorkflowId: "default-task", selectedStrategy: "guided-develop", editingProjectId: "", editingWorkflow: null, testingProviders: new Set(),
-    pendingMessage: null, sendSequence: 0,
+    pendingMessage: null, streamMessage: null, sendSequence: 0,
+    // null = not probed yet for the current project; the pill stays quiet until
+    // the readiness answer actually arrives.
+    search: null, searchProjectId: "",
   };
   const THEME_KEY = "workloop-theme-minimal-v1";
   const $ = id => document.getElementById(id);
@@ -30,6 +33,7 @@
     pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     refresh: '<path d="M20 11a8 8 0 0 0-14.9-4M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.9 4M20 20v-5h-5"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
     sliders: '<path d="M4 6h6M14 6h6M4 12h10M18 12h2M4 18h2M10 18h10"/><circle cx="12" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>',
     trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/>',
@@ -47,6 +51,55 @@
   };
   const post = (path, value) => api(path, { method: "POST", body: JSON.stringify(value) });
   const remove = path => api(path, { method: "DELETE" });
+
+  async function streamPost(path, value, onEvent) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(value),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `请求失败（${response.status}）`);
+    }
+    if (!response.body) throw new Error("浏览器不支持流式响应");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let completed = null;
+
+    const consume = async (flush = false) => {
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      if (!flush) buffer = blocks.pop() || "";
+      else buffer = "";
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        let eventName = "message";
+        const data = [];
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^\s/, ""));
+        }
+        if (!data.length) continue;
+        let payload;
+        try { payload = JSON.parse(data.join("\n")); }
+        catch (_) { throw new Error("流式响应包含非法 JSON"); }
+        if (eventName === "error") throw new Error(payload.error || "模型流式调用失败");
+        if (eventName === "done") completed = payload;
+        if (typeof onEvent === "function") onEvent(eventName, payload);
+      }
+    };
+
+    while (true) {
+      const { value: chunk, done } = await reader.read();
+      buffer += decoder.decode(chunk || new Uint8Array(), { stream: !done });
+      await consume(done);
+      if (done) break;
+    }
+    if (!completed) throw new Error("流式响应未返回完成事件");
+    return completed;
+  }
+
   const toast = message => { $("toast").textContent = message; $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 2600); };
   let confirmResolver = null;
 
@@ -192,18 +245,41 @@
     $("projectName").textContent = state.project?.name || "选择一个项目";
     $("sessionTitle").textContent = state.session?.title || "新的会话";
     $("composerProjectContext").textContent = state.project?.name || "选择项目";
+    renderSearchPill();
     const messages = [...(state.session?.messages || [])];
     const pending = state.pendingMessage;
     const pendingVisible = pending && pending.projectId === state.project?.project_id &&
       (!state.session || !pending.sessionId || pending.sessionId === state.session.session_id);
     if (pendingVisible) messages.push({ role: "user", content: pending.content, pending: true });
+    const streaming = state.streamMessage;
+    const streamingVisible = streaming && streaming.projectId === state.project?.project_id &&
+      (!state.session || !streaming.sessionId || streaming.sessionId === state.session.session_id ||
+        (pending && pending.sessionId === streaming.sessionId));
+    if (streamingVisible) messages.push({
+      role: "assistant", content: streaming.content, streaming: true,
+      stream_status: streaming.status || "生成中…",
+    });
     $("welcome").classList.toggle("hidden", messages.length > 0);
     let stack = $("messageStack");
     if (!stack) { stack = document.createElement("div"); stack.id = "messageStack"; stack.className = "message-stack"; $("messageList").appendChild(stack); }
-    stack.innerHTML = messages.map(message => `<article class="message ${message.role === "user" ? "user" : "assistant"}${message.pending ? " pending" : ""}"><span class="message-avatar">${message.role === "user" ? "你" : (message.node_id ? "N" : "W")}</span><div class="message-body"><div class="message-meta">${message.node_id ? esc(message.node_id) : (message.role === "user" ? "你" : "Workloop")}${message.pending ? '<span class="message-status">发送中…</span>' : ""}</div>${esc(message.content)}</div></article>`).join("");
+    stack.innerHTML = messages.map(message => `<article class="message ${message.role === "user" ? "user" : "assistant"}${message.pending ? " pending" : ""}${message.streaming ? " streaming" : ""}"><span class="message-avatar">${message.role === "user" ? "你" : (message.node_id ? "N" : "W")}</span><div class="message-body"><div class="message-meta">${message.node_id ? esc(message.node_id) : (message.role === "user" ? "你" : "Workloop")}${message.pending ? '<span class="message-status">发送中…</span>' : ""}${message.streaming ? `<span class="message-status">${esc(message.stream_status || "生成中…")}</span>` : ""}</div>${esc(message.content)}</div></article>`).join("");
     scrollMessageListToBottom();
     syncSendButton();
     renderFlow();
+  }
+
+  function renderSearchPill() {
+    const pill = $("searchPill");
+    const text = $("searchPillText");
+    const project = state.project;
+    if (!project || !state.search || state.searchProjectId !== project.project_id) {
+      pill.hidden = true;
+      return;
+    }
+    pill.hidden = false;
+    const ready = state.search.ready === true;
+    text.textContent = ready ? "检索就绪" : "检索未就绪";
+    pill.style.opacity = ready ? "1" : "0.5";
   }
 
   function renderFlow() {
@@ -258,8 +334,26 @@
     if (!dialog.open) dialog.showModal();
   }
 
+  async function probeSearch(projectId) {
+    // Readiness is advisory: a missing or unindexed zvec-grep must never block
+    // the chat, so a failed probe only clears the pill.
+    try {
+      const status = await api(`/api/v2/projects/${encodeURIComponent(projectId)}/search`);
+      if (state.project?.project_id !== projectId) return;
+      state.search = status;
+      state.searchProjectId = projectId;
+    } catch {
+      if (state.project?.project_id !== projectId) return;
+      state.search = null;
+      state.searchProjectId = "";
+    }
+    renderSearchPill();
+  }
+
   async function selectProject(projectId) {
     try {
+      state.search = null;
+      state.searchProjectId = "";
       state.project = state.projects.find(project => project.project_id === projectId) || null;
       state.sessions = await api(`/api/v2/projects/${encodeURIComponent(projectId)}/sessions`);
       state.session = state.sessions[0] || null;
@@ -268,6 +362,7 @@
       if (state.session.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
       if (state.session.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
       renderMode(); renderProjects(); renderSessions(); $("rail").classList.remove("open");
+      void probeSearch(projectId);
       document.body.dataset.projectId = state.project.project_id;
       document.body.dataset.projectName = state.project.name;
       window.dispatchEvent(new CustomEvent("workloop:project-selected", {
@@ -311,17 +406,44 @@
           policy: pending.mode === "task" ? { strategy: state.selectedStrategy } : undefined,
         });
       }
-      session = await post(`/api/v2/sessions/${session.session_id}/messages`, { content: pending.content });
-      if (pending.mode === "task") session = await post(`/api/v2/sessions/${session.session_id}/run`, {});
+      pending.sessionId = session.session_id;
+      if (pending.mode === "chat") {
+        state.streamMessage = {
+          id: pending.id,
+          projectId: pending.projectId,
+          sessionId: session.session_id,
+          content: "",
+          status: "生成中…",
+        };
+        renderSessions();
+        const completed = await streamPost(
+          `/api/v2/sessions/${session.session_id}/messages/stream`,
+          { content: pending.content },
+          (eventName, payload) => {
+            if (!state.streamMessage || state.streamMessage.id !== pending.id) return;
+            if (eventName === "start") state.streamMessage.sessionId = payload.session_id || state.streamMessage.sessionId;
+            if (eventName === "text_delta") state.streamMessage.content += String(payload.text || "");
+            if (eventName === "tool_call") state.streamMessage.status = `调用 ${payload.name || "本地工具"}…`;
+            if (eventName === "tool_result") state.streamMessage.status = "整理搜索结果…";
+            renderSessions();
+          },
+        );
+        session = completed.session || await api(`/api/v2/sessions/${session.session_id}`);
+      } else {
+        session = await post(`/api/v2/sessions/${session.session_id}/messages`, { content: pending.content });
+        session = await post(`/api/v2/sessions/${session.session_id}/run`, {});
+      }
       if (state.project?.project_id === pending.projectId) {
         state.session = session;
         const index = state.sessions.findIndex(item => item.session_id === session.session_id);
         if (index >= 0) state.sessions[index] = session;
         else state.sessions.unshift(session);
       }
+      if (state.streamMessage?.id === pending.id) state.streamMessage = null;
       if (state.pendingMessage?.id === pending.id) state.pendingMessage = null;
       renderProjects(); renderSessions();
     } catch (error) {
+      if (state.streamMessage?.id === pending.id) state.streamMessage = null;
       if (state.pendingMessage?.id === pending.id) state.pendingMessage = null;
       // Keep a failed request recoverable without overwriting a newer draft.
       const input = $("messageInput");
@@ -507,7 +629,7 @@
     $("modelDiscoveryStatus").classList.remove("error");
     modelAliasAutoValue = item?.model || "";
     $("modelCapabilities").value = (item?.capabilities || ["general"]).join(", ");
-    $("modelTemperature").value = item?.temperature ?? ""; $("modelMaxTokens").value = item?.max_tokens ?? "";
+    $("modelTemperature").value = item?.temperature ?? ""; $("modelMaxTokens").value = item?.max_tokens ?? ""; $("modelContextWindow").value = item?.context_window_tokens ?? "";
     $("modelEnabled").checked = item?.enabled ?? true;
     discoverProviderModels(provider, item?.model || "");
   }
@@ -709,6 +831,16 @@
     $("projectDefaultModel").value = project?.default_model || "";
     $("validationCommandsInput").value = (project?.validation_commands || []).map(command => JSON.stringify(command)).join("\n");
     $("instructionsInput").value = project?.instructions || "";
+    const policy = project?.runtime_policy || {};
+    const compaction = policy.compaction || {};
+    const search = policy.local_search || {};
+    $("compactionEnabled").checked = compaction.enabled !== false;
+    $("compactionReserve").value = compaction.reserve_tokens || 4096;
+    $("compactionKeepRecent").value = compaction.keep_recent_tokens || 12000;
+    $("compactionSummaryMax").value = compaction.summary_max_tokens || 1500;
+    $("compactionMaxRounds").value = compaction.max_compactions || 2;
+    $("searchEnabled").checked = search.enabled !== false;
+    $("searchMaxRounds").value = search.max_tool_rounds || 8;
     $("projectDialog").showModal();
   }
 
@@ -736,12 +868,27 @@
         if (!Array.isArray(value) || !value.length || value.some(item => typeof item !== "string" || !item)) throw new Error(`第 ${index + 1} 条验证命令必须是非空字符串数组`);
         return value;
       });
+      const runtime_policy = {
+        compaction: {
+          enabled: $("compactionEnabled").checked,
+          reserve_tokens: parseInt($("compactionReserve").value, 10),
+          keep_recent_tokens: parseInt($("compactionKeepRecent").value, 10),
+          summary_max_tokens: parseInt($("compactionSummaryMax").value, 10),
+          max_compactions: parseInt($("compactionMaxRounds").value, 10),
+        },
+        local_search: {
+          enabled: $("searchEnabled").checked,
+          tools: ["zvec_grep_search", "zvec_grep_rg"],
+          max_tool_rounds: parseInt($("searchMaxRounds").value, 10),
+        },
+      };
       const project = await post(state.editingProjectId ? `/api/v2/projects/${encodeURIComponent(state.editingProjectId)}` : "/api/v2/projects", {
         name: $("projectInput").value,
         workspace_path: $("workspaceInput").value.trim(),
         default_model: $("projectDefaultModel").value,
         validation_commands: validationCommands,
         instructions: $("instructionsInput").value,
+        runtime_policy,
       });
       if (state.editingProjectId) state.projects = state.projects.map(item => item.project_id === project.project_id ? project : item);
       else state.projects.unshift(project);
@@ -782,6 +929,13 @@
   $("mobileMenu").addEventListener("click", () => $("rail").classList.toggle("open"));
   $("refreshProjects").addEventListener("click", init);
   $("refreshSession").addEventListener("click", () => state.session && api(`/api/v2/sessions/${state.session.session_id}`).then(session => { state.session = session; renderSessions(); }).catch(error => toast(error.message)));
+  $("searchPill").addEventListener("click", () => {
+    if (!state.search) return;
+    const detail = state.search.ready
+      ? `根目录：${state.search.root}\n后端：${state.search.backend || "zvec-grep"}`
+      : `根目录：${state.search.root || "未配置"}\n错误：${state.search.error || "未就绪"}`;
+    toast(detail);
+  });
   $("themeToggle").addEventListener("click", () => { document.body.classList.toggle("dark"); localStorage.setItem(THEME_KEY, document.body.classList.contains("dark") ? "dark" : "light"); });
   $("closeInspector").addEventListener("click", () => setInspectorOpen(false));
   $("showInspector").addEventListener("click", () => setInspectorOpen(true));
@@ -841,7 +995,7 @@
     syncProviderAuth();
     if (preset === "custom") $("providerId").focus();
   }));
-  $("modelForm").addEventListener("submit", async event => { event.preventDefault(); try { const modelName = physicalModelName(); if (!modelName) throw new Error("请选择或输入物理模型名"); await post("/api/v2/resources/models", { alias: $("modelAlias").value, provider_id: $("modelProvider").value, protocol: $("modelProtocol").value, model: modelName, capabilities: csv($("modelCapabilities").value), temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value), max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value), enabled: $("modelEnabled").checked }); $("modelForm").classList.add("hidden"); await refreshManagement(); toast("模型已保存"); } catch (error) { toast(error.message); } });
+  $("modelForm").addEventListener("submit", async event => { event.preventDefault(); try { const modelName = physicalModelName(); if (!modelName) throw new Error("请选择或输入物理模型名"); await post("/api/v2/resources/models", { alias: $("modelAlias").value, provider_id: $("modelProvider").value, protocol: $("modelProtocol").value, model: modelName, capabilities: csv($("modelCapabilities").value), temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value), max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value), context_window_tokens: $("modelContextWindow").value === "" ? null : Number($("modelContextWindow").value), enabled: $("modelEnabled").checked }); $("modelForm").classList.add("hidden"); await refreshManagement(); toast("模型已保存"); } catch (error) { toast(error.message); } });
   document.querySelector("[data-cancel-model]").addEventListener("click", () => $("modelForm").classList.add("hidden"));
   $("modelName").addEventListener("change", () => syncPhysicalModelMode({ focus: true }));
   $("modelNameCustom").addEventListener("input", syncModelAliasDefault);

@@ -13,7 +13,7 @@ from app.domain.models import ContextState, Project, Session, WorkflowNode
 
 _IGNORED_DIRECTORIES = {
     ".git", ".hg", ".svn", ".idea", ".vscode", ".venv", "venv",
-    "node_modules", "dist", "build", "coverage", "__pycache__", "workbench",
+    "node_modules", "dist", "build", "coverage", "__pycache__", "workbench", ".zvec-grep",
 }
 _INHERITED_ENVIRONMENT = {
     "COMSPEC", "LANG", "LC_ALL", "PATH", "PATHEXT", "SYSTEMROOT",
@@ -274,17 +274,24 @@ class WorkspaceRuntime:
             or candidate.parts[0].lower() == "workbench"
         ):
             raise ValueError(f"文件路径受保护：{relative}")
-        target = (root / candidate).resolve()
+        # Reject a symlinked target before resolution.  ``resolve`` dereferences
+        # the link, so checking the resolved path can never observe one: an
+        # in-workspace link would be followed silently and the published
+        # evidence would name the link instead of the file actually written.
+        literal = root / candidate
+        if literal.is_symlink():
+            raise ValueError(f"文件路径经过符号链接：{relative}")
+        target = literal.resolve()
         try:
             target.relative_to(root)
         except ValueError as error:
             raise ValueError(f"文件路径越出工作区：{relative}") from error
         current = target.parent
-        while current != root:
+        while current != root and current != current.parent:
             if current.is_symlink():
                 raise ValueError(f"文件路径经过符号链接：{relative}")
             current = current.parent
-        if target.is_symlink() or target.is_dir():
+        if target.is_dir():
             raise ValueError(f"目标不是普通文件：{relative}")
         return target
 

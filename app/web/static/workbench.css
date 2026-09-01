@@ -4256,6 +4256,108 @@ dialog::backdrop {
   text-overflow: ellipsis;
 }
 
+.context-pill-action {
+  cursor: pointer;
+  transition: background 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.context-pill-action:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.runtime-policy-section {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.runtime-policy-section summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+  list-style: none;
+  user-select: none;
+}
+
+.runtime-policy-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-policy-section summary span {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.policy-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.policy-group:first-of-type {
+  border-top: none;
+}
+
+.policy-group h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.checkbox-label span {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.policy-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.policy-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.policy-fields input[type="number"] {
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .composer-context-action {
   margin-left: auto;
 }

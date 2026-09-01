@@ -416,11 +416,13 @@ class LongHorizonLoop:
         gateway: ModelGateway,
         workspace_runtime: Any,
         *,
+        invoker: Any = None,
         event_sink: Any = None,
         store: Any = None,
     ):
         self.gateway = gateway
         self.workspace_runtime = workspace_runtime
+        self.invoker = invoker
         self.event_sink = event_sink
         self.store = store
 
@@ -607,7 +609,16 @@ class LongHorizonLoop:
         episode_node = WorkflowNode(
             f"{node.node_id}:{role}:{index}", node_type, model_alias=alias, prompt_template=prompt,
         )
-        output = self.gateway.complete(model_alias=alias, node=episode_node, context=context)
+        if self.invoker is not None:
+            output = self.invoker.invoke(
+                session=session,
+                node=episode_node,
+                context=context,
+                model_alias=alias,
+                output_fields=(),
+            )
+        else:
+            output = self.gateway.complete(model_alias=alias, node=episode_node, context=context)
         if "inputs" in output or "errors" in output:
             raise ValueError("模型输出不能包含 inputs 或 errors 字段")
         return output

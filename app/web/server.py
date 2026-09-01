@@ -41,6 +41,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects$"), "handle_projects"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_project_sessions"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/workspace$"), "handle_workspace"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)/search$"), "handle_search_status"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/collaboration$"), "handle_collaboration"),
         (re.compile(r"^/api/v2/roles$"), "handle_roles"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_session"),
@@ -57,6 +58,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects/([\w-]+)/goals$"), "handle_decompose_goal"),
         (re.compile(r"^/api/v2/tasks/([\w-]+)/retry$"), "handle_retry_collaboration_task"),
         (re.compile(r"^/api/v2/roles$"), "handle_save_role"),
+        (re.compile(r"^/api/v2/sessions/([\w-]+)/messages/stream$"), "handle_message_stream"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/messages$"), "handle_message"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/run$"), "handle_run"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)/policy$"), "handle_update_policy"),
@@ -209,6 +211,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             default_model=str(body.get("default_model", "")),
             workspace_path=str(body.get("workspace_path", "")),
             validation_commands=commands,
+            runtime_policy=body.get("runtime_policy") if isinstance(body.get("runtime_policy"), dict) else None,
         )
         self._send_json(201, project.to_dict())
 
@@ -222,6 +225,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     def handle_workspace(self, project_id: str) -> None:
         self._send_json(200, self.server.workbench.workspace_status(project_id))
+
+    def handle_search_status(self, project_id: str) -> None:
+        self._send_json(200, self.server.workbench.search_status(project_id))
 
     def handle_collaboration(self, project_id: str) -> None:
         self._send_json(200, self.server.collaboration.project_state(project_id))
@@ -318,6 +324,40 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     def handle_message(self, session_id: str, body: dict) -> None:
         session = self.server.workbench.send_message(session_id, str(body.get("content", "")))
         self._send_json(200, session.to_dict())
+
+    def handle_message_stream(self, session_id: str, body: dict) -> None:
+        # Construct the iterator before committing the HTTP response so input,
+        # session, and mode validation can still use the normal JSON error path.
+        stream = self.server.workbench.send_message_stream(
+            session_id,
+            str(body.get("content", "")),
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for event in stream:
+                event_type = str(event.get("type", "message"))
+                if not re.fullmatch(r"[A-Za-z0-9_.-]+", event_type):
+                    event_type = "message"
+                self._write_sse(event_type, event)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser may cancel a request or navigate away.  Closing the
+            # iterator releases the provider response and stops further work.
+            pass
+        except Exception as error:  # noqa: BLE001 - serialize stream failures as SSE
+            try:
+                self._write_sse("error", {"type": "error", "error": str(error)})
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     def handle_run(self, session_id: str, body: dict) -> None:
         workflow = self._workflow_from_dict(body["workflow"]) if isinstance(body.get("workflow"), dict) else None
@@ -479,6 +519,12 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _write_sse(self, event_type: str, value: dict) -> None:
+        body = json.dumps(value, ensure_ascii=False, default=str)
+        payload = f"event: {event_type}\ndata: {body}\n\n".encode("utf-8")
+        self.wfile.write(payload)
+        self.wfile.flush()
+
 
 class _HttpError(Exception):
     def __init__(self, status: int, message: str):
@@ -506,6 +552,7 @@ class WorkloopServer(ThreadingHTTPServer):
         self._coordinating_projects: set[str] = set()
         self.decomposition = GoalDecomposer(
             gateway=self.workbench.gateway,
+            invoker=self.workbench.model_invocation,
             collaboration=self.collaboration,
             project_loader=self.workbench.get_project,
             project_context=WorkbenchService._project_context,

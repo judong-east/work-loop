@@ -18,3 +18,10 @@ workbench/
 build/
 dist/
 .zcode/
+
+# Local UI-verification output: headless browser profiles, screenshots, and
+# scratch server logs.  Large and machine-specific; never source.
+artifacts/
+
+# zvec-grep keeps its local index beside the project it scans.
+.zvec-grep/

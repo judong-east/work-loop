@@ -20,6 +20,28 @@ def _protocol(value: Any) -> str:
     return _PROTOCOL_ALIASES.get(str(value).strip().lower(), str(value).strip().lower())
 
 
+def default_runtime_policy() -> dict[str, Any]:
+    """Return safe local defaults for context and workspace search."""
+
+    return {
+        "compaction": {
+            "enabled": True,
+            "reserve_tokens": 4_096,
+            "keep_recent_tokens": 12_000,
+            "summary_max_tokens": 1_500,
+            "max_compactions": 2,
+        },
+        # ``local_only`` / ``allow_remote_embedding`` are intentionally absent:
+        # they have exactly one legal value and are enforced as invariants in
+        # ``Project.validate``.  Listing them here would imply they are tunable.
+        "local_search": {
+            "enabled": True,
+            "tools": ["zvec_grep_search", "zvec_grep_rg"],
+            "max_tool_rounds": 8,
+        },
+    }
+
+
 class SessionMode(str, Enum):
     CHAT = "chat"
     TASK = "task"
@@ -200,6 +222,9 @@ class ModelAlias:
     max_tokens: int | None = None
     enabled: bool = True
     schema_version: int = 1
+    # Optional provider metadata.  Kept after the historical fields so
+    # positional construction by existing integrations remains compatible.
+    context_window_tokens: int | None = None
 
     def validate(self) -> None:
         if not self.alias or not self.alias.replace("-", "").replace("_", "").isalnum():
@@ -213,6 +238,8 @@ class ModelAlias:
             raise ValueError("temperature must be between 0 and 2")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        if self.context_window_tokens is not None and self.context_window_tokens <= 0:
+            raise ValueError("context_window_tokens must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -224,6 +251,7 @@ class ModelAlias:
             "protocol": self.protocol,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "context_window_tokens": self.context_window_tokens,
             "enabled": self.enabled,
             "schema_version": self.schema_version,
         }
@@ -238,6 +266,11 @@ class ModelAlias:
             protocol=_protocol(value.get("protocol", "")) if value.get("protocol") else "",
             temperature=(None if value.get("temperature") is None else float(value["temperature"])),
             max_tokens=(None if value.get("max_tokens") is None else int(value["max_tokens"])),
+            context_window_tokens=(
+                None
+                if value.get("context_window_tokens") is None
+                else int(value["context_window_tokens"])
+            ),
             enabled=bool(value.get("enabled", True)),
             schema_version=int(value.get("schema_version", 1)),
         )
@@ -257,6 +290,9 @@ class Project:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     schema_version: int = 1
+    # Appended after the historical positional fields for compatibility with
+    # integrations that construct Project directly.
+    runtime_policy: dict[str, Any] = field(default_factory=default_runtime_policy)
 
     def validate(self) -> None:
         if not self.project_id.strip() or not self.name.strip():
@@ -281,6 +317,16 @@ class Project:
         for command in self.validation_commands:
             if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
                 raise ValueError("each validation command must be a non-empty argv list")
+        if not isinstance(self.runtime_policy, dict):
+            raise ValueError("runtime_policy must be an object")
+        local_search = self.runtime_policy.get("local_search", {})
+        if isinstance(local_search, dict):
+            # Invariants, not options: reject an explicit attempt to turn the
+            # local-only search runtime into a remote one.
+            if bool(local_search.get("allow_remote_embedding", False)):
+                raise ValueError("runtime_policy.local_search.allow_remote_embedding must be false")
+            if local_search.get("local_only", True) is not True:
+                raise ValueError("runtime_policy.local_search.local_only must be true")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -292,6 +338,7 @@ class Project:
             "default_model": self.default_model,
             "workspace_path": self.workspace_path,
             "validation_commands": [list(command) for command in self.validation_commands],
+            "runtime_policy": dict(self.runtime_policy),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "schema_version": self.schema_version,
@@ -322,6 +369,7 @@ class Project:
                 list(command) if isinstance(command, list) else command
                 for command in raw_commands
             ],
+            runtime_policy=dict(value.get("runtime_policy", default_runtime_policy())),
             created_at=str(value.get("created_at", utc_now())),
             updated_at=str(value.get("updated_at", value.get("created_at", utc_now()))),
             schema_version=int(value.get("schema_version", 1)),

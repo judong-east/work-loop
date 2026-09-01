@@ -109,6 +109,7 @@ class GoalDecomposer:
         project_loader: Callable[[str], Project],
         project_context: Callable[[Project], dict[str, Any]],
         workspace_snapshot: Callable[[Project], dict[str, Any]],
+        invoker: Any | None = None,
         max_subtasks_limit: int = 20,
     ):
         self.gateway = gateway
@@ -116,6 +117,7 @@ class GoalDecomposer:
         self.project_loader = project_loader
         self.project_context = project_context
         self.workspace_snapshot = workspace_snapshot
+        self.invoker = invoker
         self.max_subtasks_limit = max(1, max_subtasks_limit)
 
     def decompose(
@@ -205,7 +207,17 @@ class GoalDecomposer:
             "available_roles": role_descriptions,
             "max_subtasks": max_subtasks,
         }})
-        output = self.gateway.complete(model_alias=model_alias, node=node, context=context)
+        if self.invoker is not None:
+            output = self.invoker.invoke_ephemeral(
+                project_id=project.project_id,
+                title=goal,
+                node=node,
+                context=context,
+                model_alias=model_alias,
+                output_fields=("summary", "subtasks"),
+            )
+        else:
+            output = self.gateway.complete(model_alias=model_alias, node=node, context=context)
         try:
             return GoalPlan.from_output(output, max_items=max_subtasks)
         except ValueError as error:

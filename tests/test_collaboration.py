@@ -322,6 +322,96 @@ class WaveConcurrencyTest(unittest.TestCase):
             self.assertEqual(state["counts"]["completed"], 2)
 
 
+class HandoffConcurrencyTest(unittest.TestCase):
+    def test_parallel_readers_publish_exactly_one_handoff_each_to_a_shared_dependent(self):
+        """Fan-in coverage: two concurrent readers feeding one dependent.
+
+        Publication is a read-modify-write over separate JSON records, so this
+        pins the property that keeps it lock-free: each source writes only its
+        own ``(source, target)`` pairs, so concurrent readers never contend for
+        the same record and the dependent receives one handoff per dependency.
+        """
+
+        release = threading.Barrier(2, timeout=5)
+
+        def execute(task, role, handoffs):
+            del handoffs
+            if role.workspace_access.value == "read":
+                # Force both readers into publication at the same moment.
+                try:
+                    release.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            return TaskOutcome(TaskStatus.COMPLETED, result={"facts": {"role": role.role_id}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(Path(tmp), execute)
+            first = service.create_task("PROJECT-1", {
+                "title": "分析", "description": "读者一", "role_id": "analyst",
+            })
+            second = service.create_task("PROJECT-1", {
+                "title": "审核", "description": "读者二", "role_id": "reviewer",
+            })
+            shared = service.create_task("PROJECT-1", {
+                "title": "实现", "description": "共同下游", "role_id": "developer",
+                "depends_on": [first.task_id, second.task_id],
+            })
+            state = service.coordinate("PROJECT-1")
+
+            self.assertEqual(state["counts"]["completed"], 3)
+            pairs = [
+                (item["from_task_id"], item["to_task_id"])
+                for item in state["handoffs"]
+            ]
+            self.assertEqual(
+                len(pairs), len(set(pairs)), f"duplicate handoffs were published: {pairs}"
+            )
+            incoming = [pair for pair in pairs if pair[1] == shared.task_id]
+            self.assertEqual(len(incoming), 2)
+
+
+class OrphanRoleTest(unittest.TestCase):
+    def test_task_with_an_unreadable_role_fails_as_a_task(self):
+        """A corrupted role record must not abort the whole coordination run.
+
+        ``list_roles`` skips records it cannot decode, so a task can reference a
+        role that is absent from the lookup even though deletion checks for task
+        references.  That has to surface as a failed task, not an exception
+        escaping ``coordinate`` and leaving the task stuck in RUNNING.
+        """
+
+        def execute(task, role, handoffs):
+            del task, role, handoffs
+            return TaskOutcome(TaskStatus.COMPLETED)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_service(Path(tmp), execute)
+            # A custom role, so ``_ensure_default_roles`` cannot silently
+            # regenerate it once the record becomes unreadable.
+            service.save_role({
+                "role_id": "custom-dev", "label": "自定义开发", "node_type": "implementation",
+                "instructions": "写代码", "capabilities": ["coding"],
+                "workspace_access": "write", "model_alias": "known-model",
+            })
+            healthy = service.create_task("PROJECT-1", {
+                "title": "正常", "description": "有角色", "role_id": "analyst",
+            })
+            orphan = service.create_task("PROJECT-1", {
+                "title": "孤立", "description": "角色损坏", "role_id": "custom-dev",
+            })
+            # Corrupt the role record the way an interrupted write would.
+            role_file = Path(tmp) / "collaboration" / "roles" / "custom-dev.json"
+            self.assertTrue(role_file.is_file(), f"unexpected role layout: {role_file}")
+            role_file.write_text("{ not json", encoding="utf-8")
+
+            state = service.coordinate("PROJECT-1")
+
+            by_id = {item["task_id"]: item for item in state["tasks"]}
+            self.assertEqual(by_id[healthy.task_id]["status"], "completed")
+            self.assertEqual(by_id[orphan.task_id]["status"], "failed")
+            self.assertIn("role is missing or unreadable", by_id[orphan.task_id]["error"])
+
+
 class UpdateTaskTest(unittest.TestCase):
     def test_role_requires_exactly_one_model(self):
         with tempfile.TemporaryDirectory() as tmp:

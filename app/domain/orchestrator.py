@@ -64,6 +64,7 @@ class DagOrchestrator:
         *,
         event_sink: EventSink | None = None,
         output_processor: OutputProcessor | None = None,
+        invoker: Any | None = None,
         max_attempts: int = 2,
     ):
         self.registry = registry
@@ -71,6 +72,7 @@ class DagOrchestrator:
         self.gateway = gateway
         self.event_sink = event_sink
         self.output_processor = output_processor
+        self.invoker = invoker
         self.max_attempts = max(1, max_attempts)
 
     def validate(self, workflow: WorkflowDefinition) -> list[str]:
@@ -198,6 +200,7 @@ class DagOrchestrator:
         run = NodeRun(node_id=node.node_id, model_alias=node.model_alias or definition.default_model, status="running", started_at=utc_now())
         self._emit(OrchestrationEvent("node_started", session.session_id, node.node_id, run.status, {"model_alias": run.model_alias}))
         handler = self.registry.handler(node.node_type)
+        output: dict[str, Any] | None = None
         for attempt in range(1, self.max_attempts + 1):
             run.attempt = attempt
             try:
@@ -209,60 +212,86 @@ class DagOrchestrator:
                         "context_pack": self._context_pack(session, node, context),
                     })
                 else:
-                    gateway_node = replace(
-                        node,
-                        config={
-                            **node.config,
-                            "_output_fields": list(definition.output_fields),
-                            "_context_pack": self._context_pack(session, node, context),
-                        },
-                    )
-                    output = self.gateway.complete(model_alias=run.model_alias, node=gateway_node, context=context)
+                    if self.invoker is not None:
+                        output = self.invoker.invoke(
+                            session=session,
+                            node=node,
+                            context=context,
+                            model_alias=run.model_alias,
+                            output_fields=definition.output_fields,
+                        )
+                    else:
+                        gateway_node = replace(
+                            node,
+                            config={
+                                **node.config,
+                                "_output_fields": list(definition.output_fields),
+                                "_context_pack": self._context_pack(session, node, context),
+                            },
+                        )
+                        output = self.gateway.complete(model_alias=run.model_alias, node=gateway_node, context=context)
                     if "inputs" in output or "errors" in output:
                         raise ValueError("model output cannot replace authoritative inputs or errors")
-                # Reject malformed output before an output processor performs
-                # workspace side effects.
+                # Reject malformed output, and validate the shared-state
+                # envelope, before any side effect runs.  ``merge`` is called
+                # for its validation only; the authoritative context is
+                # replaced by the caller after the run succeeds.
                 definition.validate_output(output)
                 context.merge(output)
-                if self.output_processor is not None:
-                    output = self.output_processor(session, node, context, output)
-                definition.validate_output(output)
-                # Validate the shared-state envelope while node failure policy
-                # can still convert malformed model output into a durable run.
-                context.merge(output)
-                gate = output.get("gate", {}) if isinstance(output, dict) else {}
-                facts = output.get("facts", {}) if isinstance(output.get("facts", {}), dict) else {}
-                review_blocked = (
-                    node.node_type == "review"
-                    and str(output.get("verdict", facts.get("verdict", "pass"))).lower() != "pass"
-                )
-                if review_blocked and not gate:
-                    gate = {
-                        "name": "quality_review", "status": "blocked",
-                        "reason": f"review verdict: {output.get('verdict', 'revise')}",
-                    }
-                    output["gate"] = gate
-                if isinstance(gate, dict) and gate.get("status") == "blocked":
-                    run.status = "failed"
-                    run.output = output
-                    run.error = str(gate.get("reason", "quality gate blocked"))
-                    run.finished_at = utc_now()
-                    return run
-                run.status = "completed"
-                run.output = output
-                run.finished_at = utc_now()
-                return run
+                break
             except Exception as error:  # node policy decides whether this is terminal
                 run.error = str(error)
                 if attempt < self.max_attempts and node.on_failure == "retry":
                     self._emit(OrchestrationEvent("node_retrying", session.session_id, node.node_id, "retrying", {"attempt": attempt, "error": str(error)}))
                     continue
-                run.finished_at = utc_now()
-                if node.on_failure == "skip":
-                    run.status = "skipped"
-                else:
-                    run.status = "failed"
-                return run
+                return self._failed_run(run, node)
+
+        if output is None:  # defensive: the loop always assigns or returns
+            run.error = run.error or "node produced no output"
+            return self._failed_run(run, node)
+
+        # Side effects run exactly once, outside the retry loop.  A publish
+        # followed by a validation failure must not re-invoke the model and
+        # write a second, different version of the same files: the first batch
+        # is already durable and there is no cross-attempt rollback.
+        try:
+            if self.output_processor is not None:
+                output = self.output_processor(session, node, context, output)
+            definition.validate_output(output)
+            context.merge(output)
+        except Exception as error:  # noqa: BLE001 - failure policy owns the verdict
+            run.error = str(error)
+            return self._failed_run(run, node)
+
+        gate = output.get("gate", {}) if isinstance(output, dict) else {}
+        facts = output.get("facts", {}) if isinstance(output.get("facts", {}), dict) else {}
+        review_blocked = (
+            node.node_type == "review"
+            and str(output.get("verdict", facts.get("verdict", "pass"))).lower() != "pass"
+        )
+        if review_blocked and not gate:
+            gate = {
+                "name": "quality_review", "status": "blocked",
+                "reason": f"review verdict: {output.get('verdict', 'revise')}",
+            }
+            output["gate"] = gate
+        if isinstance(gate, dict) and gate.get("status") == "blocked":
+            run.status = "failed"
+            run.output = output
+            run.error = str(gate.get("reason", "quality gate blocked"))
+            run.finished_at = utc_now()
+            return run
+        run.status = "completed"
+        run.output = output
+        run.finished_at = utc_now()
+        return run
+
+    @staticmethod
+    def _failed_run(run: NodeRun, node: WorkflowNode) -> NodeRun:
+        """Apply the node's failure policy to an exhausted or side-effect failure."""
+
+        run.finished_at = utc_now()
+        run.status = "skipped" if node.on_failure == "skip" else "failed"
         return run
 
     @staticmethod

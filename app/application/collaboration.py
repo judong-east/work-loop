@@ -373,6 +373,17 @@ class CollaborationService:
 
     def _run_wave(self, tasks: list[CollaborationTask]) -> None:
         roles = {role.role_id: role for role in self.list_roles()}
+        # A task whose role record is missing or unreadable must fail as a task,
+        # not as an exception escaping coordination and leaving it RUNNING.
+        # ``list_roles`` skips corrupted records, so this is reachable even
+        # though role deletion checks for task references.
+        orphans = [task for task in tasks if task.role_id not in roles]
+        for task in orphans:
+            task.status = TaskStatus.FAILED
+            task.error = f"role is missing or unreadable: {task.role_id}"
+            task.updated_at = utc_now()
+            self.repository.save_task(task)
+        tasks = [task for task in tasks if task.role_id in roles]
         readers = [task for task in tasks if roles[task.role_id].workspace_access is WorkspaceAccess.READ]
         writers = [task for task in tasks if roles[task.role_id].workspace_access is not WorkspaceAccess.READ]
         futures = []
@@ -443,6 +454,10 @@ class CollaborationService:
         return sorted(handoffs, key=lambda item: (item.created_at, item.message_id))
 
     def _publish_handoffs(self, source: CollaborationTask) -> None:
+        # Concurrency note: parallel readers in one wave each publish only their
+        # own ``(source, target)`` pairs, so they never contend for the same
+        # record.  A dependent never runs in the same wave as its dependency,
+        # which is what keeps this de-duplication correct without a lock.
         tasks = self.repository.list_tasks(source.project_id)
         existing = {
             (item.from_task_id, item.to_task_id)

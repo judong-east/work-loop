@@ -333,10 +333,12 @@ class WorkbenchDomainTest(unittest.TestCase):
 
     def test_token_basic_and_query_auth_are_applied(self):
         from app.domain.models import ModelProvider
+        from app.infrastructure.model_protocols import protocol_for
 
+        openai = protocol_for("openai")
         token_headers = OpenAICompatibleGateway._headers(
             ModelProvider("token", "Token", "https://token.test/v1", auth_type="token"),
-            "secret-token", "openai",
+            "secret-token", openai,
         )
         self.assertEqual(token_headers["Authorization"], "Token secret-token")
 
@@ -345,7 +347,7 @@ class WorkbenchDomainTest(unittest.TestCase):
                 "basic", "Basic", "https://basic.test/v1", auth_type="basic",
                 metadata={"username": "workloop"},
             ),
-            "secret-password", "openai",
+            "secret-password", openai,
         )
         self.assertEqual(basic_headers["Authorization"], "Basic d29ya2xvb3A6c2VjcmV0LXBhc3N3b3Jk")
 
@@ -353,7 +355,7 @@ class WorkbenchDomainTest(unittest.TestCase):
             "query", "Query", "https://query.test/v1?region=cn", auth_type="query_param",
             auth_header="api_key", metadata={"query_param": "api_key"},
         )
-        request_url = OpenAICompatibleGateway._request_url(query_provider, "secret-key", "openai")
+        request_url = OpenAICompatibleGateway._request_url(query_provider, "secret-key", openai)
         self.assertEqual(request_url, "https://query.test/v1/chat/completions?region=cn&api_key=secret-key")
 
     def test_gateway_probe_supports_openai_and_claude_requests(self):
