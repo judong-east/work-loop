@@ -7,11 +7,11 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from app.application.collaboration import CollaborationService
 from app.application.decomposition import GoalDecomposer
-from app.application.workbench import WorkbenchService
+from app.application.workbench import CHAT_PROJECT_ID, WorkbenchService
 from app.domain.models import SessionMode, WorkflowDefinition, WorkflowNode
 
 
@@ -44,6 +44,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects/([\w-]+)/search$"), "handle_search_status"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/collaboration$"), "handle_collaboration"),
         (re.compile(r"^/api/v2/roles$"), "handle_roles"),
+        (re.compile(r"^/api/v2/sessions$"), "handle_chat_sessions"),
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_session"),
         (re.compile(r"^/api/v2/resources$"), "handle_resources"),
         (re.compile(r"^/api/v2/events$"), "handle_events"),
@@ -54,6 +55,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         (re.compile(r"^/api/v2/projects/([\w-]+)/sessions$"), "handle_create_session"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/tasks$"), "handle_create_collaboration_task"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/coordinate$"), "handle_coordinate"),
+        (re.compile(r"^/api/v2/sessions$"), "handle_create_chat_session"),
         (re.compile(r"^/api/v2/tasks/([\w-]+)$"), "handle_update_collaboration_task"),
         (re.compile(r"^/api/v2/projects/([\w-]+)/goals$"), "handle_decompose_goal"),
         (re.compile(r"^/api/v2/tasks/([\w-]+)/retry$"), "handle_retry_collaboration_task"),
@@ -73,8 +75,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
     ]
     DELETE_ROUTES = [
         (re.compile(r"^/api/v2/sessions/([\w-]+)$"), "handle_delete_session"),
+        (re.compile(r"^/api/v2/projects/([\w-]+)$"), "handle_delete_project"),
         (re.compile(r"^/api/v2/resources/providers/([\w-]+)$"), "handle_delete_provider"),
-        (re.compile(r"^/api/v2/resources/models/([\w-]+)$"), "handle_delete_model"),
+        (re.compile(r"^/api/v2/resources/models/([\w.-]+)$"), "handle_delete_model"),
         (re.compile(r"^/api/v2/nodes/([\w-]+)$"), "handle_delete_node"),
         (re.compile(r"^/api/v2/workflows/([\w-]+)$"), "handle_delete_workflow"),
         (re.compile(r"^/api/v2/roles/([\w-]+)$"), "handle_delete_role"),
@@ -96,6 +99,11 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, routes, *, needs_body: bool) -> None:
         parsed = urlsplit(self.path)
+        # Browser-side callers encode user-defined identifiers before placing
+        # them in a path segment.  Match routes against the decoded path so
+        # valid Unicode node labels/types (for example, Chinese identifiers)
+        # reach the same handlers as ASCII identifiers.
+        decoded_path = unquote(parsed.path)
         self.query_params = parse_qs(parsed.query)
         rejection = self._same_origin_rejection(self.command not in {"GET", "HEAD"})
         if rejection:
@@ -103,7 +111,7 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": rejection})
             return
         for pattern, handler_name in routes:
-            match = pattern.fullmatch(parsed.path)
+            match = pattern.fullmatch(decoded_path)
             if match is None:
                 continue
             try:
@@ -223,6 +231,25 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         project = self.server.workbench.update_project(project_id, body)
         self._send_json(200, project.to_dict())
 
+    def handle_delete_project(self, project_id: str) -> None:
+        self.server.workbench.get_project(project_id)
+        running = [
+            item for item in self.server.workbench.list_sessions(project_id, include_collaboration=True)
+            if item.status == "running"
+        ]
+        if running:
+            raise ValueError("项目仍有正在运行的会话，请稍后再删除。")
+        # The collaboration service owns the coordination lock and removes
+        # project-scoped tasks/handoffs/goals; workspace files remain untouched.
+        collaboration_result = self.server.collaboration.delete_project(project_id)
+        try:
+            workbench_result = self.server.workbench.delete_project(project_id)
+        except Exception:
+            # This is defensive for a concurrent running chat session.  The
+            # normal UI path confirms an idle project before this point.
+            raise
+        self._send_json(200, {**workbench_result, **collaboration_result})
+
     def handle_workspace(self, project_id: str) -> None:
         self._send_json(200, self.server.workbench.workspace_status(project_id))
 
@@ -234,6 +261,16 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
 
     def handle_roles(self) -> None:
         self._send_json(200, [item.to_dict() for item in self.server.collaboration.list_roles()])
+
+    def handle_chat_sessions(self) -> None:
+        sessions = self.server.workbench.list_sessions(CHAT_PROJECT_ID)
+        self._send_json(200, [item.to_dict() for item in sessions])
+
+    def handle_create_chat_session(self, body: dict) -> None:
+        if str(body.get("mode", SessionMode.CHAT.value)) != SessionMode.CHAT.value:
+            raise _HttpError(400, "未选择项目时只能使用普通对话。")
+        session = self.server.workbench.create_chat_session(str(body.get("title", "新的会话")))
+        self._send_json(201, session.to_dict())
 
     def handle_create_session(self, project_id: str, body: dict) -> None:
         mode = SessionMode(str(body.get("mode", SessionMode.CHAT.value)))
@@ -322,7 +359,13 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"deleted": session_id})
 
     def handle_message(self, session_id: str, body: dict) -> None:
-        session = self.server.workbench.send_message(session_id, str(body.get("content", "")))
+        session = self.server.workbench.send_message(
+            session_id,
+            str(body.get("content", "")),
+            model_alias=body.get("model_alias"),
+            tools=body.get("tools"),
+            attachments=body.get("attachments"),
+        )
         self._send_json(200, session.to_dict())
 
     def handle_message_stream(self, session_id: str, body: dict) -> None:
@@ -331,6 +374,9 @@ class WorkloopRequestHandler(BaseHTTPRequestHandler):
         stream = self.server.workbench.send_message_stream(
             session_id,
             str(body.get("content", "")),
+            model_alias=body.get("model_alias"),
+            tools=body.get("tools"),
+            attachments=body.get("attachments"),
         )
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")

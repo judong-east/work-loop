@@ -8,7 +8,33 @@ tool instead of a browser tab.
 from __future__ import annotations
 
 import threading
+import ctypes
+import sys
 from pathlib import Path
+
+
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
+_SWP_SHOWWINDOW = 0x0040
+_MONITOR_DEFAULTTONEAREST = 0x00000002
+
+
+class _Win32Rect(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _Win32MonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("rcMonitor", _Win32Rect),
+        ("rcWork", _Win32Rect),
+        ("dwFlags", ctypes.c_ulong),
+    ]
 
 
 def _data_root() -> Path:
@@ -23,21 +49,100 @@ class WindowControls:
     def __init__(self):
         self._window = None
         self._maximized = False
+        self._restore_bounds = None
 
     def attach(self, window) -> None:
         self._window = window
         # Track the real window state via pywebview events so the toggle stays
         # correct even when the OS changes it (Win+Up, taskbar, ...).
-        window.events.maximized += lambda: setattr(self, "_maximized", True)
-        window.events.restored += lambda: setattr(self, "_maximized", False)
+        window.events.maximized += self._on_native_maximized
+        window.events.restored += self._on_native_restored
+
+    def _native_handle(self):
+        """Return pywebview's WinForms HWND when the desktop backend exposes it."""
+        if sys.platform != "win32" or self._window is None:
+            return None
+        native = getattr(self._window, "native", None)
+        handle = getattr(native, "Handle", None)
+        to_int32 = getattr(handle, "ToInt32", None)
+        if not callable(to_int32):
+            return None
+        try:
+            return int(to_int32())
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _window_rect(hwnd):
+        if not hwnd:
+            return None
+        rect = _Win32Rect()
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return rect.left, rect.top, rect.right, rect.bottom
+
+    @staticmethod
+    def _work_area(hwnd):
+        if not hwnd:
+            return None
+        user32 = ctypes.windll.user32
+        monitor = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+        info = _Win32MonitorInfo()
+        info.cbSize = ctypes.sizeof(_Win32MonitorInfo)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        rect = info.rcWork
+        return rect.left, rect.top, rect.right, rect.bottom
+
+    @staticmethod
+    def _set_window_rect(hwnd, bounds):
+        if not hwnd or not bounds:
+            return False
+        left, top, right, bottom = bounds
+        return bool(ctypes.windll.user32.SetWindowPos(
+            hwnd,
+            0,
+            int(left),
+            int(top),
+            max(1, int(right - left)),
+            max(1, int(bottom - top)),
+            _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_SHOWWINDOW,
+        ))
+
+    def _set_work_area_maximized(self):
+        """Fit a frameless window to the monitor work area, below the taskbar."""
+        hwnd = self._native_handle()
+        return self._set_window_rect(hwnd, self._work_area(hwnd))
+
+    def _on_native_maximized(self) -> None:
+        self._maximized = True
+        # WinForms maximizes a borderless form to the full monitor. Re-apply
+        # the monitor work area so the Windows taskbar remains visible.
+        self._set_work_area_maximized()
+
+    def _on_native_restored(self) -> None:
+        self._maximized = False
 
     def minimize(self) -> None:
         self._window.minimize()
 
     def toggle_maximize(self) -> None:
         if self._maximized:
+            if self._restore_bounds and self._set_window_rect(
+                self._native_handle(), self._restore_bounds
+            ):
+                self._maximized = False
+                return
             self._window.restore()
         else:
+            hwnd = self._native_handle()
+            current_bounds = self._window_rect(hwnd)
+            if current_bounds and self._set_work_area_maximized():
+                self._restore_bounds = current_bounds
+                self._maximized = True
+                return
             self._window.maximize()
 
     def close(self) -> None:

@@ -181,7 +181,7 @@ class HttpStreamingTest(unittest.TestCase):
             def stream_complete_with_tools(self, **_kwargs):
                 yield {"type": "text_delta", "text": "流式"}
                 yield {"type": "text_delta", "text": "回答"}
-                yield {"type": "done", "output": {"result": "流式回答", "model": "fake"}}
+                yield {"type": "done", "output": {"result": "\n\n流式回答\n\n", "model": "fake"}}
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -205,9 +205,57 @@ class HttpStreamingTest(unittest.TestCase):
             self.assertTrue(content_type.startswith("text/event-stream"))
             self.assertIn('event: text_delta\ndata: {"type": "text_delta", "text": "流式"}', body)
             self.assertIn("event: done", body)
+            done_block = next(block for block in body.split("\n\n") if block.startswith("event: done"))
+            done_payload = json.loads(next(line for line in done_block.splitlines() if line.startswith("data:"))[5:].strip())
+            self.assertIsInstance(done_payload["elapsed_ms"], int)
+            self.assertGreaterEqual(done_payload["elapsed_ms"], 0)
             restored = service.get_session(session.session_id)
             self.assertEqual(restored.messages[-1].role, "assistant")
             self.assertEqual(restored.messages[-1].content, "流式回答")
+            self.assertEqual(restored.messages[-1].metadata["model"], "fake")
+            self.assertIsInstance(restored.messages[-1].metadata["elapsed_ms"], int)
+            self.assertGreaterEqual(restored.messages[-1].metadata["elapsed_ms"], 0)
+
+    def test_projectless_chat_session_streams_without_project_record(self):
+        class FakeGateway:
+            def __init__(self):
+                self.aliases = []
+
+            def stream_complete_with_tools(self, **_kwargs):
+                self.aliases.append(_kwargs["model_alias"])
+                yield {"type": "text_delta", "text": "直接"}
+                yield {"type": "text_delta", "text": "回答"}
+                yield {"type": "done", "output": {"result": "直接回答", "model": "fake"}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = FakeGateway()
+            service = WorkbenchService(root / "service", gateway=gateway)
+            service.save_provider({
+                "provider_id": "local",
+                "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "auth_type": "none",
+            })
+            service.save_model({"alias": "chat-model", "provider_id": "local", "model": "chat-model"})
+            session = service.create_chat_session("普通对话")
+            server = make_server(root / "server", 0)
+            server.workbench = service
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_address[1]}/api/v2/sessions/{session.session_id}/messages/stream",
+                data=json.dumps({"content": "无需项目", "model_alias": "chat-model"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read().decode("utf-8")
+            self.assertIn('event: text_delta\ndata: {"type": "text_delta", "text": "直接"}', body)
+            self.assertEqual(service.get_session(session.session_id).messages[-1].content, "直接回答")
+            self.assertEqual(gateway.aliases, ["chat-model"])
+            self.assertEqual(list((root / "service" / "projects").glob("*.json")), [])
 
 
 class _JsonResponse:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+import re
 from typing import Any
 
 from app.core.contracts import new_id, utc_now
@@ -227,7 +228,10 @@ class ModelAlias:
     context_window_tokens: int | None = None
 
     def validate(self) -> None:
-        if not self.alias or not self.alias.replace("-", "").replace("_", "").isalnum():
+        # Provider model ids commonly contain dots (for example
+        # ``qwen3.8-plus``). Keep aliases URL-safe while accepting the same
+        # punctuation that appears in real model names.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", self.alias):
             raise ValueError("model alias must be a safe identifier")
         if not self.provider_id.strip() or not self.model.strip():
             raise ValueError("model alias requires provider_id and model")

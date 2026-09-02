@@ -1,18 +1,40 @@
 (() => {
   const state = {
     projects: [], sessions: [], project: null, session: null, mode: "chat",
+    chatSessions: [],
+    selectedModelAlias: null,
     catalog: { nodes: [], workflows: [] }, strategies: [], resources: { providers: [], models: [], health: [] },
     selectedWorkflowId: "default-task", selectedStrategy: "guided-develop", editingProjectId: "", editingWorkflow: null, testingProviders: new Set(),
     pendingMessage: null, streamMessage: null, sendSequence: 0,
+    composerAttachments: [], selectedTools: null, toolMenuOpen: false, readingAttachments: false,
     // null = not probed yet for the current project; the pill stays quiet until
     // the readiness answer actually arrives.
     search: null, searchProjectId: "",
   };
   const THEME_KEY = "workloop-theme-minimal-v1";
+  const CHAT_PROJECT_ID = "CHAT";
+  const COMPOSER_TOOL_OPTIONS = ["zvec_grep_search", "zvec_grep_rg"];
+  const MAX_COMPOSER_ATTACHMENTS = 5;
+  const MAX_COMPOSER_ATTACHMENT_BYTES = 200000;
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+  // Some providers prefix answers with blank lines.  Keep internal Markdown
+  // spacing, but do not let boundary-only lines push the visible answer below
+  // its avatar.  This also cleans responses saved before the backend fix.
+  const cleanAssistantContent = value => String(value ?? "")
+    .replace(/^(?:[ \t]*\r?\n)+/, "")
+    .replace(/(?:\r?\n[ \t]*)+$/, "");
   const csv = value => String(value || "").split(",").map(item => item.trim()).filter(Boolean);
   const clone = value => JSON.parse(JSON.stringify(value));
+  const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+  const defaultModelAlias = modelName => {
+    const leaf = String(modelName || "").trim().split("/").filter(Boolean).pop() || "";
+    return leaf
+      .replace(/[^A-Za-z0-9_.-]+/g, "-")
+      .replace(/^[^A-Za-z0-9]+/, "")
+      .replace(/[-_.]+$/, "")
+      .replace(/-{2,}/g, "-");
+  };
   const option = (value, label, selected = "") => `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(label)}</option>`;
   const iconPaths = {
     "arrow-up": '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
@@ -144,6 +166,87 @@
       iconSlot.dataset.icon = iconName;
       iconSlot.innerHTML = svgIcon(iconName);
     }
+    const attach = $("attachFiles");
+    if (attach) attach.disabled = pending || state.readingAttachments;
+    const toolToggle = $("toggleToolMenu");
+    if (toolToggle) toolToggle.disabled = pending || state.readingAttachments;
+  }
+
+  function formatFileSize(bytes) {
+    const size = Number(bytes) || 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderComposerAttachments() {
+    const container = $("composerAttachments");
+    if (!container) return;
+    if (!state.composerAttachments.length) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    container.hidden = false;
+    container.innerHTML = state.composerAttachments.map((file, index) => `<span class="composer-attachment"><span class="attachment-file-icon">${svgIcon("paperclip")}</span><span class="attachment-file-copy"><strong>${esc(file.name)}</strong><small>${formatFileSize(file.size)}</small></span><button class="icon-button small" type="button" data-remove-attachment="${index}" aria-label="移除附件 ${esc(file.name)}" title="移除附件">${svgIcon("x")}</button></span>`).join("");
+    container.querySelectorAll("[data-remove-attachment]").forEach(button => button.addEventListener("click", () => {
+      state.composerAttachments.splice(Number(button.dataset.removeAttachment), 1);
+      renderComposerAttachments();
+      syncSendButton();
+    }));
+  }
+
+  function projectDefaultTools() {
+    const search = state.project?.runtime_policy?.local_search;
+    if (!state.project || search?.enabled === false) return [];
+    return Array.isArray(search?.tools) ? search.tools.filter(item => COMPOSER_TOOL_OPTIONS.includes(item)) : [...COMPOSER_TOOL_OPTIONS];
+  }
+
+  function renderToolMenu() {
+    const menu = $("toolMenu");
+    if (!menu) return;
+    const hasWorkspace = Boolean(state.project?.workspace_path);
+    const defaults = projectDefaultTools();
+    const selected = state.selectedTools === null ? defaults : state.selectedTools;
+    document.querySelectorAll("[data-composer-tool-choice]").forEach(input => {
+      input.checked = selected.includes(input.value);
+      input.disabled = !hasWorkspace;
+    });
+    const hint = $("toolMenuHint");
+    if (hint) {
+      if (!state.project) hint.textContent = "普通对话没有工作区，工具不可用";
+      else if (!hasWorkspace) hint.textContent = "请先为项目连接工作区";
+      else if (state.search && state.search.ready === false) hint.textContent = "本地检索尚未就绪，发送时会自动跳过";
+      else if (state.selectedTools === null) hint.textContent = "使用项目默认工具";
+      else hint.textContent = selected.length ? `本条消息启用 ${selected.length} 个工具` : "本条消息不启用工具";
+    }
+    const toggle = $("toggleToolMenu");
+    if (toggle) toggle.classList.toggle("active", state.selectedTools !== null && selected.length > 0);
+  }
+
+  function setToolMenuOpen(open) {
+    state.toolMenuOpen = Boolean(open);
+    const menu = $("toolMenu");
+    const toggle = $("toggleToolMenu");
+    if (menu) menu.hidden = !state.toolMenuOpen;
+    if (toggle) toggle.setAttribute("aria-expanded", String(state.toolMenuOpen));
+    if (state.toolMenuOpen) renderToolMenu();
+  }
+
+  function isTextAttachment(file) {
+    return String(file.type || "").startsWith("text/") || /\.(md|markdown|txt|json|ya?ml|csv|log|xml|html?|css|js|jsx|ts|tsx|py|java|go|rs|sql|sh|bat|ps1)$/i.test(file.name);
+  }
+
+  async function readComposerAttachments() {
+    const payload = [];
+    for (const file of state.composerAttachments) {
+      let content = "";
+      if (isTextAttachment(file) && file.size <= MAX_COMPOSER_ATTACHMENT_BYTES && typeof file.text === "function") {
+        try { content = await file.text(); } catch (_) { content = ""; }
+      }
+      payload.push({ name: file.name, mime_type: file.type || "application/octet-stream", size: file.size || 0, content });
+    }
+    return payload;
   }
 
   function scrollMessageListToBottom() {
@@ -155,14 +258,28 @@
   }
 
   function renderProjects() {
-    $("projectList").innerHTML = state.projects.length ? state.projects.map(project => {
+    const renderSessionRows = sessions => sessions.map(session => {
+      const selected = state.session?.session_id === session.session_id;
+      return `<div class="session-row ${selected ? "active" : ""}"><button type="button" class="session-item ${selected ? "active" : ""}" data-session="${esc(session.session_id)}"><span class="session-icon">${svgIcon(session.mode === "task" ? "workflow" : "message")}</span><strong>${esc(session.title)}</strong></button><button type="button" class="session-delete" data-delete-session="${esc(session.session_id)}" aria-label="删除会话 ${esc(session.title)}" title="删除会话">${svgIcon("trash")}</button></div>`;
+    }).join("");
+    const quickChat = `<div class="project-group quick-chat-group"><button type="button" class="project-item quick-chat-item ${!state.project ? "active" : ""}" data-chat-home><span class="project-icon">${svgIcon("message")}</span><span><strong>普通对话</strong><span>无需创建项目，直接开始聊天</span></span></button>${!state.project ? `<div class="session-list">${renderSessionRows(state.chatSessions)}<button type="button" class="session-item new" data-new-chat-session><span class="session-icon">${svgIcon("plus")}</span><strong>新对话</strong></button></div>` : ""}</div>`;
+    const projectMarkup = state.projects.length ? state.projects.map(project => {
       const active = state.project?.project_id === project.project_id;
       const sessions = active ? state.sessions : [];
-      return `<div class="project-group"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">${svgIcon("folder")}</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话 · ${project.workspace_path ? "工作区已连接" : "未连接工作区"}` : "点击查看"}</span></span></button>${active ? `<div class="session-list">${sessions.map(session => { const selected = state.session?.session_id === session.session_id; return `<div class="session-row ${selected ? "active" : ""}"><button type="button" class="session-item ${selected ? "active" : ""}" data-session="${esc(session.session_id)}"><span class="session-icon">${svgIcon(session.mode === "task" ? "workflow" : "message")}</span><strong>${esc(session.title)}</strong></button><button type="button" class="session-delete" data-delete-session="${esc(session.session_id)}" aria-label="删除会话 ${esc(session.title)}" title="删除会话">${svgIcon("trash")}</button></div>`; }).join("")}<button type="button" class="session-item new" data-new-session><span class="session-icon">${svgIcon("plus")}</span><strong>新会话</strong></button></div>` : ""}</div>`;
-    }).join("") : `<div class="inspector-empty compact-empty"><strong>还没有项目</strong><p>先创建项目，把工作上下文固定下来。</p></div>`;
+      return `<div class="project-group"><div class="project-row ${active ? "active" : ""}"><button type="button" class="project-item ${active ? "active" : ""}" data-project="${esc(project.project_id)}"><span class="project-icon">${svgIcon("folder")}</span><span><strong>${esc(project.name)}</strong><span>${active ? `${sessions.length} 个会话 · ${project.workspace_path ? "工作区已连接" : "未连接工作区"}` : "点击查看"}</span></span></button><span class="project-actions"><button type="button" class="project-action" data-edit-project-id="${esc(project.project_id)}" aria-label="编辑项目 ${esc(project.name)}" title="编辑项目">${svgIcon("pencil")}</button><button type="button" class="project-action danger" data-delete-project="${esc(project.project_id)}" aria-label="删除项目 ${esc(project.name)}" title="删除项目">${svgIcon("trash")}</button></span></div>${active ? `<div class="session-list">${renderSessionRows(sessions)}<button type="button" class="session-item new" data-new-session><span class="session-icon">${svgIcon("plus")}</span><strong>新会话</strong></button></div>` : ""}</div>`;
+    }).join("") : `<div class="inspector-empty compact-empty project-empty"><strong>还没有项目</strong><p>项目用于工作区和任务模式，普通对话不受影响。</p></div>`;
+    $("projectList").innerHTML = `${quickChat}${projectMarkup}`;
     document.querySelectorAll("[data-project]").forEach(button => button.addEventListener("click", () => selectProject(button.dataset.project)));
+    document.querySelectorAll("[data-edit-project-id]").forEach(button => button.addEventListener("click", () => {
+      const project = state.projects.find(item => item.project_id === button.dataset.editProjectId);
+      if (project) openProjectDialog(project);
+    }));
+    document.querySelectorAll("[data-delete-project]").forEach(button => button.addEventListener("click", () => void deleteProject(button.dataset.deleteProject)));
     document.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", () => {
-      state.session = state.sessions.find(item => item.session_id === button.dataset.session) || null;
+      const sessionId = button.dataset.session;
+      state.selectedModelAlias = null;
+      state.selectedTools = null;
+      state.session = (state.project ? state.sessions : state.chatSessions).find(item => item.session_id === sessionId) || null;
       state.mode = state.session?.mode || "chat";
       if (state.session?.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
       if (state.session?.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
@@ -171,7 +288,7 @@
     document.querySelectorAll("[data-delete-session]").forEach(button => button.addEventListener("click", () => deleteSession(button.dataset.deleteSession)));
     document.querySelectorAll("[data-new-session]").forEach(button => button.addEventListener("click", async () => {
       try {
-        state.session = await post(`/api/v2/projects/${state.project.project_id}/sessions`, {
+        state.session = await post(`/api/v2/projects/${encodeURIComponent(state.project.project_id)}/sessions`, {
           title: "新的会话", mode: state.mode,
           workflow_id: state.mode === "task" ? state.selectedWorkflowId : "",
           policy: state.mode === "task" ? { strategy: state.selectedStrategy } : undefined,
@@ -179,10 +296,37 @@
         state.sessions.unshift(state.session); renderProjects(); renderSessions();
       } catch (error) { toast(error.message); }
     }));
+    document.querySelectorAll("[data-chat-home]").forEach(button => button.addEventListener("click", () => {
+      if (state.project) {
+        state.project = null;
+        state.sessions = [];
+      }
+      delete document.body.dataset.projectId;
+      delete document.body.dataset.projectName;
+      state.mode = "chat";
+      state.selectedModelAlias = null;
+      state.selectedTools = null;
+      state.session = state.chatSessions[0] || null;
+      renderMode(); renderProjects(); renderSessions();
+      window.dispatchEvent(new CustomEvent("workloop:project-selected", {
+        detail: { projectId: "", projectName: "" },
+      }));
+    }));
+    document.querySelectorAll("[data-new-chat-session]").forEach(button => button.addEventListener("click", async () => {
+      try {
+        const session = await post("/api/v2/sessions", { title: "新的会话", mode: "chat" });
+        state.chatSessions.unshift(session);
+        state.session = session;
+        state.mode = "chat";
+        state.selectedTools = null;
+        renderProjects(); renderSessions();
+      } catch (error) { toast(error.message); }
+    }));
   }
 
   async function deleteSession(sessionId) {
-    const session = state.sessions.find(item => item.session_id === sessionId);
+    const collection = state.project ? state.sessions : state.chatSessions;
+    const session = collection.find(item => item.session_id === sessionId);
     if (!session) return;
     if (state.pendingMessage?.sessionId === sessionId) { toast("消息发送期间不能删除此会话"); return; }
     const confirmed = await confirmAction({
@@ -193,10 +337,12 @@
     if (!confirmed) return;
     try {
       await remove(`/api/v2/sessions/${encodeURIComponent(sessionId)}`);
-      const removedIndex = state.sessions.findIndex(item => item.session_id === sessionId);
-      state.sessions = state.sessions.filter(item => item.session_id !== sessionId);
+      const removedIndex = collection.findIndex(item => item.session_id === sessionId);
+      if (state.project) state.sessions = state.sessions.filter(item => item.session_id !== sessionId);
+      else state.chatSessions = state.chatSessions.filter(item => item.session_id !== sessionId);
       if (state.session?.session_id === sessionId) {
-        state.session = state.sessions[Math.min(Math.max(removedIndex, 0), state.sessions.length - 1)] || null;
+        const nextCollection = state.project ? state.sessions : state.chatSessions;
+        state.session = nextCollection[Math.min(Math.max(removedIndex, 0), nextCollection.length - 1)] || null;
         state.mode = state.session?.mode || "chat";
         if (state.session?.workflow_id) state.selectedWorkflowId = state.session.workflow_id;
         if (state.session?.policy?.strategy) state.selectedStrategy = state.session.policy.strategy;
@@ -238,33 +384,78 @@
   function renderMode() {
     document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active", item.dataset.mode === state.mode));
     $("composerHint").textContent = state.mode === "task" ? "按所选工作流执行，节点结果自动写入上下文" : "Enter 发送，Shift + Enter 换行";
-    renderWorkflowPicker(); renderFlow();
+    renderWorkflowPicker(); renderModelPicker(); renderFlow();
+  }
+
+  function renderModelPicker() {
+    const picker = $("modelPicker");
+    const select = $("modelSelect");
+    if (!picker || !select) return;
+    const models = state.resources.models.filter(item => item.enabled !== false);
+    if (state.mode === "task") {
+      select.innerHTML = option("", "任务按节点选择模型");
+      select.disabled = true;
+      select.title = "任务模式按工作流节点选择模型";
+      picker.classList.add("is-task");
+      return;
+    }
+    picker.classList.remove("is-task");
+    const sessionModel = state.session?.context?.inputs?.model_alias;
+    const preferred = state.selectedModelAlias ?? sessionModel ?? state.project?.default_model ?? models[0]?.alias ?? "";
+    const selected = models.some(item => item.alias === preferred) ? preferred : "";
+    if (state.selectedModelAlias !== null && state.selectedModelAlias !== selected) state.selectedModelAlias = selected;
+    select.innerHTML = models.length
+      ? `${option("", "自动选择模型", selected)}${models.map(item => option(item.alias, item.alias, selected)).join("")}`
+      : option("", "尚未配置模型");
+    select.value = selected;
+    select.disabled = !models.length;
+    select.title = models.length ? "切换当前对话使用的模型" : "请先在管理中心添加模型";
+  }
+
+  function activeContextId() {
+    if (state.project?.project_id) return state.project.project_id;
+    return state.mode === "chat" ? CHAT_PROJECT_ID : "";
   }
 
   function renderSessions() {
-    $("projectName").textContent = state.project?.name || "选择一个项目";
+    const projectlessChat = !state.project && state.mode === "chat";
+    $("projectName").textContent = state.project?.name || (projectlessChat ? "普通对话" : "选择一个项目");
     $("sessionTitle").textContent = state.session?.title || "新的会话";
-    $("composerProjectContext").textContent = state.project?.name || "选择项目";
+    $("composerProjectContext").textContent = state.project?.name || (projectlessChat ? "普通对话" : "选择项目");
+    const contextPill = $("composerProjectContext").closest(".context-pill");
+    contextPill?.classList.toggle("projectless", projectlessChat);
+    const contextIcon = contextPill?.querySelector(".icon-slot");
+    if (contextIcon) {
+      contextIcon.dataset.icon = projectlessChat ? "message" : "folder";
+      contextIcon.innerHTML = svgIcon(projectlessChat ? "message" : "folder");
+    }
+    $("editProject").disabled = !state.project;
+    $("editProject").title = state.project ? "项目设置" : "请先选择项目";
+    $("editProject").setAttribute("aria-label", state.project ? "编辑当前项目" : "项目设置（请先选择项目）");
+    renderModelPicker();
     renderSearchPill();
     const messages = [...(state.session?.messages || [])];
     const pending = state.pendingMessage;
-    const pendingVisible = pending && pending.projectId === state.project?.project_id &&
+    const pendingVisible = pending && pending.projectId === activeContextId() &&
       (!state.session || !pending.sessionId || pending.sessionId === state.session.session_id);
-    if (pendingVisible) messages.push({ role: "user", content: pending.content, pending: true });
+    if (pendingVisible) messages.push({ role: "user", content: pending.content, attachments: pending.attachments, pending: true });
     const streaming = state.streamMessage;
-    const streamingVisible = streaming && streaming.projectId === state.project?.project_id &&
+    const streamingVisible = streaming && streaming.projectId === activeContextId() &&
       (!state.session || !streaming.sessionId || streaming.sessionId === state.session.session_id ||
         (pending && pending.sessionId === streaming.sessionId));
     if (streamingVisible) messages.push({
       role: "assistant", content: streaming.content, streaming: true,
-      stream_status: streaming.status || "生成中…",
+      stream_status: streaming.status,
+      model: streaming.model || "",
+      elapsed_ms: streaming.elapsedMs,
     });
     $("welcome").classList.toggle("hidden", messages.length > 0);
     let stack = $("messageStack");
     if (!stack) { stack = document.createElement("div"); stack.id = "messageStack"; stack.className = "message-stack"; $("messageList").appendChild(stack); }
-    stack.innerHTML = messages.map(message => `<article class="message ${message.role === "user" ? "user" : "assistant"}${message.pending ? " pending" : ""}${message.streaming ? " streaming" : ""}"><span class="message-avatar">${message.role === "user" ? "你" : (message.node_id ? "N" : "W")}</span><div class="message-body"><div class="message-meta">${message.node_id ? esc(message.node_id) : (message.role === "user" ? "你" : "Workloop")}${message.pending ? '<span class="message-status">发送中…</span>' : ""}${message.streaming ? `<span class="message-status">${esc(message.stream_status || "生成中…")}</span>` : ""}</div>${esc(message.content)}</div></article>`).join("");
+    stack.innerHTML = messages.map(message => `<article class="message ${message.role === "user" ? "user" : "assistant"}${message.pending ? " pending" : ""}${message.streaming ? " streaming" : ""}"><span class="message-avatar">${message.role === "user" ? "你" : (message.node_id ? "N" : "W")}</span><div class="message-body">${esc(message.role === "user" ? message.content : cleanAssistantContent(message.content))}${messageAttachmentMarkup(message)}${messageMetaMarkup(message)}</div></article>`).join("");
     scrollMessageListToBottom();
     syncSendButton();
+    renderToolMenu();
     renderFlow();
   }
 
@@ -354,6 +545,8 @@
     try {
       state.search = null;
       state.searchProjectId = "";
+      state.selectedModelAlias = null;
+      state.selectedTools = null;
       state.project = state.projects.find(project => project.project_id === projectId) || null;
       state.sessions = await api(`/api/v2/projects/${encodeURIComponent(projectId)}/sessions`);
       state.session = state.sessions[0] || null;
@@ -371,18 +564,45 @@
     } catch (error) { toast(error.message); }
   }
 
-  function send() {
+  async function send() {
     const input = $("messageInput");
     const content = input.value.trim();
-    if (!content || !state.project) { if (!state.project) toast("请先选择或创建项目"); return; }
+    const hasAttachments = state.composerAttachments.length > 0;
+    if (!content && !hasAttachments) return;
+    if (state.mode === "task" && !state.project) {
+      toast("任务模式需要选择项目；普通对话无需项目");
+      return;
+    }
+    if (state.mode === "task" && hasAttachments) {
+      toast("附件仅支持普通对话");
+      return;
+    }
     if (state.pendingMessage) return;
+    if (state.readingAttachments) return;
+    state.readingAttachments = true;
+    syncSendButton();
+    let attachments;
+    try {
+      attachments = await readComposerAttachments();
+    } catch (error) {
+      state.readingAttachments = false;
+      syncSendButton();
+      toast(error.message || "读取附件失败");
+      return;
+    }
+    state.readingAttachments = false;
+    const requestContent = content || "请阅读附件并回答。";
     const pending = {
       id: ++state.sendSequence,
-      projectId: state.project.project_id,
+      projectId: activeContextId(),
       sessionId: state.session?.session_id || "",
       mode: state.mode,
       workflowId: state.mode === "task" ? state.selectedWorkflowId : "",
-      content,
+      modelAlias: state.mode === "chat" ? (state.selectedModelAlias ?? "") : "",
+      tools: state.mode === "chat" && state.selectedTools !== null ? [...state.selectedTools] : null,
+      attachments,
+      draftContent: content,
+      content: requestContent,
     };
     state.pendingMessage = pending;
     // Clear and resize before the network/model call so a slow provider never
@@ -399,14 +619,22 @@
       const workflowId = pending.workflowId;
       const matches = session => session && session.project_id === pending.projectId && session.mode === pending.mode &&
         (pending.mode !== "task" || session.workflow_id === workflowId);
-      let session = matches(state.session) ? state.session : state.sessions.find(matches);
+      const sessionCollection = pending.projectId === CHAT_PROJECT_ID ? state.chatSessions : state.sessions;
+      let session = matches(state.session) ? state.session : sessionCollection.find(matches);
       if (!session) {
-        session = await post(`/api/v2/projects/${pending.projectId}/sessions`, {
+        const sessionPath = pending.projectId === CHAT_PROJECT_ID
+          ? "/api/v2/sessions"
+          : `/api/v2/projects/${encodeURIComponent(pending.projectId)}/sessions`;
+        session = await post(sessionPath, {
           title: pending.content.slice(0, 36), mode: pending.mode, workflow_id: workflowId,
+          model_alias: pending.modelAlias,
           policy: pending.mode === "task" ? { strategy: state.selectedStrategy } : undefined,
         });
+        if (pending.projectId === CHAT_PROJECT_ID) state.chatSessions.unshift(session);
+        else state.sessions.unshift(session);
       }
       pending.sessionId = session.session_id;
+      if (activeContextId() === pending.projectId) state.session = session;
       if (pending.mode === "chat") {
         state.streamMessage = {
           id: pending.id,
@@ -418,13 +646,23 @@
         renderSessions();
         const completed = await streamPost(
           `/api/v2/sessions/${session.session_id}/messages/stream`,
-          { content: pending.content },
+          {
+            content: pending.content,
+            model_alias: pending.modelAlias,
+            ...(pending.tools !== null ? { tools: pending.tools } : {}),
+            ...(pending.attachments?.length ? { attachments: pending.attachments } : {}),
+          },
           (eventName, payload) => {
             if (!state.streamMessage || state.streamMessage.id !== pending.id) return;
             if (eventName === "start") state.streamMessage.sessionId = payload.session_id || state.streamMessage.sessionId;
             if (eventName === "text_delta") state.streamMessage.content += String(payload.text || "");
             if (eventName === "tool_call") state.streamMessage.status = `调用 ${payload.name || "本地工具"}…`;
             if (eventName === "tool_result") state.streamMessage.status = "整理搜索结果…";
+            if (eventName === "done") {
+              state.streamMessage.model = payload.model || "";
+              state.streamMessage.elapsedMs = payload.elapsed_ms;
+              state.streamMessage.status = "";
+            }
             renderSessions();
           },
         );
@@ -433,32 +671,66 @@
         session = await post(`/api/v2/sessions/${session.session_id}/messages`, { content: pending.content });
         session = await post(`/api/v2/sessions/${session.session_id}/run`, {});
       }
-      if (state.project?.project_id === pending.projectId) {
+      if (activeContextId() === pending.projectId) {
         state.session = session;
-        const index = state.sessions.findIndex(item => item.session_id === session.session_id);
-        if (index >= 0) state.sessions[index] = session;
-        else state.sessions.unshift(session);
+        state.selectedModelAlias = session.context?.inputs?.model_alias ?? pending.modelAlias;
+        const collection = pending.projectId === CHAT_PROJECT_ID ? state.chatSessions : state.sessions;
+        const index = collection.findIndex(item => item.session_id === session.session_id);
+        if (index >= 0) collection[index] = session;
+        else collection.unshift(session);
       }
       if (state.streamMessage?.id === pending.id) state.streamMessage = null;
-      if (state.pendingMessage?.id === pending.id) state.pendingMessage = null;
+      if (state.pendingMessage?.id === pending.id) {
+        state.pendingMessage = null;
+        state.composerAttachments = [];
+        renderComposerAttachments();
+      }
       renderProjects(); renderSessions();
     } catch (error) {
       if (state.streamMessage?.id === pending.id) state.streamMessage = null;
       if (state.pendingMessage?.id === pending.id) state.pendingMessage = null;
       // Keep a failed request recoverable without overwriting a newer draft.
       const input = $("messageInput");
-      if (!input.value.trim()) { input.value = pending.content; resizeComposer(); input.focus(); }
+      if (!input.value.trim()) { input.value = pending.draftContent || pending.content; resizeComposer(); input.focus(); }
       syncSendButton(); renderProjects(); renderSessions(); toast(error.message);
     }
   }
 
   async function refreshManagement() {
     [state.catalog, state.resources, state.strategies] = await Promise.all([api("/api/v2/catalog"), api("/api/v2/resources"), api("/api/v2/strategies")]);
-    const modelCount = state.resources.models.length;
-    $("resourceHint").textContent = modelCount ? `${modelCount} 个模型可用` : "尚未配置模型";
-    $("modelLabel").textContent = modelCount ? `${modelCount} 个模型` : "尚未配置模型";
     $("projectDefaultModel").innerHTML = option("", "自动选择模型") + state.resources.models.map(item => option(item.alias, item.alias)).join("");
-    renderWorkflowPicker(); renderProviders(); renderNodes(); renderWorkflowList();
+    renderWorkflowPicker(); renderModelPicker(); renderProviders(); renderNodes(); renderWorkflowList();
+  }
+
+  function formatElapsed(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+    if (milliseconds < 1000) return `${Math.max(1, Math.round(milliseconds))} ms`;
+    const seconds = milliseconds / 1000;
+    return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+  }
+
+  function messageMetaMarkup(message) {
+    const items = [];
+    if (message.node_id) {
+      items.push(`<span class="message-meta-item message-node-label">${esc(message.node_id)}</span>`);
+    } else if (message.role === "assistant") {
+      const metadata = message.metadata || {};
+      const model = String(metadata.model || message.model || "").trim();
+      const elapsed = formatElapsed(metadata.elapsed_ms ?? message.elapsed_ms);
+      if (model) items.push(`<span class="message-meta-item">模型 ${esc(model)}</span>`);
+      if (elapsed) items.push(`<span class="message-meta-item">耗时 ${esc(elapsed)}</span>`);
+    }
+    if (message.pending) items.push('<span class="message-meta-item message-status">发送中…</span>');
+    if (message.streaming && message.stream_status) items.push(`<span class="message-meta-item message-status">${esc(message.stream_status)}</span>`);
+    if (!items.length) return "";
+    return `<div class="message-meta">${items.join('<span class="message-meta-separator" aria-hidden="true">·</span>')}</div>`;
+  }
+
+  function messageAttachmentMarkup(message) {
+    const attachments = message.attachments || message.metadata?.attachments;
+    if (!Array.isArray(attachments) || !attachments.length) return "";
+    return `<div class="message-attachments">${attachments.map(item => `<span class="message-attachment"><span class="icon-slot" aria-hidden="true">${svgIcon("paperclip")}</span>${esc(item.name || "未命名附件")}</span>`).join("")}</div>`;
   }
 
   function dataActions(kind, id, editable = true) {
@@ -475,6 +747,8 @@
       rate_limited: "已限流",
       connection_failed: "连接失败",
       http_error: "接口异常",
+      model_not_found: "模型不存在",
+      quota_exceeded: "额度不足",
       no_models: "无可测试模型",
       provider_disabled: "已停用",
     })[errorType] || "连接失败";
@@ -516,15 +790,36 @@
     const health = Object.fromEntries(state.resources.health.map(item => [item.provider_id, item]));
     const authLabel = value => ({ bearer: "Bearer Token", api_key: "API Key", token: "Token", basic: "Basic Auth", custom_header: "自定义 Header", query_param: "Query 参数", none: "无需认证" }[value] || value);
     const providerCount = state.resources.providers.length;
+    const modelCount = state.resources.models.length;
+    const enabledProviderCount = state.resources.providers.filter(item => item.enabled).length;
+    const enabledModelCount = state.resources.models.filter(item => item.enabled).length;
+    const providerStatuses = new Map(state.resources.providers.map(item => [item.provider_id, providerHealthView(item, health[item.provider_id] || {})]));
+    const healthyCount = [...providerStatuses.values()].filter(status => status.tone === "success").length;
+    const searchTerm = String($("providerSearch")?.value || "").trim().toLowerCase();
+    const visibleProviders = state.resources.providers.filter(item => {
+      if (!searchTerm) return true;
+      const models = state.resources.models.filter(model => model.provider_id === item.provider_id);
+      const searchable = [item.provider_id, item.label, item.base_url, ...models.flatMap(model => [model.alias, model.model, ...(model.capabilities || [])])];
+      return searchable.some(value => String(value || "").toLowerCase().includes(searchTerm));
+    });
     if ($("providerCount")) $("providerCount").textContent = `${providerCount} 个供应商`;
-    $("providerList").innerHTML = state.resources.providers.length ? state.resources.providers.map(item => {
+    if ($("providerStat")) $("providerStat").textContent = providerCount;
+    if ($("providerStatHint")) $("providerStatHint").textContent = providerCount ? `${enabledProviderCount} 个已启用` : "等待添加供应商";
+    if ($("modelStat")) $("modelStat").textContent = modelCount;
+    if ($("modelStatHint")) $("modelStatHint").textContent = modelCount ? `${enabledModelCount} 个可调用` : "添加模型后即可使用";
+    if ($("healthyStat")) $("healthyStat").textContent = healthyCount;
+    if ($("healthyStatHint")) $("healthyStatHint").textContent = healthyCount ? `共 ${providerCount} 个供应商` : providerCount ? "运行测试以确认连接" : "尚未进行连接测试";
+    if ($("modelFilterHint")) $("modelFilterHint").textContent = searchTerm
+      ? `匹配 ${visibleProviders.length} / ${providerCount} 个供应商`
+      : (providerCount ? "显示全部供应商" : "还没有资源");
+    $("providerList").innerHTML = providerCount ? (visibleProviders.length ? visibleProviders.map(item => {
       const models = state.resources.models.filter(model => model.provider_id === item.provider_id);
       const providerHealth = health[item.provider_id] || {};
-      const status = providerHealthView(item, providerHealth);
+      const status = providerStatuses.get(item.provider_id) || providerHealthView(item, providerHealth);
       const checking = state.testingProviders.has(item.provider_id);
       const checks = status.checks.map(check => `<span class="protocol-check ${check.ok ? "ok" : "failed"}"><strong>${esc(protocolLabel(check.protocol))}</strong><span>${check.ok ? `${esc(check.latency_ms)} ms` : esc(providerHealthLabel(check.error_type))}</span></span>`).join("");
       return `<section class="provider-group"><header class="provider-group-head"><span class="provider-mark">${esc(item.label.slice(0, 1).toUpperCase())}</span><div class="provider-copy"><strong>${esc(item.label)}</strong><span>${esc(item.base_url)}</span></div><span class="health-status ${status.tone}"><i></i>${esc(status.label)}</span>${dataActions("provider", item.provider_id)}</header><div class="provider-meta"><span>${(item.protocols || ["openai"]).map(protocol => esc(protocolLabel(protocol))).join(" / ")}</span><span>${esc(authLabel(item.auth_type || "bearer"))}</span><span>${providerHealth.configured ? "认证已配置" : item.auth_type === "none" ? "无需密钥" : "缺少密钥"}</span><span>${models.length} 个模型</span></div><div class="provider-health"><div class="provider-health-copy" title="${esc(status.detail)}"><span>${esc(status.detail)}</span>${status.checkedAt ? `<time>最近测试 ${esc(status.checkedAt)}</time>` : ""}${checks ? `<div class="protocol-checks">${checks}</div>` : ""}</div><button class="button quiet compact test-provider" type="button" data-test-provider="${esc(item.provider_id)}" ${checking || !item.enabled ? "disabled" : ""}>${checking ? "测试中…" : "测试连接"}</button></div><div class="provider-models"><div class="provider-models-head"><strong>模型</strong><button class="button quiet compact" type="button" data-add-model="${esc(item.provider_id)}">${svgIcon("plus")} 添加模型</button></div>${models.length ? models.map(model => `<div class="provider-model-row"><span class="model-glyph">M</span><div><strong>${esc(model.alias)}</strong><span>${esc(model.model)} · ${esc(protocolLabel(model.protocol || item.protocols?.[0] || "openai"))}</span></div><span class="state-tag">${model.enabled ? "已启用" : "已停用"}</span>${dataActions("model", model.alias)}</div>`).join("") : `<div class="provider-model-empty">该供应商还没有模型</div>`}</div></section>`;
-    }).join("") : `<div class="list-empty">还没有供应商，先添加供应商再配置模型。</div>`;
+    }).join("") : `<div class="list-empty">没有匹配的供应商或模型。试试其他关键词。</div>`) : `<div class="list-empty">还没有供应商，先添加供应商再配置模型。</div>`;
     document.querySelectorAll("[data-edit-provider]").forEach(button => button.addEventListener("click", () => editProvider(button.dataset.editProvider)));
     document.querySelectorAll("[data-delete-provider]").forEach(button => button.addEventListener("click", () => deleteProvider(button.dataset.deleteProvider)));
     document.querySelectorAll("[data-test-provider]").forEach(button => button.addEventListener("click", () => testProvider(button.dataset.testProvider)));
@@ -609,25 +904,45 @@
     catch (error) { toast(error.message); }
   }
 
+  function renderModelProviderOptions(selectedProviderId) {
+    $("modelProvider").innerHTML = state.resources.providers
+      .map(provider => option(provider.provider_id, provider.label, selectedProviderId))
+      .join("");
+    $("modelProvider").value = selectedProviderId || "";
+  }
+
+  function setModelProtocolOptions(provider, selectedProtocol = "") {
+    const protocol = provider.protocols.includes(selectedProtocol) ? selectedProtocol : provider.protocols[0];
+    $("modelProtocol").innerHTML = provider.protocols
+      .map(value => option(value, value === "claude" ? "Claude · Messages" : "OpenAI · Chat Completions", protocol))
+      .join("");
+    return protocol;
+  }
+
+  function resetPhysicalModelPicker() {
+    $("modelName").innerHTML = option("", "正在获取模型列表…");
+    $("modelName").value = "";
+    $("modelNameCustom").value = "";
+    $("modelNameCustom").classList.add("hidden");
+    $("modelNameCustom").required = false;
+  }
+
   function editModel(alias = "", providerId = "") {
     if (!state.resources.providers.length) { toast("请先添加供应商"); return; }
     const item = state.resources.models.find(model => model.alias === alias);
-    const selectedProviderId = item?.provider_id || providerId;
+    const selectedProviderId = item?.provider_id || providerId || state.resources.providers[0].provider_id;
     const provider = state.resources.providers.find(value => value.provider_id === selectedProviderId);
     if (!provider) { toast("未找到模型所属供应商"); return; }
     $("modelForm").reset(); $("modelForm").classList.remove("hidden"); $("providerForm").classList.add("hidden");
     $("modelFormTitle").textContent = item ? "编辑模型" : "添加模型";
     $("modelAlias").value = item?.alias || ""; $("modelAlias").readOnly = Boolean(item);
-    $("modelProvider").innerHTML = option(provider.provider_id, provider.label, provider.provider_id);
-    $("modelProtocol").innerHTML = provider.protocols.map(protocol => option(protocol, protocol === "claude" ? "Claude · Messages" : "OpenAI · Chat Completions", item?.protocol || provider.protocols[0])).join("");
-    $("modelName").innerHTML = option("", "正在获取模型列表…");
+    renderModelProviderOptions(selectedProviderId);
+    setModelProtocolOptions(provider, item?.protocol || "");
+    resetPhysicalModelPicker();
     $("modelName").disabled = true;
-    $("modelNameCustom").value = "";
-    $("modelNameCustom").classList.add("hidden");
-    $("modelNameCustom").required = false;
     $("modelDiscoveryStatus").textContent = "正在从供应商获取可用模型…";
     $("modelDiscoveryStatus").classList.remove("error");
-    modelAliasAutoValue = item?.model || "";
+    modelAliasAutoValue = item?.alias || "";
     $("modelCapabilities").value = (item?.capabilities || ["general"]).join(", ");
     $("modelTemperature").value = item?.temperature ?? ""; $("modelMaxTokens").value = item?.max_tokens ?? ""; $("modelContextWindow").value = item?.context_window_tokens ?? "";
     $("modelEnabled").checked = item?.enabled ?? true;
@@ -635,6 +950,7 @@
   }
 
   let modelAliasAutoValue = "";
+  let modelDiscoverySequence = 0;
 
   function physicalModelName() {
     return $("modelName").value === "__manual__"
@@ -644,7 +960,7 @@
 
   function syncModelAliasDefault() {
     const alias = $("modelAlias");
-    const modelName = physicalModelName();
+    const modelName = defaultModelAlias(physicalModelName());
     if (!alias.readOnly && (!alias.value.trim() || alias.value === modelAliasAutoValue)) {
       alias.value = modelName;
       modelAliasAutoValue = modelName;
@@ -660,6 +976,7 @@
   }
 
   async function discoverProviderModels(provider, selectedModel = "") {
+    const requestSequence = ++modelDiscoverySequence;
     const select = $("modelName");
     const refresh = $("refreshModelList");
     select.disabled = true;
@@ -670,6 +987,7 @@
       const result = await post(`/api/v2/resources/providers/${encodeURIComponent(provider.provider_id)}/models/discover`, {
         protocol: $("modelProtocol").value,
       });
+      if (requestSequence !== modelDiscoverySequence) return;
       const models = [...new Set((result.models || []).map(value => String(value).trim()).filter(Boolean))];
       select.innerHTML = option("", models.length ? "请选择物理模型" : "未发现可用模型")
         + models.map(model => option(model, model, selectedModel)).join("")
@@ -684,12 +1002,14 @@
       if (!models.length && !selectedModel) select.value = "__manual__";
       syncPhysicalModelMode();
     } catch (error) {
+      if (requestSequence !== modelDiscoverySequence) return;
       select.innerHTML = option("__manual__", "手动输入物理模型…", "__manual__");
       select.value = "__manual__";
       $("modelDiscoveryStatus").textContent = `自动获取失败：${error.message}；仍可手动输入`;
       $("modelDiscoveryStatus").classList.add("error");
       syncPhysicalModelMode();
     } finally {
+      if (requestSequence !== modelDiscoverySequence) return;
       select.disabled = false;
       refresh.disabled = false;
     }
@@ -712,10 +1032,36 @@
   }
 
   function renderNodes() {
-    $("nodeList").innerHTML = state.catalog.nodes.map(item => `<div class="data-row"><span class="node-glyph">N</span><div><strong>${esc(item.label)}</strong><span>${esc(item.node_type)} · ${esc(item.default_model || "自动选择模型")}</span></div><span class="state-tag">${item.output_fields.length} 个输出</span>${dataActions("node", item.node_type, !item.builtin)}</div>`).join("");
+    $("nodeCount").textContent = `${state.catalog.nodes.length} 个节点`;
+    $("nodeList").innerHTML = state.catalog.nodes.map(item => `
+      <div class="data-row node-row">
+        <span class="node-glyph" aria-hidden="true">N</span>
+        <div class="node-copy">
+          <strong>${esc(item.label)}</strong>
+          <span class="node-meta">
+            <span class="node-type">${esc(item.node_type)}</span>
+            <i aria-hidden="true">·</i>
+            <span class="node-model">${esc(item.default_model || "自动选择模型")}</span>
+          </span>
+        </div>
+        <div class="node-row-actions">
+          <span class="node-output-count">${item.output_fields.length} 个输出</span>
+          ${item.builtin ? '<span class="node-kind-tag">内置</span>' : dataActions("node", item.node_type, true)}
+        </div>
+      </div>
+    `).join("");
     document.querySelectorAll("[data-edit-node]").forEach(button => button.addEventListener("click", () => editNode(button.dataset.editNode)));
     document.querySelectorAll("[data-delete-node]").forEach(button => button.addEventListener("click", () => deleteNode(button.dataset.deleteNode)));
-    $("nodeDefaultModel").innerHTML = option("", "自动选择") + state.resources.models.map(item => option(item.alias, item.alias)).join("");
+    fillNodeModelOptions();
+  }
+
+  function fillNodeModelOptions(selected = $("nodeDefaultModel").value) {
+    const enabledModels = state.resources.models.filter(item => item.enabled);
+    const currentDisabled = selected && !enabledModels.some(item => item.alias === selected);
+    const options = enabledModels.map(item => option(item.alias, item.alias, selected));
+    if (currentDisabled) options.unshift(option(selected, `${selected}（当前模型已停用）`, selected));
+    $("nodeDefaultModel").innerHTML = option("", "自动选择", selected) + options.join("");
+    $("nodeDefaultModel").value = selected || "";
   }
 
   function editNode(nodeType = "") {
@@ -726,20 +1072,33 @@
     $("nodeType").value = item?.node_type || ""; $("nodeType").readOnly = Boolean(item);
     $("nodeLabel").value = item?.label || ""; $("nodeDescription").value = item?.description || "";
     $("nodeInputs").value = (item?.input_fields || []).join(", "); $("nodeOutputs").value = (item?.output_fields || []).join(", ");
-    $("nodeCapabilities").value = (item?.capabilities || ["general"]).join(", "); $("nodeDefaultModel").value = item?.default_model || "";
+    $("nodeCapabilities").value = (item?.capabilities || ["general"]).join(", "); fillNodeModelOptions(item?.default_model || "");
   }
 
   async function deleteNode(nodeType) {
     const confirmed = await confirmAction({ title: "删除自定义节点", message: `确定删除“${nodeType}”吗？被工作流引用时不会执行删除。` });
     if (!confirmed) return;
-    try { await remove(`/api/v2/nodes/${encodeURIComponent(nodeType)}`); await refreshManagement(); toast("节点已删除"); }
+    try {
+      await remove(`/api/v2/nodes/${encodeURIComponent(nodeType)}`);
+      if ($("nodeType").value === nodeType) {
+        $("nodeForm").classList.add("hidden");
+        $("nodeForm").reset();
+      }
+      await refreshManagement();
+      toast("节点已删除");
+    }
     catch (error) { toast(error.message); }
   }
 
   function renderWorkflowList() {
     const workflows = state.catalog.workflows || [];
-    if (!state.editingWorkflow) state.editingWorkflow = clone(workflows.find(item => item.workflow_id === state.selectedWorkflowId) || workflows[0] || newWorkflowValue());
-    $("workflowList").innerHTML = workflows.map(item => `<button type="button" class="workflow-list-item ${state.editingWorkflow?.workflow_id === item.workflow_id ? "active" : ""}" data-workflow="${esc(item.workflow_id)}"><strong>${esc(item.label)}</strong><span>${item.nodes.length} 个节点${item.builtin ? " · 内置" : ""}</span></button>`).join("");
+    $("workflowCount").textContent = `${workflows.length} 个流程`;
+    if (!state.editingWorkflow || (state.editingWorkflow.workflow_id && !workflows.some(item => item.workflow_id === state.editingWorkflow.workflow_id))) {
+      state.editingWorkflow = clone(workflows.find(item => item.workflow_id === state.selectedWorkflowId) || workflows[0] || newWorkflowValue());
+    }
+    $("workflowList").innerHTML = workflows.length
+      ? workflows.map(item => `<button type="button" class="workflow-list-item ${state.editingWorkflow?.workflow_id === item.workflow_id ? "active" : ""}" data-workflow="${esc(item.workflow_id)}"><strong>${esc(item.label)}</strong><span>${(item.nodes || []).length} 个节点${item.builtin ? " · 内置" : ""}</span></button>`).join("")
+      : '<div class="list-empty">还没有工作流，先创建一个可复用的流程。</div>';
     document.querySelectorAll("[data-workflow]").forEach(button => button.addEventListener("click", () => {
       state.editingWorkflow = clone(workflows.find(item => item.workflow_id === button.dataset.workflow)); renderWorkflowList(); renderWorkflowEditor();
     }));
@@ -769,6 +1128,7 @@
   function syncWorkflowForm() {
     if (!state.editingWorkflow) state.editingWorkflow = newWorkflowValue();
     state.editingWorkflow.workflow_id = $("workflowId").value.trim(); state.editingWorkflow.label = $("workflowLabel").value.trim(); state.editingWorkflow.description = $("workflowDescription").value.trim();
+    const previousNodes = state.editingWorkflow.nodes || [];
     state.editingWorkflow.nodes = [...document.querySelectorAll("[data-workflow-node]")].map((row, index) => ({
       node_id: row.querySelector('[data-node-field="node_id"]').value.trim(),
       node_type: row.querySelector('[data-node-field="node_type"]').value,
@@ -776,24 +1136,52 @@
       on_failure: row.querySelector('[data-node-field="on_failure"]').value,
       depends_on: csv(row.querySelector('[data-node-field="depends_on"]').value),
       prompt_template: row.querySelector('[data-node-field="prompt_template"]').value,
-      config: {}, position: [0, index * 100],
+      config: { ...(previousNodes[index]?.config || {}) },
+      position: previousNodes[index]?.position || [0, index * 100],
     }));
   }
 
   function setManagementTab(name) {
     document.querySelectorAll("[data-management-tab]").forEach(button => { const active = button.dataset.managementTab === name; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); });
     document.querySelectorAll("[data-management-panel]").forEach(panel => panel.classList.toggle("hidden", panel.dataset.managementPanel !== name));
+    const managementBody = document.querySelector(".management-body");
+    if (managementBody) managementBody.scrollTop = 0;
+    window.dispatchEvent(new CustomEvent("workloop:management-tab", { detail: { name } }));
   }
 
   async function openManagement() {
-    try { await refreshManagement(); $("managementDialog").showModal(); }
+    try {
+      await refreshManagement();
+      $("managementDialog").showModal();
+      const name = document.querySelector("[data-management-tab].active")?.dataset.managementTab || "models";
+      window.dispatchEvent(new CustomEvent("workloop:management-open", { detail: { name } }));
+    }
     catch (error) { toast(error.message); }
   }
 
   async function init() {
     try {
-      await refreshManagement(); state.projects = await api("/api/v2/projects"); renderProjects();
-      if (state.projects[0]) await selectProject(state.projects[0].project_id); else { renderMode(); renderSessions(); }
+      const selectedProjectId = state.project?.project_id || "";
+      await refreshManagement();
+      [state.projects, state.chatSessions] = await Promise.all([
+        api("/api/v2/projects"),
+        api("/api/v2/sessions"),
+      ]);
+      renderProjects();
+      if (selectedProjectId && state.projects.some(item => item.project_id === selectedProjectId)) {
+        await selectProject(selectedProjectId);
+      }
+      else {
+        state.project = null;
+        state.sessions = [];
+        delete document.body.dataset.projectId;
+        delete document.body.dataset.projectName;
+        state.selectedModelAlias = null;
+        state.selectedTools = null;
+        state.session = state.chatSessions[0] || null;
+        state.mode = "chat";
+        renderMode(); renderProjects(); renderSessions();
+      }
     } catch (error) { toast(error.message); }
   }
 
@@ -826,6 +1214,9 @@
   function openProjectDialog(project = null) {
     state.editingProjectId = project?.project_id || "";
     $("projectDialogTitle").textContent = project ? "项目设置" : "新建项目";
+    $("projectSubmit").textContent = project ? "保存设置" : "创建项目";
+    $("deleteProject").classList.toggle("hidden", !project);
+    $("deleteProject").disabled = false;
     $("projectInput").value = project?.name || "";
     $("workspaceInput").value = project?.workspace_path || "";
     $("projectDefaultModel").value = project?.default_model || "";
@@ -847,7 +1238,48 @@
   function closeProjectDialog() {
     state.editingProjectId = "";
     $("projectForm").reset();
+    $("projectDialogTitle").textContent = "新建项目";
+    $("projectSubmit").textContent = "创建项目";
+    $("deleteProject").classList.add("hidden");
     $("projectDialog").close();
+  }
+
+  async function deleteProject(projectId = state.editingProjectId || state.project?.project_id) {
+    const project = state.projects.find(item => item.project_id === projectId);
+    if (!projectId || !project) return;
+    const confirmed = await confirmAction({
+      title: "删除项目",
+      message: `确定删除“${project.name}”吗？项目下的会话、协同任务和拆分记录会一并删除，但工作区文件不会被修改。`,
+      confirmLabel: "删除项目",
+    });
+    if (!confirmed) return;
+    const button = $("deleteProject");
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      await remove(`/api/v2/projects/${encodeURIComponent(projectId)}`);
+      state.projects = state.projects.filter(item => item.project_id !== projectId);
+      if (state.project?.project_id === projectId) {
+        state.project = null;
+        state.sessions = [];
+        state.session = state.chatSessions[0] || null;
+        state.mode = "chat";
+        state.selectedModelAlias = null;
+        state.selectedTools = null;
+        state.search = null;
+        state.searchProjectId = "";
+        delete document.body.dataset.projectId;
+        delete document.body.dataset.projectName;
+      }
+      closeProjectDialog();
+      renderMode(); renderProjects(); renderSessions();
+      toast("项目已删除");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
   }
 
   $("newProject").addEventListener("click", () => openProjectDialog());
@@ -859,6 +1291,8 @@
   $("projectDialog").addEventListener("cancel", () => {
     state.editingProjectId = "";
     $("projectForm").reset();
+    $("projectSubmit").textContent = "创建项目";
+    $("deleteProject").classList.add("hidden");
   });
   $("projectForm").addEventListener("submit", async event => {
     event.preventDefault();
@@ -896,10 +1330,57 @@
     }
     catch (error) { toast(error.message); }
   });
-  $("sendMessage").addEventListener("click", send);
-  $("messageInput").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } });
+  $("sendMessage").addEventListener("click", () => void send());
+  $("messageInput").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } });
   $("messageInput").addEventListener("input", event => { resizeComposer(); syncSendButton(); });
+  $("attachFiles").addEventListener("click", () => $("composerFileInput").click());
+  $("composerFileInput").addEventListener("change", event => {
+    const files = [...(event.target.files || [])];
+    const existingNames = new Set(state.composerAttachments.map(file => file.name));
+    const remaining = MAX_COMPOSER_ATTACHMENTS - state.composerAttachments.length;
+    const accepted = [];
+    for (const file of files) {
+      if (accepted.length >= remaining) break;
+      if (existingNames.has(file.name)) continue;
+      if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
+        toast(`附件“${file.name}”超过 ${MAX_COMPOSER_ATTACHMENT_BYTES / 1000} KB 限制`);
+        continue;
+      }
+      accepted.push(file);
+      existingNames.add(file.name);
+    }
+    if (files.length > accepted.length && remaining <= 0) toast(`最多添加 ${MAX_COMPOSER_ATTACHMENTS} 个附件`);
+    state.composerAttachments.push(...accepted);
+    event.target.value = "";
+    renderComposerAttachments();
+    syncSendButton();
+  });
+  $("deleteProject").addEventListener("click", () => void deleteProject());
+  $("toggleToolMenu").addEventListener("click", () => setToolMenuOpen(!state.toolMenuOpen));
+  $("closeToolMenu").addEventListener("click", () => setToolMenuOpen(false));
+  $("resetComposerTools").addEventListener("click", () => {
+    state.selectedTools = null;
+    renderToolMenu();
+  });
+  document.querySelectorAll("[data-composer-tool-choice]").forEach(input => input.addEventListener("change", () => {
+    state.selectedTools = [...document.querySelectorAll("[data-composer-tool-choice]:checked")].map(item => item.value);
+    renderToolMenu();
+  }));
+  document.addEventListener("click", event => {
+    const menu = $("toolMenu");
+    const toggle = $("toggleToolMenu");
+    if (state.toolMenuOpen && menu && toggle && !menu.contains(event.target) && !toggle.contains(event.target)) setToolMenuOpen(false);
+  });
+  $("modelSelect").addEventListener("change", event => {
+    if (state.mode === "task") return;
+    state.selectedModelAlias = event.target.value;
+    renderModelPicker();
+  });
   document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => {
+    if (button.dataset.mode === "task" && !state.project) {
+      toast("任务模式需要选择项目；普通对话无需项目");
+      return;
+    }
     state.mode = button.dataset.mode;
     renderMode();
     if (state.mode === "task") openTaskWorkflowPicker();
@@ -947,6 +1428,7 @@
   document.querySelectorAll("[data-open-management]").forEach(button => button.addEventListener("click", openManagement));
   document.querySelectorAll("[data-close-management]").forEach(button => button.addEventListener("click", () => $("managementDialog").close()));
   document.querySelectorAll("[data-management-tab]").forEach(button => button.addEventListener("click", () => setManagementTab(button.dataset.managementTab)));
+  $("providerSearch").addEventListener("input", () => renderProviders());
 
   $("newProvider").addEventListener("click", () => editProvider());
   $("providerForm").addEventListener("submit", async event => {
@@ -995,10 +1477,44 @@
     syncProviderAuth();
     if (preset === "custom") $("providerId").focus();
   }));
-  $("modelForm").addEventListener("submit", async event => { event.preventDefault(); try { const modelName = physicalModelName(); if (!modelName) throw new Error("请选择或输入物理模型名"); await post("/api/v2/resources/models", { alias: $("modelAlias").value, provider_id: $("modelProvider").value, protocol: $("modelProtocol").value, model: modelName, capabilities: csv($("modelCapabilities").value), temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value), max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value), context_window_tokens: $("modelContextWindow").value === "" ? null : Number($("modelContextWindow").value), enabled: $("modelEnabled").checked }); $("modelForm").classList.add("hidden"); await refreshManagement(); toast("模型已保存"); } catch (error) { toast(error.message); } });
+  $("modelForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    try {
+      const alias = $("modelAlias").value.trim();
+      if (!alias) throw new Error("请填写显示名称");
+      if (!MODEL_ALIAS_PATTERN.test(alias)) throw new Error("显示名称只能包含字母、数字、点号、连字符和下划线");
+      const providerId = $("modelProvider").value;
+      if (!providerId) throw new Error("请选择所属供应商");
+      const protocol = $("modelProtocol").value;
+      if (!protocol) throw new Error("请选择接口协议");
+      const modelName = physicalModelName();
+      if (!modelName) throw new Error("请选择或输入物理模型名");
+      await post("/api/v2/resources/models", {
+        alias,
+        provider_id: providerId,
+        protocol,
+        model: modelName,
+        capabilities: csv($("modelCapabilities").value),
+        temperature: $("modelTemperature").value === "" ? null : Number($("modelTemperature").value),
+        max_tokens: $("modelMaxTokens").value === "" ? null : Number($("modelMaxTokens").value),
+        context_window_tokens: $("modelContextWindow").value === "" ? null : Number($("modelContextWindow").value),
+        enabled: $("modelEnabled").checked,
+      });
+      $("modelForm").classList.add("hidden");
+      await refreshManagement();
+      toast("模型已保存");
+    } catch (error) { toast(error.message); }
+  });
   document.querySelector("[data-cancel-model]").addEventListener("click", () => $("modelForm").classList.add("hidden"));
   $("modelName").addEventListener("change", () => syncPhysicalModelMode({ focus: true }));
   $("modelNameCustom").addEventListener("input", syncModelAliasDefault);
+  $("modelProvider").addEventListener("change", () => {
+    const provider = state.resources.providers.find(item => item.provider_id === $("modelProvider").value);
+    if (!provider) return;
+    setModelProtocolOptions(provider);
+    resetPhysicalModelPicker();
+    discoverProviderModels(provider);
+  });
   $("modelProtocol").addEventListener("change", () => {
     const provider = state.resources.providers.find(item => item.provider_id === $("modelProvider").value);
     if (provider) discoverProviderModels(provider, physicalModelName());
@@ -1009,13 +1525,84 @@
   });
 
   $("newNode").addEventListener("click", () => editNode());
-  $("nodeForm").addEventListener("submit", async event => { event.preventDefault(); try { await post("/api/v2/nodes", { node_type: $("nodeType").value, label: $("nodeLabel").value, description: $("nodeDescription").value, input_fields: csv($("nodeInputs").value), output_fields: csv($("nodeOutputs").value), capabilities: csv($("nodeCapabilities").value), default_model: $("nodeDefaultModel").value }); $("nodeForm").classList.add("hidden"); await refreshManagement(); toast("自定义节点已保存"); } catch (error) { toast(error.message); } });
+  $("nodeForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    const originalLabel = submit.textContent;
+    submit.textContent = "保存中…";
+    try {
+      await post("/api/v2/nodes", {
+        node_type: $("nodeType").value,
+        label: $("nodeLabel").value,
+        description: $("nodeDescription").value,
+        input_fields: csv($("nodeInputs").value),
+        output_fields: csv($("nodeOutputs").value),
+        capabilities: csv($("nodeCapabilities").value),
+        default_model: $("nodeDefaultModel").value,
+      });
+      $("nodeForm").classList.add("hidden");
+      await refreshManagement();
+      toast("自定义节点已保存");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      submit.textContent = originalLabel;
+    }
+  });
   document.querySelector("[data-cancel-node]").addEventListener("click", () => $("nodeForm").classList.add("hidden"));
 
   $("newWorkflow").addEventListener("click", () => { state.editingWorkflow = newWorkflowValue(); renderWorkflowList(); renderWorkflowEditor(); });
   $("addWorkflowNode").addEventListener("click", () => { syncWorkflowForm(); const index = state.editingWorkflow.nodes.length + 1; state.editingWorkflow.nodes.push({ node_id: `step-${index}`, node_type: state.catalog.nodes[0]?.node_type || "tool", depends_on: [], model_alias: "", prompt_template: "", on_failure: "human", config: {}, position: [0, index * 100] }); renderWorkflowNodes(); });
-  $("workflowForm").addEventListener("submit", async event => { event.preventDefault(); try { syncWorkflowForm(); if (!state.editingWorkflow.nodes.length) throw new Error("工作流至少需要一个节点"); const saved = await post("/api/v2/workflows", state.editingWorkflow); state.selectedWorkflowId = saved.workflow_id; state.editingWorkflow = clone(saved); await refreshManagement(); toast("工作流和模型关联已保存"); } catch (error) { toast(error.message); } });
-  $("deleteWorkflow").addEventListener("click", async () => { const id = state.editingWorkflow?.workflow_id; if (!id) return; const confirmed = await confirmAction({ title: "删除工作流", message: `确定删除“${id}”吗？内置工作流不会被删除。` }); if (!confirmed) return; try { await remove(`/api/v2/workflows/${encodeURIComponent(id)}`); state.editingWorkflow = null; await refreshManagement(); toast("工作流已删除"); } catch (error) { toast(error.message); } });
+  $("workflowForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    const originalLabel = submit.textContent;
+    submit.textContent = "保存中…";
+    try {
+      syncWorkflowForm();
+      if (!state.editingWorkflow.nodes.length) throw new Error("工作流至少需要一个节点");
+      const saved = await post("/api/v2/workflows", state.editingWorkflow);
+      state.selectedWorkflowId = saved.workflow_id;
+      state.editingWorkflow = clone(saved);
+      await refreshManagement();
+      toast("工作流和模型关联已保存");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      submit.textContent = originalLabel;
+    }
+  });
+  async function deleteWorkflow() {
+    const id = state.editingWorkflow?.workflow_id;
+    const button = $("deleteWorkflow");
+    if (!id || button.disabled) return;
+    const confirmed = await confirmAction({ title: "删除工作流", message: `确定删除“${id}”吗？内置工作流不会被删除。` });
+    if (!confirmed) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      await remove(`/api/v2/workflows/${encodeURIComponent(id)}`);
+      state.editingWorkflow = null;
+      await refreshManagement();
+      toast("工作流已删除");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+  $("deleteWorkflow").addEventListener("click", deleteWorkflow);
 
   if (new URLSearchParams(location.search).get("desktop") === "1") {
     document.body.classList.add("desktop");

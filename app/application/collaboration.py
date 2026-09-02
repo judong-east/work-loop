@@ -320,6 +320,35 @@ class CollaborationService:
         self.validate_project(project_id)
         return self.repository.list_goals(project_id)
 
+    def delete_project(self, project_id: str) -> dict[str, Any]:
+        """Remove project-scoped collaboration records without touching roles.
+
+        Roles are shared catalog entries and may be used by other projects, so
+        they remain intact.  Tasks, handoffs, and goals are project-owned and
+        are removed together.  A non-blocking coordination lock prevents
+        deleting a graph while its scheduler is mutating task state.
+        """
+
+        lock = self._lock_for(project_id)
+        if not lock.acquire(blocking=False):
+            raise ValueError("项目仍在运行协同任务，请稍后再删除。")
+        try:
+            collections = (
+                (self.repository.tasks, self.repository.tasks.list(), "project_id"),
+                (self.repository.handoffs, self.repository.handoffs.list(), "project_id"),
+                (self.repository.goals, self.repository.goals.list(), "project_id"),
+            )
+            counts: dict[str, int] = {}
+            for collection, values, field_name in collections:
+                owned = [item for item in values if getattr(item, field_name, "") == project_id]
+                for item in owned:
+                    key = getattr(item, "task_id", "") or getattr(item, "message_id", "") or getattr(item, "goal_id", "")
+                    collection.delete(str(key))
+                counts[collection.root.name] = len(owned)
+            return {"project_id": project_id, **counts}
+        finally:
+            lock.release()
+
     def save_goal(self, goal: Goal) -> Goal:
         return self.repository.save_goal(goal)
 

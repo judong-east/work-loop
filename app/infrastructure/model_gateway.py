@@ -3,11 +3,17 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Generator, Iterator
+from pathlib import Path
 from typing import Any
 
 from app.domain.context_compaction import estimate_tokens
@@ -62,6 +68,68 @@ _TOOL_PROMPT_SUFFIX = (
 )
 
 _ELISION_NOTICE = "\n\n[earlier tool rounds were elided to respect the context budget]"
+
+
+class _CurlStreamResponse:
+    """Small file-like adapter around the system curl streaming process.
+
+    Some Windows endpoint-control policies deny sockets opened by a
+    PyInstaller/Python executable while allowing the signed system
+    ``curl.exe`` client.  The gateway normally stays on urllib; this adapter
+    is only created after that process-level access-denied failure.
+    """
+
+    def __init__(self, process: subprocess.Popen[bytes], temp_dir: tempfile.TemporaryDirectory[str]):
+        self._process = process
+        self._temp_dir = temp_dir
+        self._stdout = process.stdout
+        self._stderr = process.stderr
+        self._closed = False
+
+    def __enter__(self) -> "_CurlStreamResponse":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        del exc_value, traceback
+        if self._closed:
+            return
+        self._closed = True
+        if exc_type is not None and self._process.poll() is None:
+            self._process.terminate()
+        if self._stdout is not None:
+            self._stdout.close()
+        try:
+            self._process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=5)
+        stderr = b""
+        if self._stderr is not None:
+            stderr = self._stderr.read() or b""
+            self._stderr.close()
+        self._temp_dir.cleanup()
+        if exc_type is None and self._process.returncode:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"curl.exe 请求失败（退出码 {self._process.returncode}）"
+                + (f": {detail[:300]}" if detail else "")
+            )
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        if self._stdout is None:
+            raise StopIteration
+        line = self._stdout.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        if self._stdout is None:
+            return b""
+        return self._stdout.read(size)
 
 
 class OpenAICompatibleGateway:
@@ -348,6 +416,185 @@ class OpenAICompatibleGateway:
         output.setdefault("model", alias)
         return output
 
+    @staticmethod
+    def _access_denied(error: BaseException) -> bool:
+        """Return whether a network failure is the Windows access-denied case."""
+
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if getattr(current, "winerror", None) == 5:
+                return True
+            args = getattr(current, "args", ())
+            if args and args[0] in {5, 13}:
+                return True
+            current = getattr(current, "reason", None)
+            if not isinstance(current, BaseException):
+                break
+        text = str(error).lower()
+        return "winerror 5" in text or "拒绝访问" in text or "access is denied" in text
+
+    @staticmethod
+    def _probe_error_type(status: int, detail: str) -> str:
+        lowered = detail.lower()
+        if status == 429:
+            return "rate_limited"
+        if any(token in lowered for token in ("model_not_found", "model not found", "no available channel")):
+            return "model_not_found"
+        if status in {401, 403}:
+            if any(token in lowered for token in ("quota", "credit limit", "insufficient_user_quota", "余额")):
+                return "quota_exceeded"
+            return "authentication_failed"
+        return "http_error"
+
+    @staticmethod
+    def _curl_executable() -> str:
+        if sys.platform != "win32":
+            return ""
+        return shutil.which("curl.exe") or shutil.which("curl") or ""
+
+    @staticmethod
+    def _curl_creation_flags() -> int:
+        # Do not flash a console window for the desktop app.  The attribute is
+        # absent on non-Windows test hosts, hence the defensive lookup.
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    @staticmethod
+    def _curl_headers(request: urllib.request.Request) -> bytes:
+        # Credentials are deliberately written to curl's stdin instead of the
+        # command line, where they would be visible in process listings.
+        lines = [f"{name}: {value}" for name, value in request.header_items()]
+        return ("\n".join(lines) + "\n").encode("utf-8") if lines else b"\n"
+
+    def _curl_request(self, request: urllib.request.Request, timeout: float) -> tuple[int, bytes]:
+        executable = self._curl_executable()
+        if not executable:
+            raise RuntimeError(
+                "Python 进程被 Windows 拒绝联网，且系统未找到 curl.exe；"
+                "请允许 Workloop.exe 出站访问 HTTPS。"
+            )
+        with tempfile.TemporaryDirectory(prefix="workloop-curl-") as temp_dir:
+            root = Path(temp_dir)
+            response_path = root / "response.body"
+            body_path: Path | None = None
+            if request.data is not None:
+                body_path = root / "request.body"
+                body_path.write_bytes(request.data)
+            command = [
+                executable,
+                "--silent",
+                "--show-error",
+                "--location",
+                "--compressed",
+                "--request",
+                request.get_method(),
+                "--url",
+                request.full_url,
+                "--header",
+                "@-",
+                "--output",
+                str(response_path),
+                "--write-out",
+                "%{http_code}",
+                "--max-time",
+                str(max(1, int(timeout))),
+            ]
+            if body_path is not None:
+                command.extend(["--data-binary", f"@{body_path}"])
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=self._curl_headers(request),
+                    capture_output=True,
+                    timeout=max(5, timeout + 5),
+                    check=False,
+                    creationflags=self._curl_creation_flags(),
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise RuntimeError(f"curl.exe 无法启动：{error}") from error
+            status_text = completed.stdout.decode("ascii", errors="ignore").strip()
+            match = re.search(r"(\d{3})$", status_text)
+            body = response_path.read_bytes() if response_path.is_file() else b""
+            if match is None or match.group(1) == "000":
+                detail = completed.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    "curl.exe 无法连接供应商"
+                    + (f": {detail[:300]}" if detail else f"（退出码 {completed.returncode}）")
+                )
+            return int(match.group(1)), body
+
+    def _read_response(self, request: urllib.request.Request, timeout: float) -> tuple[int, bytes]:
+        """Read one response, falling back to system curl on WinError 5."""
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return int(getattr(response, "status", 200)), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            if not self._access_denied(error):
+                raise
+            return self._curl_request(request, timeout)
+
+    def _stream_response(self, request: urllib.request.Request, timeout: float):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            if not self._access_denied(error):
+                raise
+            return self._curl_stream(request, timeout)
+
+    def _curl_stream(self, request: urllib.request.Request, timeout: float) -> _CurlStreamResponse:
+        executable = self._curl_executable()
+        if not executable:
+            raise RuntimeError(
+                "Python 进程被 Windows 拒绝联网，且系统未找到 curl.exe；"
+                "请允许 Workloop.exe 出站访问 HTTPS。"
+            )
+        temp_dir = tempfile.TemporaryDirectory(prefix="workloop-curl-stream-")
+        root = Path(temp_dir.name)
+        body_path: Path | None = None
+        if request.data is not None:
+            body_path = root / "request.body"
+            body_path.write_bytes(request.data)
+        command = [
+            executable,
+            "--silent",
+            "--show-error",
+            "--location",
+            "--compressed",
+            "--no-buffer",
+            "--request",
+            request.get_method(),
+            "--url",
+            request.full_url,
+            "--header",
+            "@-",
+            "--output",
+            "-",
+            "--max-time",
+            str(max(1, int(timeout))),
+        ]
+        if body_path is not None:
+            command.extend(["--data-binary", f"@{body_path}"])
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                creationflags=self._curl_creation_flags(),
+            )
+            if process.stdin is not None:
+                process.stdin.write(self._curl_headers(request))
+                process.stdin.close()
+        except (OSError, subprocess.SubprocessError) as error:
+            temp_dir.cleanup()
+            raise RuntimeError(f"curl.exe 无法启动：{error}") from error
+        return _CurlStreamResponse(process, temp_dir)
+
     def _request_stream(
         self,
         provider: ModelProvider,
@@ -367,7 +614,7 @@ class OpenAICompatibleGateway:
             headers=self._headers(provider, credential, protocol, stream=True),
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with self._stream_response(request, self.timeout_seconds) as response:
                 yield from self._iter_sse_events(response)
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:500]
@@ -633,13 +880,16 @@ class OpenAICompatibleGateway:
             headers=self._headers(provider, credential, protocol),
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"模型接口返回 HTTP {error.code}: {detail}") from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            status, body = self._read_response(request, self.timeout_seconds)
+        except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as error:
             raise RuntimeError(f"无法连接模型接口: {error}") from error
+        if status >= 400:
+            detail = body.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"模型接口返回 HTTP {status}: {detail}")
+        try:
+            raw = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("模型接口响应不是合法 JSON") from error
         if not isinstance(raw, dict):
             raise ValueError("模型接口响应必须是 JSON 对象")
         return raw
@@ -670,20 +920,31 @@ class OpenAICompatibleGateway:
         )
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=min(self.timeout_seconds, 20)) as response:
-                response.read(256)
+            status, body = self._read_response(request, min(self.timeout_seconds, 20))
         except urllib.error.HTTPError as error:
-            error_type = "authentication_failed" if error.code in {401, 403} else "rate_limited" if error.code == 429 else "http_error"
             detail = error.read().decode("utf-8", errors="replace")[:300]
             return {
                 "ok": False, "alias": model.alias, "protocol": protocol.name,
-                "error_type": error_type, "error": f"HTTP {error.code}: {detail}",
+                "error_type": self._probe_error_type(error.code, detail), "error": f"HTTP {error.code}: {detail}",
                 "latency_ms": round((time.monotonic() - started) * 1000),
             }
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             return {
                 "ok": False, "alias": model.alias, "protocol": protocol.name,
                 "error_type": "connection_failed", "error": str(error),
+                "latency_ms": round((time.monotonic() - started) * 1000),
+            }
+        except RuntimeError as error:
+            return {
+                "ok": False, "alias": model.alias, "protocol": protocol.name,
+                "error_type": "connection_failed", "error": str(error),
+                "latency_ms": round((time.monotonic() - started) * 1000),
+            }
+        if status >= 400:
+            detail = body.decode("utf-8", errors="replace")[:300]
+            return {
+                "ok": False, "alias": model.alias, "protocol": protocol.name,
+                "error_type": self._probe_error_type(status, detail), "error": f"HTTP {status}: {detail}",
                 "latency_ms": round((time.monotonic() - started) * 1000),
             }
         return {
@@ -713,13 +974,14 @@ class OpenAICompatibleGateway:
             headers=self._headers(provider, credential, adapter),
         )
         try:
-            with urllib.request.urlopen(request, timeout=min(self.timeout_seconds, 20)) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"获取模型列表失败（HTTP {error.code}）: {detail}") from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            status, body = self._read_response(request, min(self.timeout_seconds, 20))
+        except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as error:
             raise RuntimeError(f"无法连接供应商模型列表接口: {error}") from error
+        if status >= 400:
+            detail = body.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"获取模型列表失败（HTTP {status}）: {detail}")
+        try:
+            raw = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError("供应商模型列表不是合法 JSON。") from error
         return self._model_ids(raw)
@@ -794,7 +1056,16 @@ class OpenAICompatibleGateway:
             prefix = provider.auth_prefix.strip() or "Bearer"
             headers["Authorization"] = f"{prefix} {credential}".strip()
         elif provider.auth_type == "api_key":
-            headers["x-api-key"] = credential
+            # RouterToken exposes an OpenAI-compatible surface but its chat
+            # endpoint authenticates with Bearer even though ``/v1/models``
+            # also accepts x-api-key.  Keep the provider form compatible with
+            # other API-key vendors while making the known RouterToken host
+            # work for both discovery and actual model requests.
+            host = (urllib.parse.urlsplit(provider.base_url).hostname or "").lower()
+            if host in {"api.tokenrouter.com", "api.tokenrouter.io"}:
+                headers["Authorization"] = f"Bearer {credential}"
+            else:
+                headers["x-api-key"] = credential
         elif provider.auth_type == "token":
             prefix = provider.auth_prefix.strip()
             if not prefix or prefix.lower() == "bearer":

@@ -8652,12 +8652,607 @@ label span,
 
 .provider-editor {
   min-width: 0;
+  min-height: 0;
   gap: 0;
   align-content: start;
-  padding: 25px 25px 28px;
-  overflow: auto;
+  padding: 25px 25px 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--line-strong);
   background: var(--panel);
+}
+
+/* -------------------------------------------------------------------------
+   Model management refresh
+
+   The model library is the most data-heavy management view. Give it a clear
+   overview, a useful search affordance, and cards that use the available
+   width instead of leaving a single narrow column floating in a large modal.
+   ------------------------------------------------------------------------- */
+
+.management-dialog {
+  width: min(1320px, calc(100vw - 40px));
+  height: min(860px, calc(100vh - 40px));
+}
+
+.management-dialog .dialog-head {
+  min-height: 88px;
+  padding: 22px 30px 20px;
+}
+
+.management-dialog .dialog-head h2 {
+  margin-top: 5px;
+  font-size: 21px;
+  letter-spacing: -.03em;
+}
+
+.management-dialog .dialog-head .eyebrow {
+  font-size: 11px;
+  letter-spacing: .16em;
+}
+
+.management-dialog .management-tabs {
+  gap: 8px;
+  padding: 9px 30px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.management-dialog .management-tabs button {
+  min-width: 106px;
+  min-height: 42px;
+  padding: 9px 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.management-dialog .management-tabs button.active {
+  color: var(--accent-strong);
+  font-weight: 750;
+}
+
+.management-panel[data-management-panel="models"] {
+  background: var(--bg);
+}
+
+.management-panel[data-management-panel="models"] .provider-library {
+  padding: 30px 32px 36px;
+}
+
+.management-panel[data-management-panel="models"] .provider-library .section-heading {
+  margin-bottom: 22px;
+}
+
+.management-panel[data-management-panel="models"] .section-heading h3 {
+  font-size: 22px;
+  letter-spacing: -.035em;
+}
+
+.management-panel[data-management-panel="models"] .section-heading p {
+  max-width: 600px;
+  margin-top: 7px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.management-panel[data-management-panel="models"] .section-kicker {
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="models"] .section-heading-actions {
+  gap: 12px;
+}
+
+.management-panel[data-management-panel="models"] .count-badge {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="models"] #newProvider {
+  min-height: 42px;
+  padding: 10px 16px;
+  font-size: 13px;
+}
+
+.model-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.overview-card {
+  display: flex;
+  min-width: 0;
+  min-height: 88px;
+  align-items: center;
+  gap: 13px;
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.overview-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.overview-icon.accent {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.overview-icon.success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.overview-icon .ui-icon {
+  width: 19px;
+  height: 19px;
+  stroke-width: 1.8;
+}
+
+.overview-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.overview-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.overview-copy strong {
+  color: var(--text);
+  font-size: 25px;
+  font-weight: 760;
+  letter-spacing: -.04em;
+  line-height: 1.15;
+}
+
+.overview-copy span {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-library-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.model-search {
+  position: relative;
+  display: block;
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.model-search > .icon-slot,
+.model-search > .ui-icon {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.model-search input {
+  min-height: 46px;
+  padding: 10px 14px 10px 43px;
+  border-radius: 11px;
+  background: var(--panel);
+  font-size: 14px;
+}
+
+.model-search input:focus {
+  background: var(--panel);
+}
+
+.model-filter-hint {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.provider-groups {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.provider-groups > .list-empty {
+  grid-column: 1 / -1;
+}
+
+.provider-groups:has(> .provider-group:only-child) > .provider-group {
+  grid-column: 1 / -1;
+}
+
+.provider-group {
+  display: flex;
+  min-height: 276px;
+  flex-direction: column;
+  border-radius: 16px;
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text) 5%, transparent);
+  transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
+}
+
+.provider-group:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--text) 9%, transparent);
+  transform: translateY(-2px);
+}
+
+.provider-group-head {
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
+  gap: 13px;
+  padding: 18px 20px 12px;
+}
+
+.provider-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 16px;
+}
+
+.provider-copy strong {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.provider-copy span {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.health-status {
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.health-status i {
+  width: 7px;
+  height: 7px;
+}
+
+.provider-group-head > .row-actions {
+  gap: 4px;
+}
+
+.provider-group-head .icon-button.small,
+.provider-model-row .icon-button.small {
+  width: 32px;
+  height: 32px;
+}
+
+.provider-meta {
+  gap: 9px;
+  padding: 0 20px 14px 77px;
+  font-size: 11px;
+}
+
+.provider-meta span {
+  padding-right: 9px;
+}
+
+.provider-health {
+  gap: 14px;
+  padding: 0 20px 17px 77px;
+}
+
+.provider-health-copy {
+  gap: 6px 12px;
+  font-size: 11px;
+}
+
+.provider-health-copy time {
+  font-size: 11px;
+}
+
+.test-provider {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 11px;
+}
+
+.provider-models {
+  margin-top: auto;
+  border-top-color: var(--line);
+}
+
+.provider-models-head {
+  min-height: 48px;
+  padding: 11px 18px 9px;
+  font-size: 12px;
+}
+
+.provider-models-head .button {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+
+.provider-model-row {
+  min-height: 62px;
+  grid-template-columns: 30px minmax(0, 1fr) auto auto;
+  gap: 11px;
+  margin-left: 0;
+  padding: 10px 18px;
+}
+
+.provider-model-row strong {
+  font-size: 13px;
+}
+
+.provider-model-row div > span {
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.provider-model-row .state-tag {
+  font-size: 11px;
+}
+
+.provider-model-empty {
+  margin-left: 0;
+  padding: 15px 18px 17px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="models"] .model-glyph {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor {
+  padding: 30px 30px 0;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor-head h3 {
+  font-size: 20px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor-head p {
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor label {
+  gap: 7px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor label > span {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor input,
+.management-panel[data-management-panel="models"] .provider-editor select,
+.management-panel[data-management-panel="models"] .provider-editor textarea {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor .form-section {
+  gap: 15px;
+  margin-bottom: 17px;
+  padding: 20px;
+  border-radius: 15px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor .form-section-head h4 {
+  font-size: 14px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor .form-section-head p {
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="models"] .provider-preset {
+  min-height: 64px;
+  padding: 11px;
+}
+
+.management-panel[data-management-panel="models"] .provider-preset strong {
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="models"] .provider-preset small {
+  font-size: 10px;
+}
+
+.management-panel[data-management-panel="models"] .provider-editor .form-actions {
+  padding: 16px 0 20px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 1100px) {
+  .provider-groups {
+    grid-template-columns: 1fr;
+  }
+
+  .provider-manager:has(> .provider-editor:not(.hidden)) .provider-groups {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .management-dialog {
+    width: min(760px, calc(100vw - 24px));
+    height: min(900px, calc(100vh - 24px));
+  }
+
+  .management-dialog .dialog-head {
+    padding-right: 22px;
+    padding-left: 22px;
+  }
+
+  .management-dialog .management-tabs {
+    padding-right: 22px;
+    padding-left: 22px;
+  }
+
+  .management-panel[data-management-panel="models"] .provider-library,
+  .management-panel[data-management-panel="models"] .provider-editor {
+    padding-right: 22px;
+    padding-left: 22px;
+  }
+}
+
+@media (max-width: 620px) {
+  .management-dialog .dialog-head {
+    min-height: 78px;
+    padding: 18px;
+  }
+
+  .management-dialog .dialog-head h2 {
+    font-size: 19px;
+  }
+
+  .management-dialog .management-tabs {
+    padding: 8px 18px;
+  }
+
+  .management-dialog .management-tabs button {
+    min-width: 88px;
+    min-height: 40px;
+    padding: 8px 13px;
+    font-size: 12px;
+  }
+
+  .management-panel[data-management-panel="models"] .provider-library,
+  .management-panel[data-management-panel="models"] .provider-editor {
+    padding: 20px 18px 26px;
+  }
+
+  .management-panel[data-management-panel="models"] .provider-library .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .management-panel[data-management-panel="models"] .section-heading h3 {
+    font-size: 20px;
+  }
+
+  .management-panel[data-management-panel="models"] .section-heading-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .model-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .model-library-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-search {
+    flex-basis: auto;
+  }
+
+  .provider-group-head {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 15px 16px 11px;
+  }
+
+  .provider-mark {
+    width: 40px;
+    height: 40px;
+  }
+
+  .provider-group-head > .health-status {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .provider-meta,
+  .provider-health {
+    padding-left: 16px;
+  }
+
+  .provider-model-row {
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+  }
+
+  .provider-model-row > .row-actions {
+    grid-column: 2 / -1;
+    justify-self: end;
+  }
+}
+
+/* Keep the model library and editor as two independent scroll regions.  The
+   management body itself must not become a third, shared scrollbar. */
+.management-panel[data-management-panel="models"] {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.management-body:has(> .management-panel[data-management-panel="models"]:not(.hidden)) {
+  overflow: hidden;
+}
+
+.management-panel[data-management-panel="models"] > .provider-manager {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.management-panel[data-management-panel="models"] .provider-library {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.management-panel[data-management-panel="models"] > .provider-manager > .editor-form {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .provider-editor-head {
@@ -9089,18 +9684,37 @@ label span,
 
 .provider-editor .form-actions {
   position: sticky;
-  bottom: -1px;
+  bottom: 0;
   z-index: 2;
-  margin: 15px -25px -28px;
-  padding: 14px 25px;
+  margin: 18px 0 0;
+  padding: 14px 0 18px;
   border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 72%, transparent), var(--panel) 42%);
+  box-shadow: 0 -10px 22px color-mix(in srgb, var(--panel) 76%, transparent);
   backdrop-filter: blur(10px);
 }
 
 @media (max-width: 900px) {
   .provider-manager:has(> .provider-editor:not(.hidden)) {
     display: block;
+  }
+
+  /* The two columns stack on narrow screens, so let the management body
+     carry one page scroll instead of clipping the second stacked editor. */
+  .management-body:has(> .management-panel[data-management-panel="models"]:not(.hidden)) {
+    overflow: auto;
+  }
+
+  .management-panel[data-management-panel="models"],
+  .management-panel[data-management-panel="models"] > .provider-manager {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .management-panel[data-management-panel="models"] .provider-library,
+  .management-panel[data-management-panel="models"] > .provider-manager > .editor-form {
+    overflow: visible;
   }
 
   .provider-editor {
@@ -9135,8 +9749,8 @@ label span,
   }
 
   .provider-editor .form-actions {
-    margin: 15px -18px -18px;
-    padding: 13px 18px;
+    margin: 15px 0 0;
+    padding: 13px 0 16px;
   }
 }
 
@@ -9514,5 +10128,2032 @@ select:focus-visible {
   .shell.inspector-hidden .inspector {
     display: none;
   }
+}
+
+/* -------------------------------------------------------------------------
+   Unified management tabs
+
+   Roles, collaboration tasks, custom nodes, and workflows share the same
+   resource-library language as the model tab: readable type, intentional
+   density, clear cards, and an editor that never competes with the list.
+   ------------------------------------------------------------------------- */
+
+.management-panel[data-management-panel="roles"],
+.management-panel[data-management-panel="tasks"],
+.management-panel[data-management-panel="nodes"],
+.management-panel[data-management-panel="workflows"] {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.management-panel[data-management-panel="roles"] > .manager-grid,
+.management-panel[data-management-panel="tasks"] > .manager-grid,
+.management-panel[data-management-panel="nodes"] > .manager-grid {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.management-panel[data-management-panel="roles"] > .manager-grid:has(> .editor-form:not(.hidden)),
+.management-panel[data-management-panel="tasks"] > .manager-grid:has(> .editor-form:not(.hidden)),
+.management-panel[data-management-panel="nodes"] > .manager-grid:has(> .editor-form:not(.hidden)) {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+}
+
+.management-panel[data-management-panel="roles"] .manager-section,
+.management-panel[data-management-panel="tasks"] .manager-section,
+.management-panel[data-management-panel="nodes"] .manager-section {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 30px 32px 38px;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading,
+.management-panel[data-management-panel="tasks"] .section-heading,
+.management-panel[data-management-panel="nodes"] .section-heading {
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 23px;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading h3,
+.management-panel[data-management-panel="tasks"] .section-heading h3,
+.management-panel[data-management-panel="nodes"] .section-heading h3 {
+  font-size: 22px;
+  letter-spacing: -.035em;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading p,
+.management-panel[data-management-panel="tasks"] .section-heading p,
+.management-panel[data-management-panel="nodes"] .section-heading p {
+  max-width: 620px;
+  margin-top: 7px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.management-panel[data-management-panel="roles"] .section-kicker,
+.management-panel[data-management-panel="tasks"] .section-kicker,
+.management-panel[data-management-panel="nodes"] .section-kicker,
+.management-panel[data-management-panel="workflows"] .section-kicker {
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading-actions,
+.management-panel[data-management-panel="tasks"] .section-heading-actions,
+.management-panel[data-management-panel="nodes"] .section-heading-actions,
+.management-panel[data-management-panel="workflows"] .section-heading-actions {
+  align-items: center;
+  gap: 12px;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading-actions > .section-actions,
+.management-panel[data-management-panel="tasks"] .section-heading-actions > .section-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.management-panel[data-management-panel="roles"] .count-badge,
+.management-panel[data-management-panel="tasks"] .count-badge,
+.management-panel[data-management-panel="nodes"] .count-badge,
+.management-panel[data-management-panel="workflows"] .count-badge {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="roles"] .section-heading-actions > .button,
+.management-panel[data-management-panel="tasks"] .section-heading-actions .button,
+.management-panel[data-management-panel="nodes"] .section-heading-actions > .button,
+.management-panel[data-management-panel="workflows"] .section-heading-actions > .button {
+  min-height: 42px;
+  padding: 10px 16px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="roles"] .data-list,
+.management-panel[data-management-panel="nodes"] .data-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.management-panel[data-management-panel="roles"] .data-row,
+.management-panel[data-management-panel="nodes"] .data-row {
+  min-height: 88px;
+  grid-template-columns: 38px minmax(0, 1fr) auto auto;
+  gap: 13px;
+  padding: 15px 16px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.management-panel[data-management-panel="roles"] .data-row:hover,
+.management-panel[data-management-panel="nodes"] .data-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 12px 26px color-mix(in srgb, var(--text) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.management-panel[data-management-panel="roles"] .data-row > .state-tag,
+.management-panel[data-management-panel="nodes"] .data-row > .state-tag {
+  align-self: start;
+  margin-top: 2px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="roles"] .data-row strong,
+.management-panel[data-management-panel="nodes"] .data-row strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.management-panel[data-management-panel="roles"] .data-row div > span,
+.management-panel[data-management-panel="nodes"] .data-row div > span {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.management-panel[data-management-panel="roles"] .role-glyph,
+.management-panel[data-management-panel="nodes"] .node-glyph {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.management-panel[data-management-panel="roles"] .row-actions,
+.management-panel[data-management-panel="nodes"] .row-actions,
+.management-panel[data-management-panel="tasks"] .row-actions {
+  align-items: center;
+  gap: 5px;
+}
+
+.management-panel[data-management-panel="roles"] .icon-button.small,
+.management-panel[data-management-panel="nodes"] .icon-button.small,
+.management-panel[data-management-panel="tasks"] .icon-button.small {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+
+.management-panel[data-management-panel="roles"] .list-empty,
+.management-panel[data-management-panel="nodes"] .list-empty {
+  grid-column: 1 / -1;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="roles"] > .manager-grid > .editor-form,
+.management-panel[data-management-panel="tasks"] > .manager-grid > .editor-form,
+.management-panel[data-management-panel="nodes"] > .manager-grid > .editor-form {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-content: start;
+  gap: 17px;
+  padding: 30px 30px 12px;
+  border-left: 1px solid var(--line-strong);
+  background: var(--panel);
+}
+
+.management-panel[data-management-panel="roles"] .editor-form .section-heading,
+.management-panel[data-management-panel="tasks"] .editor-form .section-heading,
+.management-panel[data-management-panel="nodes"] .editor-form .section-heading {
+  margin: 0 0 4px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.management-panel[data-management-panel="roles"] .editor-form .section-heading h3,
+.management-panel[data-management-panel="tasks"] .editor-form .section-heading h3,
+.management-panel[data-management-panel="nodes"] .editor-form .section-heading h3 {
+  font-size: 19px;
+  letter-spacing: -.025em;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form .section-heading p,
+.management-panel[data-management-panel="tasks"] .editor-form .section-heading p,
+.management-panel[data-management-panel="nodes"] .editor-form .section-heading p {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form label,
+.management-panel[data-management-panel="tasks"] .editor-form label,
+.management-panel[data-management-panel="nodes"] .editor-form label {
+  gap: 7px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form label > span,
+.management-panel[data-management-panel="tasks"] .editor-form label > span,
+.management-panel[data-management-panel="nodes"] .editor-form label > span {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form input,
+.management-panel[data-management-panel="roles"] .editor-form select,
+.management-panel[data-management-panel="roles"] .editor-form textarea,
+.management-panel[data-management-panel="tasks"] .editor-form input,
+.management-panel[data-management-panel="tasks"] .editor-form select,
+.management-panel[data-management-panel="tasks"] .editor-form textarea,
+.management-panel[data-management-panel="nodes"] .editor-form input,
+.management-panel[data-management-panel="nodes"] .editor-form select,
+.management-panel[data-management-panel="nodes"] .editor-form textarea {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form textarea,
+.management-panel[data-management-panel="tasks"] .editor-form textarea,
+.management-panel[data-management-panel="nodes"] .editor-form textarea {
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.management-panel[data-management-panel="roles"] .editor-form .form-actions,
+.management-panel[data-management-panel="tasks"] .editor-form .form-actions,
+.management-panel[data-management-panel="nodes"] .editor-form .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 2px 0 0;
+  padding: 14px 0 18px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 72%, transparent), var(--panel) 42%);
+  box-shadow: 0 -10px 22px color-mix(in srgb, var(--panel) 76%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+/* Collaboration board */
+
+.management-panel[data-management-panel="tasks"] .manager-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  margin: 0 0 20px;
+  padding: 19px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--panel));
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split label,
+.management-panel[data-management-panel="tasks"] .goal-split textarea {
+  grid-column: 1 / -1;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split label {
+  gap: 4px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split label span {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split textarea {
+  min-height: 94px;
+  margin: 0;
+  padding: 12px 13px;
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split button {
+  grid-column: 2;
+  justify-self: end;
+  min-height: 40px;
+}
+
+.management-panel[data-management-panel="tasks"] .collaboration-summary {
+  gap: 9px;
+  margin: 0 0 18px;
+}
+
+.management-panel[data-management-panel="tasks"] .collaboration-summary span {
+  min-width: 76px;
+  justify-content: center;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="tasks"] .collaboration-summary strong {
+  font-size: 15px;
+}
+
+.management-panel[data-management-panel="tasks"] .task-board {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.management-panel[data-management-panel="tasks"] .task-card {
+  min-height: 148px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 13px;
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--faint);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 12px 26px color-mix(in srgb, var(--text) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.management-panel[data-management-panel="tasks"] .task-status {
+  min-width: 54px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy > span,
+.management-panel[data-management-panel="tasks"] .task-copy small {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy p {
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.management-panel[data-management-panel="tasks"] .handoff-panel {
+  margin-top: 24px;
+  padding: 17px 0 0;
+}
+
+.management-panel[data-management-panel="tasks"] .handoff-panel summary {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-row,
+.management-panel[data-management-panel="tasks"] .handoff-row {
+  min-height: 58px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 13px 13px 0;
+  background: var(--panel);
+}
+
+.management-panel[data-management-panel="tasks"] .goal-copy strong,
+.management-panel[data-management-panel="tasks"] .handoff-row strong {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-copy p,
+.management-panel[data-management-panel="tasks"] .goal-copy small,
+.management-panel[data-management-panel="tasks"] .handoff-row span {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="tasks"] .task-board > .list-empty {
+  grid-column: 1 / -1;
+  min-height: 176px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Workflow library and editor */
+
+.management-panel[data-management-panel="workflows"] {
+  display: grid;
+  grid-template-columns: 310px minmax(0, 1fr);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 30px 20px 34px 30px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 21px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading-actions {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading h3 {
+  font-size: 22px;
+  letter-spacing: -.035em;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading p {
+  margin-top: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list {
+  gap: 12px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item {
+  min-height: 88px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--panel-muted);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item:hover,
+.management-panel[data-management-panel="workflows"] .workflow-list-item.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item.active {
+  color: var(--accent-strong);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item span {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list > .list-empty {
+  min-height: 130px;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 15px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-editor {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 30px 34px 40px;
+  background: var(--bg);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-editor-head {
+  gap: 16px 22px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-meta {
+  gap: 14px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-editor label {
+  gap: 7px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-editor input,
+.management-panel[data-management-panel="workflows"] .workflow-editor select,
+.management-panel[data-management-panel="workflows"] .workflow-editor textarea {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-actions {
+  align-items: end;
+  gap: 9px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-actions .button,
+.management-panel[data-management-panel="workflows"] .node-editor-heading .button {
+  min-height: 40px;
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-editor-heading {
+  align-items: flex-end;
+  gap: 16px;
+  margin: 26px 0 12px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-editor-heading h3 {
+  font-size: 18px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-editor-heading p {
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-list {
+  gap: 12px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row {
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-index {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-fields {
+  gap: 11px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-secondary {
+  gap: 11px;
+  margin-top: 11px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-fields label,
+.management-panel[data-management-panel="workflows"] .node-row-secondary label,
+.management-panel[data-management-panel="workflows"] .node-row-secondary summary {
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-secondary label > span {
+  font-size: 10px;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-list > .list-empty {
+  min-height: 140px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 1100px) {
+  .management-panel[data-management-panel="roles"] .data-list,
+  .management-panel[data-management-panel="nodes"] .data-list,
+  .management-panel[data-management-panel="tasks"] .task-board {
+    grid-template-columns: 1fr;
+  }
+
+  .management-panel[data-management-panel="workflows"] {
+    grid-template-columns: 260px minmax(0, 1fr);
+  }
+
+  .management-panel[data-management-panel="workflows"] .node-row-fields,
+  .management-panel[data-management-panel="workflows"] .node-row-secondary {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .management-body:has(> .management-panel[data-management-panel="roles"]:not(.hidden)),
+  .management-body:has(> .management-panel[data-management-panel="tasks"]:not(.hidden)),
+  .management-body:has(> .management-panel[data-management-panel="nodes"]:not(.hidden)),
+  .management-body:has(> .management-panel[data-management-panel="workflows"]:not(.hidden)) {
+    overflow: auto;
+  }
+
+  .management-panel[data-management-panel="roles"],
+  .management-panel[data-management-panel="tasks"],
+  .management-panel[data-management-panel="nodes"],
+  .management-panel[data-management-panel="workflows"] {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .management-panel[data-management-panel="roles"] > .manager-grid,
+  .management-panel[data-management-panel="tasks"] > .manager-grid,
+  .management-panel[data-management-panel="nodes"] > .manager-grid {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .management-panel[data-management-panel="roles"] > .manager-grid:has(> .editor-form:not(.hidden)),
+  .management-panel[data-management-panel="tasks"] > .manager-grid:has(> .editor-form:not(.hidden)),
+  .management-panel[data-management-panel="nodes"] > .manager-grid:has(> .editor-form:not(.hidden)) {
+    display: block;
+  }
+
+  .management-panel[data-management-panel="roles"] .manager-section,
+  .management-panel[data-management-panel="tasks"] .manager-section,
+  .management-panel[data-management-panel="nodes"] .manager-section {
+    overflow: visible;
+    padding: 26px 24px 30px;
+  }
+
+  .management-panel[data-management-panel="roles"] > .manager-grid > .editor-form,
+  .management-panel[data-management-panel="tasks"] > .manager-grid > .editor-form,
+  .management-panel[data-management-panel="nodes"] > .manager-grid > .editor-form {
+    max-height: none;
+    overflow: visible;
+    border-top: 1px solid var(--line-strong);
+    border-left: 0;
+    padding: 26px 24px 30px;
+  }
+
+  .management-panel[data-management-panel="workflows"] {
+    display: block;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-sidebar {
+    overflow: visible;
+    padding: 26px 24px 22px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-editor {
+    overflow: visible;
+    padding: 26px 24px 34px;
+  }
+}
+
+@media (max-width: 620px) {
+  .management-panel[data-management-panel="roles"] .manager-section,
+  .management-panel[data-management-panel="tasks"] .manager-section,
+  .management-panel[data-management-panel="nodes"] .manager-section,
+  .management-panel[data-management-panel="roles"] > .manager-grid > .editor-form,
+  .management-panel[data-management-panel="tasks"] > .manager-grid > .editor-form,
+  .management-panel[data-management-panel="nodes"] > .manager-grid > .editor-form,
+  .management-panel[data-management-panel="workflows"] .workflow-sidebar,
+  .management-panel[data-management-panel="workflows"] .workflow-editor {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .management-panel[data-management-panel="roles"] .section-heading,
+  .management-panel[data-management-panel="tasks"] .section-heading,
+  .management-panel[data-management-panel="nodes"] .section-heading,
+  .management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .management-panel[data-management-panel="roles"] .section-heading-actions,
+  .management-panel[data-management-panel="tasks"] .section-heading-actions,
+  .management-panel[data-management-panel="nodes"] .section-heading-actions,
+  .management-panel[data-management-panel="workflows"] .section-heading-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .management-panel[data-management-panel="tasks"] .section-heading-actions > .section-actions {
+    justify-content: flex-end;
+  }
+
+  .management-panel[data-management-panel="roles"] .section-heading h3,
+  .management-panel[data-management-panel="tasks"] .section-heading h3,
+  .management-panel[data-management-panel="nodes"] .section-heading h3,
+  .management-panel[data-management-panel="workflows"] .workflow-sidebar .section-heading h3 {
+    font-size: 20px;
+  }
+
+  .management-panel[data-management-panel="roles"] .section-heading p,
+  .management-panel[data-management-panel="tasks"] .section-heading p,
+  .management-panel[data-management-panel="nodes"] .section-heading p {
+    font-size: 12px;
+  }
+
+  .management-panel[data-management-panel="roles"] .data-list,
+  .management-panel[data-management-panel="nodes"] .data-list,
+  .management-panel[data-management-panel="workflows"] .workflow-list {
+    grid-template-columns: 1fr;
+  }
+
+  .management-panel[data-management-panel="roles"] .data-row,
+  .management-panel[data-management-panel="nodes"] .data-row {
+    min-height: 80px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .goal-split {
+    grid-template-columns: 1fr;
+    padding: 16px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .goal-split button {
+    grid-column: 1;
+    justify-self: stretch;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-card {
+    grid-template-columns: 1fr auto;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-card .task-status {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-editor-head {
+    display: block;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-editor-head > label {
+    margin-top: 14px;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-actions {
+    justify-content: flex-end;
+    margin-top: 15px;
+  }
+
+  .management-panel[data-management-panel="workflows"] .node-editor-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .management-panel[data-management-panel="workflows"] .node-editor-heading .button {
+    width: 100%;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-node-row {
+    grid-template-columns: 30px minmax(0, 1fr) 30px;
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .management-panel[data-management-panel="workflows"] .node-row-fields,
+  .management-panel[data-management-panel="workflows"] .node-row-secondary {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Projectless conversation: keep chat discoverable without making it look
+   like a missing project or a disabled workspace. */
+.quick-chat-group {
+  margin: 0 0 12px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rail-muted) 18%, transparent);
+}
+
+.quick-chat-item {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.quick-chat-item > span:last-child > span {
+  color: color-mix(in srgb, var(--rail-muted) 84%, transparent);
+}
+
+.quick-chat-item.active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.project-empty {
+  margin: 9px 6px 4px;
+  padding: 15px 13px;
+  border: 1px dashed color-mix(in srgb, var(--rail-muted) 28%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--rail-muted) 5%, transparent);
+}
+
+.project-empty p {
+  margin: 5px 0 0;
+  color: var(--rail-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.context-pill.projectless {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--panel));
+  color: var(--accent);
+}
+
+#editProject:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+}
+
+/* Keep the native hidden attribute authoritative even after component
+   display rules are applied later in this stylesheet. */
+[hidden] {
+  display: none !important;
+}
+
+.model-picker {
+  min-width: 180px;
+  margin-left: auto;
+  flex: 0 1 220px;
+}
+
+.model-picker select {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 34px 7px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.model-picker select:disabled {
+  cursor: not-allowed;
+  background: var(--panel-muted);
+  color: var(--muted);
+  opacity: .82;
+}
+
+.model-picker.is-task select {
+  border-color: var(--line);
+  background: var(--panel-muted);
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .model-picker {
+    min-width: min(180px, 48vw);
+    flex-basis: min(220px, 48vw);
+  }
+
+  .model-picker select {
+    font-size: 11px;
+  }
+}
+
+/* Message attribution belongs below the answer, not above it. Keep the
+   speaker avatars as the visual anchor while removing the repeated identity
+   labels from each bubble. */
+.message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 8px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.message-meta-item {
+  white-space: nowrap;
+}
+
+.message-meta-separator {
+  color: var(--line-strong);
+  user-select: none;
+}
+
+.message-node-label {
+  color: var(--muted);
+}
+
+.message-status {
+  margin-left: 0;
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: 650;
+}
+
+.message.user .message-meta {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  .message-meta {
+    font-size: 10px;
+  }
+}
+
+/* Project actions stay separate from the project-selection button so both
+   targets remain keyboard accessible and clicking delete cannot select a
+   different project by accident. */
+.project-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-radius: 9px;
+}
+
+.project-row .project-item {
+  min-width: 0;
+  width: auto;
+}
+
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+  opacity: .72;
+}
+
+.project-action {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rail-muted);
+  transition: background-color .14s ease, color .14s ease, opacity .14s ease;
+}
+
+.project-action .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.project-action:hover,
+.project-action:focus-visible {
+  background: var(--rail-hover);
+  color: var(--rail-text);
+}
+
+.project-action.danger:hover,
+.project-action.danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+  color: var(--danger);
+}
+
+.project-row:hover,
+.project-row:focus-within {
+  background: var(--rail-hover);
+}
+
+.project-row.active {
+  background: var(--rail-active);
+  box-shadow: inset 3px 0 var(--accent), var(--shadow-sm);
+}
+
+.project-row.active .project-item,
+.project-row:hover .project-item,
+.project-row:focus-within .project-item {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Composer actions: make the two utility buttons real, discoverable controls
+   rather than decorative icons.  The popover and attachment rail stay inside
+   the composer shell so they remain anchored on narrow windows. */
+.composer-shell {
+  position: relative;
+  overflow: visible;
+}
+
+.composer-tool {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  transition: background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease;
+}
+
+.composer-tool:active {
+  transform: scale(.96);
+}
+
+.composer-tool.active,
+.composer-tool[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 17px 13px;
+  border-top: 1px solid var(--line);
+}
+
+.composer-attachment {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.attachment-file-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.attachment-file-icon .ui-icon,
+.message-attachment .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.attachment-file-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.attachment-file-copy strong {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-file-copy small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.composer-tool-menu {
+  position: absolute;
+  right: 16px;
+  bottom: 66px;
+  z-index: 40;
+  width: min(320px, calc(100% - 32px));
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 18px 42px rgba(24, 34, 50, .16);
+}
+
+.composer-tool-menu-head,
+.composer-tool-menu-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.composer-tool-menu-head strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.composer-tool-menu-head span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-tool-options {
+  display: grid;
+  gap: 8px;
+  margin: 13px 0;
+}
+
+.composer-tool-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease;
+}
+
+.composer-tool-option:hover {
+  border-color: var(--line-strong);
+}
+
+.composer-tool-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.composer-tool-option:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.composer-tool-option input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.composer-tool-option strong,
+.composer-tool-option small {
+  display: block;
+}
+
+.composer-tool-option strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.composer-tool-option small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.composer-tool-menu-foot {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-attachment {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .composer-tool-menu {
+    right: 12px;
+    bottom: 64px;
+    width: min(320px, calc(100% - 24px));
+  }
+
+  .composer-attachments {
+    padding-inline: 12px;
+  }
+}
+
+.dialog-actions-spacer {
+  flex: 1;
+}
+
+/* Management forms must remain usable at the narrow edge of a desktop
+   window (and when the management dialog is viewed on a small screen).  A
+   flex/grid child with its default min-content width can otherwise push the
+   form past the scrollbar and make labels look clipped. */
+.management-dialog :where(.management-body, .management-panel, .manager-grid,
+  .manager-section, .editor-form, .provider-manager, .provider-editor,
+  .workflow-sidebar, .workflow-editor) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.management-dialog :where(.section-heading > *, .form-section-head > *,
+  .provider-editor-head > *, .workflow-editor-head > *, .provider-copy,
+  .task-copy, .node-copy, .provider-preset > span:last-child,
+  .protocol-option > span, .check-label > span) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.management-dialog .provider-steps {
+  grid-template-columns: minmax(0, auto) minmax(10px, 1fr) minmax(0, auto)
+    minmax(10px, 1fr) minmax(0, auto);
+}
+
+.management-dialog .provider-steps span {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.management-dialog .provider-editor-head h3,
+.management-dialog .form-section-head h4,
+.management-dialog .provider-editor label,
+.management-dialog .secure-badge,
+.management-dialog .auth-required,
+.management-dialog .provider-preset strong,
+.management-dialog .provider-preset small {
+  white-space: nowrap;
+}
+
+.management-dialog .provider-editor-head p,
+.management-dialog .form-section-head p,
+.management-dialog .provider-editor label > span,
+.management-dialog .form-note > span:last-child,
+.management-dialog .auth-type-hint,
+.management-dialog .auth-preview,
+.management-dialog .workflow-editor p,
+.management-dialog .workflow-editor label > span {
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: normal;
+}
+
+.management-dialog .provider-editor-head p,
+.management-dialog .form-section-head p {
+  max-width: 100%;
+  line-height: 1.55;
+}
+
+.management-dialog .provider-preset > span:last-child {
+  overflow: hidden;
+}
+
+.management-dialog .provider-preset strong,
+.management-dialog .provider-preset small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.management-dialog .protocol-option strong,
+.management-dialog .protocol-option small,
+.management-dialog .check-label strong,
+.management-dialog .check-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-dialog .protocol-option strong {
+  letter-spacing: -.015em;
+}
+
+.management-dialog .protocol-option {
+  gap: 7px;
+  padding: 9px;
+}
+
+.management-dialog .form-actions,
+.management-dialog .section-actions,
+.management-dialog .workflow-actions {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 620px) {
+  .management-dialog .provider-steps {
+    gap: 5px;
+    font-size: 10px;
+  }
+
+  .management-dialog .provider-steps span {
+    justify-content: center;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
+  .management-dialog .provider-steps span b {
+    flex: 0 0 auto;
+  }
+}
+
+/* Role cards: keep identity, metadata, access and actions in one deliberate
+   horizontal rhythm instead of leaving a loose status/icon cluster at the
+   far edge of each card. */
+.management-panel[data-management-panel="roles"] .role-row {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  min-height: 82px;
+  gap: 12px;
+  padding: 13px 14px;
+  border-color: color-mix(in srgb, var(--line-strong) 55%, var(--line));
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.management-panel[data-management-panel="roles"] .role-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+.management-panel[data-management-panel="roles"] .role-glyph {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="roles"] .role-copy {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 6px;
+}
+
+.management-panel[data-management-panel="roles"] .role-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="roles"] .role-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="roles"] .role-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="roles"] .role-meta > i {
+  flex: 0 0 auto;
+  color: var(--line-strong);
+  font-style: normal;
+}
+
+.management-panel[data-management-panel="roles"] .role-meta .role-id {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-muted) 68%, var(--panel));
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions > .state-tag {
+  display: inline-flex !important;
+  min-height: 28px;
+  align-items: center;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions > .state-tag.access-read {
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions > .state-tag.access-write {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions > .state-tag.access-validate {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions > .row-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line-strong);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions .icon-button.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions .icon-button.small:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.management-panel[data-management-panel="roles"] .role-row-actions .icon-button.small.danger-icon:hover {
+  color: var(--danger);
+}
+
+@media (max-width: 620px) {
+  .management-panel[data-management-panel="roles"] .role-row {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    min-height: 78px;
+    gap: 10px;
+    padding: 11px 12px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-glyph {
+    width: 36px;
+    height: 36px;
+    border-radius: 11px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-copy {
+    gap: 5px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-copy strong {
+    font-size: 14px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-meta {
+    gap: 5px;
+    font-size: 10px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-meta .role-id {
+    font-size: 9px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-row-actions {
+    gap: 5px;
+    padding: 3px 4px 3px 6px;
+    border-radius: 10px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-row-actions > .state-tag {
+    min-height: 26px;
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-row-actions > .row-actions {
+    gap: 1px;
+    padding-left: 5px;
+  }
+
+  .management-panel[data-management-panel="roles"] .role-row-actions .icon-button.small {
+    width: 31px;
+    height: 31px;
+  }
+}
+
+/* Node cards use the same rhythm as role cards while keeping their two
+   read-only facts (output count and built-in status) visible as one group. */
+.management-panel[data-management-panel="nodes"] .node-row {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  min-height: 82px;
+  gap: 12px;
+  padding: 13px 14px;
+  border-color: color-mix(in srgb, var(--line-strong) 55%, var(--line));
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.management-panel[data-management-panel="nodes"] .node-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+.management-panel[data-management-panel="nodes"] .node-glyph {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.management-panel[data-management-panel="nodes"] .node-copy {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 6px;
+}
+
+.management-panel[data-management-panel="nodes"] .node-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="nodes"] .node-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="nodes"] .node-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="nodes"] .node-meta > i {
+  flex: 0 0 auto;
+  color: var(--line-strong);
+  font-style: normal;
+}
+
+.management-panel[data-management-panel="nodes"] .node-meta .node-type {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.management-panel[data-management-panel="nodes"] .node-row-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-muted) 68%, var(--panel));
+}
+
+.management-panel[data-management-panel="nodes"] .node-output-count,
+.management-panel[data-management-panel="nodes"] .node-kind-tag {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="nodes"] .node-output-count {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="nodes"] .node-kind-tag {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent-strong);
+}
+
+.management-panel[data-management-panel="nodes"] .node-row-actions > .row-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line-strong);
+}
+
+.management-panel[data-management-panel="nodes"] .node-row-actions .icon-button.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="nodes"] .node-row-actions .icon-button.small:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.management-panel[data-management-panel="nodes"] .node-row-actions .icon-button.small.danger-icon:hover {
+  color: var(--danger);
+}
+
+@media (max-width: 620px) {
+  .management-panel[data-management-panel="nodes"] .node-row {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    min-height: 78px;
+    gap: 10px;
+    padding: 11px 12px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-glyph {
+    width: 36px;
+    height: 36px;
+    border-radius: 11px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-copy {
+    gap: 5px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-copy strong {
+    font-size: 14px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-meta {
+    gap: 5px;
+    font-size: 10px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-meta .node-type {
+    font-size: 9px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-row-actions {
+    gap: 5px;
+    padding: 3px 4px 3px 6px;
+    border-radius: 10px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-output-count,
+  .management-panel[data-management-panel="nodes"] .node-kind-tag {
+    min-height: 26px;
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-row-actions > .row-actions {
+    gap: 1px;
+    padding-left: 5px;
+  }
+
+  .management-panel[data-management-panel="nodes"] .node-row-actions .icon-button.small {
+    width: 31px;
+    height: 31px;
+  }
+}
+
+/* Collaboration cards: move the state and actions into a compact right rail
+   so task content gets the same breathing room as roles and nodes. */
+.management-panel[data-management-panel="tasks"] .goal-split {
+  gap: 11px 14px;
+  margin-bottom: 18px;
+  padding: 17px;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 15px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 88%, var(--panel)), var(--panel));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.management-panel[data-management-panel="tasks"] .goal-split textarea {
+  min-height: 84px;
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--line));
+  border-radius: 11px;
+  line-height: 1.55;
+}
+
+.management-panel[data-management-panel="tasks"] .collaboration-summary {
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.management-panel[data-management-panel="tasks"] .collaboration-summary span {
+  min-width: 78px;
+  min-height: 38px;
+  gap: 5px;
+  padding: 7px 11px;
+  border-radius: 11px;
+  background: var(--panel);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 132px;
+  gap: 17px;
+  padding: 15px 16px;
+  border-left-width: 3px;
+  border-radius: 15px;
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 6px;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy strong {
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy > span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy p {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.management-panel[data-management-panel="tasks"] .task-copy small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.management-panel[data-management-panel="tasks"] .task-card-actions {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 13px;
+  border-left: 1px solid var(--line);
+}
+
+.management-panel[data-management-panel="tasks"] .task-status {
+  display: inline-flex;
+  min-width: 58px;
+  min-height: 29px;
+  align-items: center;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.management-panel[data-management-panel="tasks"] .task-card.pending .task-status {
+  background: color-mix(in srgb, var(--muted) 9%, transparent);
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card.running .task-status {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card.completed .task-status {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card.blocked .task-status,
+.management-panel[data-management-panel="tasks"] .task-card.failed .task-status {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card-actions > .row-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.management-panel[data-management-panel="tasks"] .task-card-actions .icon-button.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card-actions .icon-button.small:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.management-panel[data-management-panel="tasks"] .task-card-actions .button.compact {
+  min-height: 32px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.management-panel[data-management-panel="tasks"] .goal-row,
+.management-panel[data-management-panel="tasks"] .handoff-row {
+  border-color: color-mix(in srgb, var(--line-strong) 55%, var(--line));
+  border-left-width: 3px;
+  border-radius: 0 13px 13px 0;
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+/* Workflow library and node rows follow the same card surface and action
+   treatment, while keeping the editor's denser form controls intact. */
+.management-panel[data-management-panel="workflows"] .workflow-list-item {
+  min-height: 82px;
+  padding: 14px;
+  border-color: color-mix(in srgb, var(--line-strong) 55%, var(--line));
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-list-item:hover,
+.management-panel[data-management-panel="workflows"] .workflow-list-item.active {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--panel));
+  box-shadow: 0 12px 24px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row {
+  gap: 13px;
+  padding: 15px;
+  border-color: color-mix(in srgb, var(--line-strong) 55%, var(--line));
+  border-radius: 15px;
+  background: linear-gradient(135deg, var(--panel-raised), var(--panel));
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  background: var(--panel-raised);
+  box-shadow: 0 13px 26px color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.management-panel[data-management-panel="workflows"] .node-row-index {
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row > .icon-button {
+  align-self: start;
+  margin-top: 2px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-node-row > .icon-button:hover {
+  background: var(--panel-muted);
+  color: var(--danger);
+}
+
+@media (max-width: 620px) {
+  .management-panel[data-management-panel="tasks"] .task-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-height: 118px;
+    gap: 10px;
+    padding: 13px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-card-actions {
+    gap: 7px;
+    padding-left: 8px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-copy strong {
+    font-size: 14px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-copy p {
+    font-size: 11px;
+  }
+
+  .management-panel[data-management-panel="tasks"] .task-card-actions .icon-button.small {
+    width: 31px;
+    height: 31px;
+  }
+
+  .management-panel[data-management-panel="workflows"] .workflow-node-row {
+    grid-template-columns: 30px minmax(0, 1fr) 30px;
+    gap: 10px;
+    padding: 13px;
+  }
+}
+
+/* Keep workflow settings on one predictable vertical scroll track.  The
+   management body owns scrolling at every desktop width so the wheel and the
+   visible scrollbar work from either the library or editor column. */
+.management-body:has(> .management-panel[data-management-panel="workflows"]:not(.hidden)) {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.management-panel[data-management-panel="workflows"] {
+  height: auto;
+  min-height: 100%;
+}
+
+.management-panel[data-management-panel="workflows"] .workflow-sidebar,
+.management-panel[data-management-panel="workflows"] .workflow-editor {
+  overflow: visible;
+  overscroll-behavior: auto;
 }
 

@@ -10,8 +10,9 @@ import urllib.error
 from pathlib import Path
 from threading import Thread
 from unittest import mock
+from urllib.parse import quote
 
-from app.application.workbench import WorkbenchService
+from app.application.workbench import CHAT_PROJECT_ID, WorkbenchService
 from app.domain.models import NodeDefinition, Session, SessionMode, TaskPolicy, WorkflowDefinition, WorkflowNode
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator
@@ -63,6 +64,131 @@ class WorkspaceGateway(RecordingGateway):
 
 
 class WorkbenchDomainTest(unittest.TestCase):
+    def test_projectless_chat_session_uses_normal_chat_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp) / "data", gateway=WorkspaceGateway())
+            service.save_provider({
+                "provider_id": "local",
+                "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "auth_type": "none",
+            })
+            service.save_model({
+                "alias": "chat-model",
+                "provider_id": "local",
+                "model": "chat-model",
+            })
+            session = service.create_chat_session("快速聊天")
+
+            self.assertEqual(session.project_id, CHAT_PROJECT_ID)
+            self.assertEqual(session.mode, SessionMode.CHAT)
+            result = service.send_message(session.session_id, "hi", model_alias="chat-model")
+
+            self.assertEqual(result.project_id, CHAT_PROJECT_ID)
+            self.assertEqual(result.messages[-1].role, "assistant")
+            self.assertEqual(result.messages[-1].content, "模型已回答")
+            self.assertEqual(result.context.inputs["model_alias"], "chat-model")
+            self.assertEqual(result.messages[-1].metadata["model"], "chat-model")
+            self.assertIsInstance(result.messages[-1].metadata["elapsed_ms"], int)
+            self.assertGreaterEqual(result.messages[-1].metadata["elapsed_ms"], 0)
+            self.assertFalse((Path(tmp) / "data" / "projects" / f"{CHAT_PROJECT_ID}.json").exists())
+
+    def test_chat_response_removes_provider_boundary_blank_lines(self):
+        class LeadingBlankGateway(WorkspaceGateway):
+            def complete(self, *, model_alias, node, context):
+                if node.node_type == "tool":
+                    return {"result": "\n\n模型回答\n\n", "model": model_alias}
+                return super().complete(model_alias=model_alias, node=node, context=context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp) / "data", gateway=LeadingBlankGateway())
+            service.save_provider({
+                "provider_id": "local",
+                "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "auth_type": "none",
+            })
+            service.save_model({"alias": "chat-model", "provider_id": "local", "model": "chat-model"})
+            session = service.create_chat_session("边界空行")
+
+            result = service.send_message(session.session_id, "hi", model_alias="chat-model")
+
+            self.assertEqual(result.messages[-1].content, "模型回答")
+
+    def test_chat_attachment_metadata_and_tool_override_are_forwarded(self):
+        class CaptureChatGateway(WorkspaceGateway):
+            def __init__(self):
+                super().__init__()
+                self.chat_context = None
+                self.chat_node = None
+
+            def complete(self, *, model_alias, node, context):
+                if node.node_type == "tool":
+                    self.chat_context = context.to_dict()
+                    self.chat_node = node
+                return super().complete(model_alias=model_alias, node=node, context=context)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = CaptureChatGateway()
+            service = WorkbenchService(Path(tmp) / "data", gateway=gateway)
+            service.save_provider({
+                "provider_id": "local",
+                "label": "Local",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "auth_type": "none",
+            })
+            service.save_model({"alias": "chat-model", "provider_id": "local", "model": "chat-model"})
+            session = service.create_chat_session("附件对话")
+
+            result = service.send_message(
+                session.session_id,
+                "请总结",
+                model_alias="chat-model",
+                tools=["zvec_grep_rg"],
+                attachments=[{
+                    "name": "notes.md",
+                    "mime_type": "text/markdown",
+                    "size": 7,
+                    "content": "# Notes",
+                }],
+            )
+
+            user_message = result.messages[-2]
+            self.assertEqual(user_message.content, "请总结")
+            self.assertEqual(user_message.metadata["attachments"][0]["name"], "notes.md")
+            self.assertEqual(gateway.chat_node.config["tools"], ["zvec_grep_rg"])
+            self.assertIn("[附件：notes.md]", gateway.chat_context["inputs"]["request"])
+            self.assertIn("# Notes", gateway.chat_context["inputs"]["request"])
+
+    def test_chat_attachment_and_tool_validation_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = WorkbenchService(Path(tmp) / "data", gateway=WorkspaceGateway())
+            session = service.create_chat_session("输入校验")
+            with self.assertRaisesRegex(ValueError, "unknown chat tool"):
+                service.send_message(session.session_id, "hi", tools=["shell"])
+            with self.assertRaisesRegex(ValueError, "最多支持"):
+                service.send_message(session.session_id, "hi", attachments=[{"name": str(index), "content": ""} for index in range(6)])
+
+    def test_delete_project_removes_sessions_but_keeps_workspace_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            marker = workspace / "keep.txt"
+            marker.write_text("do not delete", encoding="utf-8")
+            service = WorkbenchService(Path(tmp) / "data", gateway=WorkspaceGateway())
+            project = service.create_project("删除测试", workspace_path=str(workspace))
+            session = service.create_session(project.project_id, "会话")
+
+            result = service.delete_project(project.project_id)
+
+            self.assertEqual(result["project_id"], project.project_id)
+            self.assertEqual(result["deleted_sessions"], 1)
+            with self.assertRaises(FileNotFoundError):
+                service.get_project(project.project_id)
+            self.assertEqual(service.list_sessions(project.project_id), [])
+            self.assertFalse((Path(tmp) / "data" / "sessions" / f"{session.session_id}.json").exists())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "do not delete")
+
     def test_project_update_rejects_malformed_workspace_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = WorkbenchService(Path(tmp) / "data")
@@ -304,6 +430,27 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(claude_request.headers["X-api-key"], "secret-key-value")
             self.assertEqual(claude_request.headers["Anthropic-version"], "2023-06-01")
 
+    def test_gateway_falls_back_to_system_curl_when_windows_denies_python_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelProvider
+            center.save_provider(
+                ModelProvider("router", "RouterToken", "https://api.tokenrouter.com/v1"),
+                api_key="secret-key-value",
+            )
+            gateway = OpenAICompatibleGateway(center)
+            denied = urllib.error.URLError(PermissionError(13, "Access is denied", None, 5))
+            with mock.patch("urllib.request.urlopen", side_effect=denied):
+                with mock.patch.object(
+                    gateway,
+                    "_curl_request",
+                    return_value=(200, b'{"data":[{"id":"qwen/qwen3.8-flash"}]}'),
+                ) as fallback:
+                    models = gateway.list_models("router", "openai")
+            self.assertEqual(models, ["qwen/qwen3.8-flash"])
+            self.assertEqual(fallback.call_args.args[0].full_url, "https://api.tokenrouter.com/v1/models")
+            self.assertEqual(fallback.call_args.args[0].headers["Authorization"], "Bearer secret-key-value")
+
     def test_custom_header_auth_is_applied_without_leaking_credential(self):
         with tempfile.TemporaryDirectory() as tmp:
             center = ResourceCenter(Path(tmp))
@@ -358,6 +505,13 @@ class WorkbenchDomainTest(unittest.TestCase):
         request_url = OpenAICompatibleGateway._request_url(query_provider, "secret-key", openai)
         self.assertEqual(request_url, "https://query.test/v1/chat/completions?region=cn&api_key=secret-key")
 
+        router_headers = OpenAICompatibleGateway._headers(
+            ModelProvider("router", "RouterToken", "https://api.tokenrouter.com/v1", auth_type="api_key"),
+            "secret-key", openai,
+        )
+        self.assertEqual(router_headers["Authorization"], "Bearer secret-key")
+        self.assertNotIn("x-api-key", {key.lower() for key in router_headers})
+
     def test_gateway_probe_supports_openai_and_claude_requests(self):
         with tempfile.TemporaryDirectory() as tmp:
             center = ResourceCenter(Path(tmp))
@@ -410,6 +564,33 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result["error_type"], "authentication_failed")
             self.assertIn("HTTP 401", result["error"])
+
+    def test_gateway_probe_maps_quota_rejection_separately_from_authentication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            center = ResourceCenter(Path(tmp))
+            from app.domain.models import ModelAlias, ModelProvider
+            center.save_provider(
+                ModelProvider("vendor", "Vendor", "https://example.test/v1"),
+                api_key="secret-key-value",
+            )
+            center.save_model(ModelAlias("model", "vendor", "model-1"))
+            response = urllib.error.HTTPError(
+                "https://example.test/v1/chat/completions", 403, "Forbidden", None,
+                io.BytesIO(b'{"error":"insufficient_user_quota"}'),
+            )
+            with mock.patch("urllib.request.urlopen", side_effect=response):
+                result = OpenAICompatibleGateway(center).probe("model")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error_type"], "quota_exceeded")
+
+    def test_gateway_probe_identifies_provider_model_not_found(self):
+        self.assertEqual(
+            OpenAICompatibleGateway._probe_error_type(
+                503,
+                '{"error":{"code":"model_not_found","message":"No available channel"}}',
+            ),
+            "model_not_found",
+        )
 
     def test_provider_test_probes_one_model_per_protocol_and_persists_health(self):
         class ProbeGateway:
@@ -540,6 +721,40 @@ class WorkbenchDomainTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "built-in"):
                 restored.delete_node("planning")
 
+    def test_v2_api_deletes_url_encoded_unicode_custom_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = make_server(Path(tmp), 0)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            node_type = "测试节点"
+
+            def request(method, path, value=None):
+                data = json.dumps(value).encode() if value is not None else None
+                req = urllib.request.Request(
+                    base + path,
+                    data=data,
+                    method=method,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode())
+
+            status, saved = request("POST", "/api/v2/nodes", {
+                "node_type": node_type,
+                "label": "测试节点",
+                "output_fields": ["result"],
+            })
+            self.assertEqual(status, 201)
+            self.assertEqual(saved["node_type"], node_type)
+
+            status, deleted = request("DELETE", f"/api/v2/nodes/{quote(node_type, safe='')}")
+            self.assertEqual(status, 200)
+            self.assertEqual(deleted["deleted"], node_type)
+            _, catalog = request("GET", "/api/v2/catalog")
+            self.assertFalse(any(item["node_type"] == node_type for item in catalog["nodes"]))
+
     def test_workflow_persists_explicit_node_model_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -624,6 +839,27 @@ class WorkbenchDomainTest(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=5) as response:
                     return response.status, json.loads(response.read().decode())
 
+            status, chat_session = request("POST", "/api/v2/sessions", {"title": "快速聊天", "mode": "chat"})
+            self.assertEqual(status, 201)
+            self.assertEqual(chat_session["project_id"], CHAT_PROJECT_ID)
+            self.assertEqual(chat_session["mode"], "chat")
+            status, chat_sessions = request("GET", "/api/v2/sessions")
+            self.assertEqual(status, 200)
+            self.assertTrue(any(item["session_id"] == chat_session["session_id"] for item in chat_sessions))
+            with self.assertRaises(urllib.error.HTTPError) as task_without_project:
+                request("POST", "/api/v2/sessions", {"title": "不应创建", "mode": "task"})
+            self.assertEqual(task_without_project.exception.code, 400)
+            status, project = request("POST", "/api/v2/projects", {"name": "可删除项目"})
+            self.assertEqual(status, 201)
+            status, project_session = request("POST", f"/api/v2/projects/{project['project_id']}/sessions", {"title": "会话"})
+            self.assertEqual(status, 201)
+            status, deleted = request("DELETE", f"/api/v2/projects/{project['project_id']}")
+            self.assertEqual(status, 200)
+            self.assertEqual(deleted["project_id"], project["project_id"])
+            with self.assertRaises(urllib.error.HTTPError) as deleted_session:
+                request("GET", f"/api/v2/sessions/{project_session['session_id']}")
+            self.assertEqual(deleted_session.exception.code, 404)
+
             with urllib.request.urlopen(base + "/", timeout=5) as response:
                 page = response.read().decode()
             self.assertIn("Workloop 工作台", page)
@@ -633,22 +869,70 @@ class WorkbenchDomainTest(unittest.TestCase):
             self.assertEqual(page.count('name="providerProtocol"'), 2)
             self.assertIn('id="providerProtocolOpenAI" type="radio"', page)
             self.assertIn('id="providerProtocolClaude" type="radio"', page)
+            self.assertIn('id="modelAlias" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]*"', page)
+            self.assertIn('id="modelProvider" required></select>', page)
+            self.assertNotIn('id="modelProvider" required disabled', page)
             # 物理模型下拉框不能带 required：发现成功时它会停在空占位项，
             # 原生校验会静默拦截提交，导致无法添加模型。校验交由 JS 守卫完成。
             self.assertIn('<select id="modelName">', page)
             self.assertNotIn('id="modelName" required', page)
             self.assertIn('id="refreshModelList"', page)
+            self.assertIn('id="modelSelect" aria-label="当前对话模型"', page)
+            self.assertIn('id="deleteProject"', page)
+            self.assertIn('id="projectSubmit"', page)
+            self.assertIn('id="attachFiles"', page)
+            self.assertIn('id="toggleToolMenu"', page)
+            self.assertIn('id="composerFileInput" type="file" multiple', page)
+            self.assertIn('id="toolMenu" role="dialog"', page)
+            self.assertIn('data-composer-tool-choice', page)
+            self.assertNotIn('id="resourceHint"', page)
+            self.assertNotIn('id="modelLabel"', page)
+            self.assertLess(page.index('<div class="model-name-field">'), page.index('id="modelAlias"'))
             self.assertIn('id="confirmDialog"', page)
             self.assertNotIn("经典控制台", page)
+
+            with urllib.request.urlopen(base + "/static/workbench.css", timeout=5) as response:
+                workbench_styles = response.read().decode()
+            self.assertIn('.management-body:has(> .management-panel[data-management-panel="models"]:not(.hidden))', workbench_styles)
+            self.assertIn('.management-panel[data-management-panel="models"] .provider-library', workbench_styles)
+            self.assertIn('.management-panel[data-management-panel="models"] > .provider-manager > .editor-form', workbench_styles)
+            self.assertIn('overscroll-behavior: contain;', workbench_styles)
+            self.assertIn('scrollbar-gutter: stable;', workbench_styles)
+            self.assertIn('.provider-editor .form-actions', workbench_styles)
+            self.assertIn('bottom: 0;', workbench_styles)
+            self.assertIn('[hidden] {', workbench_styles)
 
             with urllib.request.urlopen(base + "/static/workbench.js", timeout=5) as response:
                 workbench_script = response.read().decode()
             self.assertNotIn("confirm(`", workbench_script)
+            self.assertIn("const MODEL_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/", workbench_script)
+            self.assertIn('const defaultModelAlias = modelName =>', workbench_script)
+            self.assertIn('.trim().split("/").filter(Boolean).pop()', workbench_script)
+            self.assertIn('.replace(/[^A-Za-z0-9_.-]+/g, "-")', workbench_script)
+            self.assertIn('modelAliasAutoValue = item?.alias || ""', workbench_script)
+            self.assertIn('throw new Error("显示名称只能包含字母、数字、点号、连字符和下划线")', workbench_script)
             self.assertIn('throw new Error("请选择或输入物理模型名")', workbench_script)
+            self.assertIn('let modelDiscoverySequence = 0', workbench_script)
+            self.assertIn('$("modelProvider").addEventListener("change"', workbench_script)
             self.assertIn("window.workloopConfirm = confirmAction", workbench_script)
+            self.assertIn("async function deleteWorkflow()", workbench_script)
+            self.assertIn('const button = $("deleteWorkflow")', workbench_script)
+            self.assertIn('$("deleteWorkflow").addEventListener("click", deleteWorkflow)', workbench_script)
             self.assertIn('if (savedTheme === "dark")', workbench_script)
             self.assertIn("data-delete-session", workbench_script)
+            self.assertIn("data-delete-project", workbench_script)
+            self.assertIn("async function deleteProject", workbench_script)
             self.assertIn("/api/v2/sessions/${encodeURIComponent(sessionId)}", workbench_script)
+            self.assertIn('const CHAT_PROJECT_ID = "CHAT"', workbench_script)
+            self.assertIn('const cleanAssistantContent = value =>', workbench_script)
+            self.assertIn('cleanAssistantContent(message.content)', workbench_script)
+            self.assertIn("data-chat-home", workbench_script)
+            self.assertIn('sessionPath = pending.projectId === CHAT_PROJECT_ID', workbench_script)
+            self.assertIn('model_alias: pending.modelAlias', workbench_script)
+            self.assertIn('const COMPOSER_TOOL_OPTIONS =', workbench_script)
+            self.assertIn('readComposerAttachments', workbench_script)
+            self.assertIn('pending.tools', workbench_script)
+            self.assertIn('function renderModelPicker()', workbench_script)
 
             with urllib.request.urlopen(base + "/static/collaboration.js", timeout=5) as response:
                 collaboration_script = response.read().decode()
@@ -672,6 +956,14 @@ class WorkbenchDomainTest(unittest.TestCase):
             request("POST", "/api/v2/resources/providers", {
                 "provider_id": "vendor", "label": "Vendor", "base_url": "https://example.test/v1",
             })
+            status, dotted_model = request("POST", "/api/v2/resources/models", {
+                "alias": "qwen3.8-plus", "provider_id": "vendor", "model": "qwen3.8-plus",
+            })
+            self.assertEqual(status, 201)
+            self.assertEqual(dotted_model["alias"], "qwen3.8-plus")
+            status, deleted_dotted = request("DELETE", "/api/v2/resources/models/qwen3.8-plus")
+            self.assertEqual(status, 200)
+            self.assertEqual(deleted_dotted["deleted"], "qwen3.8-plus")
             request("POST", "/api/v2/resources/models", {
                 "alias": "secure-model", "provider_id": "vendor", "model": "secure-1",
             })

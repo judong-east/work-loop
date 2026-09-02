@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from app.domain.node_catalog import NodeCatalog
 from app.domain.node_registry import NodeRegistry
 from app.domain.orchestrator import DagOrchestrator, ModelGateway, OrchestrationEvent
 from app.domain.strategy_presets import get_strategy_preset, infer_strategy, list_strategy_presets
+from app.domain.tooling import SEARCH_TOOLS
 from app.domain.workflow_catalog import WorkflowCatalog
 from app.infrastructure.json_repository import JsonCollection
 from app.infrastructure.model_gateway import OpenAICompatibleGateway
@@ -39,6 +41,95 @@ from app.infrastructure.resource_center import ResourceCenter
 from app.infrastructure.zvec_grep import ZvecGrepClient
 from app.infrastructure.workspace_runtime import WorkspaceRuntime
 from .model_invocation import ModelInvocationService
+
+
+CHAT_PROJECT_ID = "CHAT"
+MAX_CHAT_ATTACHMENTS = 5
+MAX_CHAT_ATTACHMENT_BYTES = 200_000
+
+
+def _normalize_assistant_text(value: Any) -> str:
+    """Remove provider-added blank lines around an assistant response.
+
+    Several compatible endpoints prefix otherwise valid answers with one or
+    more newlines.  Those newlines are meaningful to ``white-space: pre-wrap``
+    in the chat UI, where they create an empty block before the first visible
+    line.  Only line-break characters at the boundaries are removed so
+    indentation and intentional blank lines inside the answer stay intact.
+    """
+
+    return str(value).strip("\r\n")
+
+
+def _normalize_chat_tools(value: Any) -> list[str] | None:
+    """Validate a per-message local-tool override.
+
+    ``None`` deliberately means "use the project's local-search policy", while
+    an empty list is a meaningful override that disables tools for this turn.
+    Keeping that distinction lets the composer offer a predictable per-message
+    control without changing project settings behind the user's back.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("tools must be an array")
+    names: list[str] = []
+    for raw in value:
+        name = str(raw).strip()
+        if not name or name not in SEARCH_TOOLS:
+            raise ValueError(f"unknown chat tool: {name or raw}")
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _normalize_chat_attachments(value: Any) -> list[dict[str, Any]]:
+    """Normalize bounded text attachments received from the web composer."""
+
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("attachments must be an array")
+    if len(value) > MAX_CHAT_ATTACHMENTS:
+        raise ValueError(f"最多支持 {MAX_CHAT_ATTACHMENTS} 个附件")
+
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("attachment must be an object")
+        raw_name = str(item.get("name", "")).strip().replace("\\", "/")
+        name = raw_name.rsplit("/", 1)[-1][:240]
+        if not name:
+            raise ValueError("attachment name is required")
+        mime_type = str(item.get("mime_type", "application/octet-stream")).strip()[:120]
+        content = str(item.get("content", ""))
+        try:
+            size = int(item.get("size", len(content.encode("utf-8"))))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"invalid attachment size: {name}") from error
+        encoded_size = len(content.encode("utf-8"))
+        if size < 0 or size > MAX_CHAT_ATTACHMENT_BYTES or encoded_size > MAX_CHAT_ATTACHMENT_BYTES:
+            raise ValueError(f"附件 {name} 超过 {MAX_CHAT_ATTACHMENT_BYTES // 1000} KB 限制")
+        normalized.append({
+            "name": name,
+            "mime_type": mime_type or "application/octet-stream",
+            "size": size,
+            "content": content,
+        })
+    return normalized
+
+
+def _chat_request_with_attachments(content: str, attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return content
+    blocks: list[str] = []
+    for item in attachments:
+        if item["content"]:
+            blocks.append(f"\n\n[附件：{item['name']}]\n{item['content']}")
+        else:
+            blocks.append(f"\n\n[附件：{item['name']}（未读取文本内容）]")
+    return content + "".join(blocks)
 
 
 class WorkbenchService:
@@ -165,6 +256,41 @@ class WorkbenchService:
     def get_project(self, project_id: str) -> Project:
         return self.projects.get(project_id)
 
+    def delete_project(self, project_id: str) -> dict[str, Any]:
+        """Delete a project and its conversation sessions.
+
+        Project deletion is intentionally explicit and scoped to persisted
+        project-owned records.  Workspace files are never touched.  A running
+        session is rejected so an in-flight model request cannot lose its
+        persistence target halfway through a response.
+        """
+
+        self.get_project(project_id)
+        sessions = [item for item in self.sessions.list() if item.project_id == project_id]
+        running = [item.session_id for item in sessions if item.status == "running"]
+        if running:
+            raise ValueError("项目仍有正在运行的会话，请稍后再删除。")
+        for session in sessions:
+            self.sessions.delete(session.session_id)
+        self.projects.delete(project_id)
+        return {"project_id": project_id, "deleted_sessions": len(sessions)}
+
+    def create_chat_session(self, title: str = "新的会话") -> Session:
+        """Create a persisted conversation that does not belong to a project.
+
+        Chat-only sessions still use the normal session and model-invocation
+        pipeline, but carry a private synthetic project context so the rest of
+        the runtime can keep its existing contracts.  The synthetic project is
+        never written to the project collection or shown in the project list.
+        """
+        session = Session.create(CHAT_PROJECT_ID, title, SessionMode.CHAT)
+        project = self._chat_project()
+        session.context = session.context.merge({"inputs": {
+            "project": self._project_context(project),
+            "workspace": self.workspace_runtime.snapshot(project),
+        }})
+        return self.sessions.save(session, session.session_id)
+
     def update_project(self, project_id: str, value: dict[str, Any]) -> Project:
         current = self.get_project(project_id)
         default_model = str(value.get("default_model", current.default_model))
@@ -268,36 +394,71 @@ class WorkbenchService:
             raise ValueError("协同任务会话由任务记录管理，不能在会话列表中删除。")
         self.sessions.delete(session_id)
 
-    def send_message(self, session_id: str, content: str) -> Session:
+    def send_message(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        model_alias: str | None = None,
+        tools: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> Session:
         session = self.get_session(session_id)
         if not content.strip():
             raise ValueError("message cannot be empty")
-        session.add_message("user", content.strip())
-        project = self.get_project(session.project_id)
+        selected_tools = _normalize_chat_tools(tools)
+        normalized_attachments = _normalize_chat_attachments(attachments)
+        if session.mode is not SessionMode.CHAT and (selected_tools is not None or normalized_attachments):
+            raise ValueError("工具和附件仅支持普通对话")
+        normalized = content.strip()
+        attachment_meta = [
+            {key: item[key] for key in ("name", "mime_type", "size")}
+            for item in normalized_attachments
+        ]
+        session.add_message(
+            "user",
+            normalized,
+            metadata={"attachments": attachment_meta} if attachment_meta else None,
+        )
+        project = self._session_project(session)
+        selected_model = self._message_model_alias(session, model_alias)
         session.context = session.context.merge({"inputs": {
-            "request": content.strip(),
+            "request": _chat_request_with_attachments(normalized, normalized_attachments),
             "project": self._project_context(project),
             "workspace": self.workspace_runtime.snapshot(project),
+            "model_alias": selected_model,
         }})
         if session.mode is SessionMode.CHAT:
             node = WorkflowNode(
-                "chat", "tool", model_alias=project.default_model,
+                "chat", "tool", model_alias=selected_model or project.default_model,
                 prompt_template="直接回答用户请求；result 字段必须是可展示给用户的完整文本。",
+                config={"tools": selected_tools} if selected_tools is not None else {},
             )
+            started = time.monotonic()
             output = self.model_invocation.invoke(
                 session=session,
                 node=node,
                 context=session.context,
-                model_alias=project.default_model,
+                model_alias=selected_model,
                 output_fields=("result",),
             )
+            elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+            model_name = str(output.get("model") or selected_model or project.default_model)
             session.add_message(
-                "assistant", str(output.get("result", output)),
-                metadata={"mode": "chat", "model": output.get("model", project.default_model)},
+                "assistant", _normalize_assistant_text(output.get("result", output)),
+                metadata={"mode": "chat", "model": model_name, "elapsed_ms": elapsed_ms},
             )
         return self.sessions.save(session, session.session_id)
 
-    def send_message_stream(self, session_id: str, content: str) -> Iterator[dict[str, Any]]:
+    def send_message_stream(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        model_alias: str | None = None,
+        tools: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Return an iterator for a chat SSE session without changing the JSON API.
 
         The user message and running state are persisted before model work
@@ -311,32 +472,46 @@ class WorkbenchService:
             raise ValueError("message cannot be empty")
         if session.mode is not SessionMode.CHAT:
             raise ValueError("流式消息接口只支持普通对话会话")
+        selected_tools = _normalize_chat_tools(tools)
+        normalized_attachments = _normalize_chat_attachments(attachments)
         normalized = content.strip()
-        session.add_message("user", normalized)
-        project = self.get_project(session.project_id)
+        attachment_meta = [
+            {key: item[key] for key in ("name", "mime_type", "size")}
+            for item in normalized_attachments
+        ]
+        session.add_message(
+            "user",
+            normalized,
+            metadata={"attachments": attachment_meta} if attachment_meta else None,
+        )
+        project = self._session_project(session)
+        selected_model = self._message_model_alias(session, model_alias)
         session.context = session.context.merge({"inputs": {
-            "request": normalized,
+            "request": _chat_request_with_attachments(normalized, normalized_attachments),
             "project": self._project_context(project),
             "workspace": self.workspace_runtime.snapshot(project),
+            "model_alias": selected_model,
         }})
         session.status = "running"
         self.sessions.save(session, session.session_id)
 
         node = WorkflowNode(
-            "chat", "tool", model_alias=project.default_model,
+            "chat", "tool", model_alias=selected_model or project.default_model,
             prompt_template="直接回答用户请求；输出可直接展示给用户的完整文本。",
+            config={"tools": selected_tools} if selected_tools is not None else {},
         )
 
         def events() -> Iterator[dict[str, Any]]:
             assistant_parts: list[str] = []
             done = False
+            started = time.monotonic()
             try:
                 yield {"type": "start", "session_id": session.session_id}
                 for event in self.model_invocation.invoke_stream(
                     session=session,
                     node=node,
                     context=session.context,
-                    model_alias=project.default_model,
+                    model_alias=selected_model,
                     output_fields=("result",),
                 ):
                     event_type = str(event.get("type", ""))
@@ -352,11 +527,13 @@ class WorkbenchService:
                     if not isinstance(output, dict):
                         output = {"result": output}
                     result = output.get("result", "")
-                    assistant_text = str(result if result != "" else "".join(assistant_parts))
+                    assistant_text = _normalize_assistant_text(result if result != "" else "".join(assistant_parts))
+                    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+                    model_name = str(output.get("model") or selected_model or project.default_model)
                     session.add_message(
                         "assistant",
                         assistant_text,
-                        metadata={"mode": "chat", "model": output.get("model", project.default_model)},
+                        metadata={"mode": "chat", "model": model_name, "elapsed_ms": elapsed_ms},
                     )
                     session.status = "idle"
                     saved = self.sessions.save(session, session.session_id)
@@ -364,7 +541,8 @@ class WorkbenchService:
                     yield {
                         "type": "done",
                         "output": output,
-                        "model": output.get("model", project.default_model),
+                        "model": model_name,
+                        "elapsed_ms": elapsed_ms,
                         "session": saved.to_dict(),
                     }
                 if not done:
@@ -703,3 +881,27 @@ class WorkbenchService:
             "validation_commands": [list(command) for command in project.validation_commands],
             "runtime_policy": dict(project.runtime_policy),
         }
+
+    @staticmethod
+    def _chat_project() -> Project:
+        return Project(project_id=CHAT_PROJECT_ID, name="普通对话")
+
+    def _session_project(self, session: Session) -> Project:
+        if session.project_id == CHAT_PROJECT_ID:
+            return self._chat_project()
+        return self.get_project(session.project_id)
+
+    def _message_model_alias(
+        self,
+        session: Session,
+        model_alias: str | None,
+    ) -> str:
+        """Resolve an optional per-conversation model without changing projects."""
+
+        if model_alias is None:
+            selected = str(session.context.inputs.get("model_alias", "")).strip()
+        else:
+            selected = str(model_alias).strip()
+        if selected:
+            self.validate_model_alias(selected)
+        return selected
